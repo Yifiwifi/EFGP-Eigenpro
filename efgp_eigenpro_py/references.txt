@@ -1,0 +1,13 @@
+EFGP and related:
+- Greengard, Barnett, Rachh. Equispaced Fourier GP regression. arxiv:2210.10210
+- Barnett, Greengard, Rachh. Uniform error estimates. arxiv:2305.11065
+- finufft library docs and examples (python bindings).
+
+EigenPro:
+- EigenPro2: https://github.com/EigenPro/EigenPro-pytorch
+- EigenPro3: https://github.com/EigenPro/EigenPro3
+- EigenPro paper and spectral preconditioning details.
+
+Matrix-free eigensolvers:
+- scipy.sparse.linalg.eigsh (Lanczos) docs.
+- randomized SVD methods if eigsh is too slow.
