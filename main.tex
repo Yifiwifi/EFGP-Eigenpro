@@ -1,0 +1,415 @@
+\documentclass{article}
+
+% Language setting
+% Replace `english' with e.g. `spanish' to change the document language
+\usepackage[english]{babel}
+
+% Set page size and margins
+% Replace `letterpaper' with `a4paper' for UK/EU standard size
+\usepackage[letterpaper,top=2cm,bottom=2cm,left=3cm,right=3cm,marginparwidth=1.75cm]{geometry}
+
+% Useful packages
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{amssymb}
+\usepackage[colorlinks=true, allcolors=blue]{hyperref}
+\begin{document}
+\section{Problem setup and motivation}
+
+We consider kernel ridge regression (KRR) with a translation-invariant kernel
+\[
+k(x,x') = k(x-x'), \qquad x,x' \in D \subset \mathbb{R}^d,
+\]
+where \(d\) is small and the dataset size \(N\) is extremely large, potentially on the order of \(10^9\).
+Given training data \(\{(x_i,y_i)\}_{i=1}^N\), the KRR objective is
+\[
+\min_{f \in \mathcal{H}_k}
+\frac{1}{N}\sum_{i=1}^N \bigl(f(x_i)-y_i\bigr)^2 + \lambda \|f\|_{\mathcal{H}_k}^2.
+\]
+By the representer theorem, the solution has the form
+\[
+f(x)=\sum_{i=1}^N \alpha_i k(x,x_i),
+\]
+and the coefficient vector \(\alpha\in\mathbb{R}^N\) solves
+\[
+(K+\lambda I)\alpha = y,
+\]
+where \(K_{ij}=k(x_i,x_j)\).
+
+
+
+For billion-scale data, the direct function-space formulation above is not practical. Even iterative methods become difficult because:
+\begin{enumerate}
+    \item the kernel matrix \(K\) is dense and cannot be formed explicitly;
+    \item each matrix-vector multiplication with \(K\) is expensive unless special structure is exploited;
+    \item even if matrix-vector multiplication is accelerated, the iteration count may remain large due to poor conditioning of \(K\).
+\end{enumerate}
+
+Our goal is therefore to design a method that simultaneously achieves:
+\begin{enumerate}
+    \item \emph{\(N\)-independent per-iteration cost}, after one preprocessing pass through the data;
+    \item \emph{reduced iteration count}, by flattening the top spectrum of the linear system;
+    \item \emph{controlled approximation error}, relative to the original KRR solution.
+\end{enumerate}
+
+The proposed strategy combines two ideas:
+\begin{itemize}
+    \item the \emph{EFGP} Fourier weight-space formulation for translation-invariant kernels, which converts the original \(N\times N\) system into a structured \(M\times M\) system with FFT-accelerated matrix-vector products;
+    \item the \emph{EigenPro} spectral preconditioning principle, which rescales the top eigendirections to reduce the effective condition number and enlarge the stable step size so reduce iteration count.
+\end{itemize}
+
+\section{Fourier weight-space surrogate}
+
+\subsection{EFGP approximation}
+
+For translation-invariant kernels, one has the inverse Fourier representation
+\[
+k(z)=\int_{\mathbb{R}^d} \widehat{k}(\xi)e^{2\pi i \langle \xi,z\rangle}\,d\xi.
+\]
+The EFGP idea is to discretize this integral on an equispaced frequency grid
+\[
+J_m=\{-m,-m+1,\dots,m\}^d,
+\qquad \xi_j = h j,
+\]
+yielding the approximation
+\[
+\widetilde{k}(x-x')
+=
+\sum_{j\in J_m} h^d \widehat{k}(hj)e^{2\pi i h \langle j,x-x'\rangle}.
+\]
+Equivalently,
+\[
+\widetilde{k}(x,x')
+=
+\sum_{j\in J_m} \phi_j(x)\overline{\phi_j(x')},
+\qquad
+\phi_j(x)=\sqrt{h^d \widehat{k}(hj)}\,e^{2\pi i h \langle j,x\rangle}.
+\]
+Hence the approximate kernel matrix factorizes as
+\[
+\widetilde{K}=\Phi\Phi^*, \Phi \in \mathbb{C}^{N\times M}
+\]
+where
+\[
+\Phi_{n,j}=\phi_j(x_n),
+\qquad
+M=(2m+1)^d.
+\]
+So under this setting, \(d\) should not be too large
+
+\subsection{Weight-space KRR system}
+
+Replacing \(K\) by \(\widetilde{K}=\Phi\Phi^*\), the approximate KRR system becomes
+\[
+(\widetilde{K}+\lambda I)\widetilde{\alpha}=y.
+\]
+Using the standard dual-to-weight-space transformation, define
+\[
+\beta=\Phi^* \widetilde{\alpha}.
+\]
+Then \(\beta\in\mathbb{C}^M\) solves the weight-space system
+\[
+A\beta=b, 
+\qquad
+A:=\Phi^*\Phi+\lambda I,
+\qquad
+b:=\Phi^*y,
+\qquad (\Phi^*\Phi+\lambda I)\beta=\Phi^*y
+\]
+Once \(\beta\) is computed, the predictor is
+\[
+\widetilde{f}(x)=\sum_{j\in J_m} \beta_j \phi_j(x)=\phi(x)^*\beta.
+\]
+
+
+\section{Structured matrix-vector multiplication}
+
+\subsection{Toeplitz structure}
+
+Write
+\[
+\Phi=F D,
+\qquad
+D_{jj}=\sqrt{h^d\widehat{k}(hj)},
+\qquad
+F_{n,j}=e^{2\pi i h\langle j,x_n\rangle}.
+\]
+Then
+\[
+A = D(F^*F)D + \lambda I.
+\]
+A key observation is that
+\[
+(F^*F)_{j,j'}
+=
+\sum_{n=1}^N e^{2\pi i h\langle j-j',x_n\rangle},
+\]
+so this entry depends only on the difference \(j-j'\). Thus \(F^*F\) is a \(d\)-dimensional Toeplitz matrix.
+
+
+Define
+\[
+v_\ell=\sum_{n=1}^N e^{2\pi i h\langle \ell,x_n\rangle},
+\qquad
+\ell\in J_{2m}.
+\]
+Then
+\[
+[(F^*F)u]_j = \sum_{j'\in J_m} v_{j-j'}u_{j'},
+\]
+which is a non-periodic discrete convolution.
+
+\subsection{Precomputation via NUFFT}
+
+The convolution kernel \(v\) and the right-hand side \(b=\Phi^*y\) are computed using type-1 NUFFT:
+\[
+v_\ell=\sum_{n=1}^N e^{2\pi i h\langle \ell,x_n\rangle},
+\qquad
+b_j=\sum_{n=1}^N \overline{\phi_j(x_n)}\, y_n.
+\]
+This costs
+\[
+O(N+M\log M)
+\]
+and is performed only once.
+
+\section{Why EFGP alone is not enough}
+
+Although EFGP removes the dependence of per-iteration cost on \(N\), it does not automatically solve the conditioning problem. Indeed, those papers show that when the Fourier surrogate is accurate, the weight-space condition number is still comparable to that of the original system with sharp bound
+\[
+\kappa(A) \leq N/\lambda+1
+\]
+in the low-noise or small-regularization regime. Thus, EFGP addresses the \emph{cost per iteration}, but not the \emph{number of iterations}. For billion-scale data, this remaining bottleneck becomes dominant.
+
+\section{EigenPro-style spectral preconditioning in weight space}
+\subsection{Motivation from EigenPro}
+
+EigenPro was originally developed for kernel interpolation / kernel machines, where mini-batch SGD saturates at a critical batch size
+\[
+m^*(k)\approx \frac{\beta(K)}{\lambda_1(K)},
+\]
+with \(\lambda_1(K)\) the largest eigenvalue and \(\beta(K)=\max_i k(x_i,x_i)\). (For mathematical simplicity, we leave aside the problem of parallel capacity and resource memory, which can be checked in[Ma 2019]). The key idea is to flatten the top spectrum by rescaling the first few eigendirections. This increases the stable step size and reduces the number of iterations.
+
+
+In our setting, maybe the exact same spectral principle can be applied to the EFGP weight-space system. The only difference is that the matrix being preconditioned is now
+\[
+A=\Phi^*\Phi+\lambda I
+\]
+rather than the original kernel matrix \(K\).
+
+
+\subsection{Top-eigenspace approximation}
+Suppose we can estimate top eigenpairs
+\[
+(\theta_i,u_i),\qquad i=1,\dots,q,
+\]
+for the weight-space matrix \(A\). I need to check the code and methods later.
+
+\subsection{Weight-space EigenPro preconditioner}
+
+Let
+\[
+U_q=[u_1,\dots,u_q],\qquad
+\Theta_q=\mathrm{diag}(\theta_1,\dots,\theta_q),
+\qquad
+\mu\approx \theta_{q+1}.
+\]
+Define the spectral preconditioner
+\[
+P_q
+=
+I-U_q\Bigl(I-\mu \Theta_q^{-1}\Bigr)U_q^*.
+\]
+Equivalently,
+\[
+P_q u
+=
+u-\sum_{i=1}^q \left(1-\frac{\mu}{\theta_i}\right)\langle u_i,u\rangle u_i.
+\]
+This is the direct finite-dimensional analogue of the EigenPro operator preconditioner.
+
+\section{Proposed algorithm}
+
+\subsection{Algorithmic idea}
+
+The overall algorithm has two stages:
+\begin{enumerate}
+    \item \textbf{EFGP stage:} build a structured Fourier weight-space surrogate so that all matrix-vector products cost \(O(M\log M)\) and no longer depend on \(N\);
+    \item \textbf{EigenPro stage:} estimate the dominant weight-space eigenspace and flatten the top spectrum to reduce iteration count.
+\end{enumerate}
+
+\subsection{Algorithm outline}
+
+\paragraph{Input.}
+Training data \(\{(x_i,y_i)\}_{i=1}^N\) with \(x_i\in\mathbb{R}^d\), a translation-invariant kernel \(k\), regularization \(\lambda>0\), Fourier tolerance \(\varepsilon\), top-eigenspace rank \(q\), and stopping tolerance \(\rho\).
+
+\paragraph{Output.}
+Approximate predictor
+\[
+\widetilde{f}(x)=\sum_{j\in J_m}\beta_j \phi_j(x).
+\]
+
+\begin{enumerate}
+    \item \textbf{Choose Fourier discretization parameters \((h,m)\).}  
+    Use the error formulas from [barnett2023uniform] to choose the grid spacing \(h>0\) and the frequency cutoff \(m\in\mathbb{N}\). Define
+    \[
+    J_m:=\{-m,-m+1,\dots,m\}^d,
+    \qquad
+    M:=|J_m|=(2m+1)^d.
+    \]
+
+    \item \textbf{Construct the Fourier basis and weight-space system.}  
+    Define the basis functions
+    \[
+    \phi_j(x)=\sqrt{h^d\widehat{k}(hj)}\,e^{2\pi i h\langle j,x\rangle},
+    \qquad j\in J_m.
+    \]
+    Let the design matrix
+    \[
+    \Phi\in\mathbb{C}^{N\times M},
+    \qquad
+    \Phi_{n,j}=\phi_j(x_n),
+    \]
+    where rows are indexed by \(n=1,\dots,N\) and columns by \(j\in J_m\).  
+    The weight-space unknown is
+    \[
+    \beta\in\mathbb{C}^{M}.
+    \]
+    Define the system matrix and right-hand side
+    \[
+    A:=\Phi^*\Phi+\lambda I_M \in \mathbb{C}^{M\times M},
+    \qquad
+    b:=\Phi^*y\in\mathbb{C}^{M},
+    \]
+    where \(y=(y_1,\dots,y_N)^\top\in\mathbb{R}^N\) and \(I_M\in\mathbb{R}^{M\times M}\).
+
+    \item \textbf{Precompute the Toeplitz kernel and right-hand side.}  
+    Define
+    \[
+    J_{2m}:=\{-2m,-2m+1,\dots,2m\}^d,
+    \qquad
+    M_{2}:=|J_{2m}|=(4m+1)^d.
+    \]
+    Compute the Toeplitz kernel vector
+    \[
+    v\in\mathbb{C}^{M_2},
+    \qquad
+    v_\ell=\sum_{n=1}^N e^{2\pi i h\langle \ell,x_n\rangle},
+    \qquad \ell\in J_{2m},
+    \]
+    and the right-hand side
+    \[
+    b\in\mathbb{C}^M,
+    \qquad
+    b_j=\sum_{n=1}^N \overline{\phi_j(x_n)}\,y_n,
+    \qquad j\in J_m,
+    \]
+    using type-1 NUFFT.  
+    Precompute
+    \[
+    \widehat v \in \mathbb{C}^{M_2},
+    \]
+    the \(d\)-dimensional FFT of the zero-padded Toeplitz kernel vector \(v\).
+
+    \item \textbf{Build a fast matrix-vector oracle.}  
+    Define the diagonal matrix
+    \[
+    D\in\mathbb{R}^{M\times M},
+    \qquad
+    D_{jj}=\sqrt{h^d\widehat{k}(hj)},
+    \]
+    and the Fourier feature matrix
+    \[
+    F\in\mathbb{C}^{N\times M},
+    \qquad
+    F_{n,j}=e^{2\pi i h\langle j,x_n\rangle},
+    \]
+    so that \(\Phi=FD\).  
+    For any vector
+    \[
+    u\in\mathbb{C}^M,
+    \]
+    compute
+    \[
+    Au = D(F^*F)(Du)+\lambda u,
+    \]
+    where
+    \[
+    F^*F\in\mathbb{C}^{M\times M}.
+    \]
+    This multiplication is carried out using two FFTs and diagonal multiplications, in \(O(M\log M)\).
+
+    \item \textbf{Estimate the top eigenspace of \(A\).}  
+    Obtain approximate top eigenpairs
+    \[
+    (\theta_i,u_i),\qquad i=1,\dots,q,
+    \]
+    where
+    \[
+    \theta_i\in\mathbb{R},\qquad u_i\in\mathbb{C}^M,\qquad \|u_i\|_2=1.
+    \]
+    Stack them into
+    \[
+    U_q:=[u_1,\dots,u_q]\in\mathbb{C}^{M\times q},
+    \qquad
+    \Theta_q:=\mathrm{diag}(\theta_1,\dots,\theta_q)\in\mathbb{R}^{q\times q}.
+    \]
+
+    \item \textbf{Construct the EigenPro-style preconditioner.}  
+    Set
+    \[
+    P_q
+    :=
+    I_M-U_q\Bigl(I_q-\mu\Theta_q^{-1}\Bigr)U_q^*
+    \in\mathbb{C}^{M\times M},
+    \qquad
+    \mu=\theta_{q+1}\ \text{or an approximation to it},
+    \]
+    where \(I_q\in\mathbb{R}^{q\times q}\) is the identity matrix.  
+    Then, ideally,
+    \[
+    \mathrm{spec}(P_qA)=\{\mu,\dots,\mu,\theta_{q+1},\dots,\theta_M\},
+    \]
+    i.e. the first \(q\) eigenvalues are flattened to \(\mu\).
+
+    \item \textbf{Use preconditioning before solving the system.}  
+    Two options are natural:
+    \begin{itemize}
+        \item \emph{Preconditioned Richardson / gradient iteration:}
+        \[
+        \beta_{t+1}=\beta_t-\eta P_q(A\beta_t-b),
+        \qquad
+        \beta_t\in\mathbb{C}^M.
+        \]
+        \item \emph{Preconditioned conjugate gradient:} use \(P_q\in\mathbb{C}^{M\times M}\) as a spectral preconditioner within PCG applied to
+        \[
+        A\beta=b,
+        \qquad
+        A\in\mathbb{C}^{M\times M},\ \beta,b\in\mathbb{C}^M.
+        \]
+    \end{itemize}
+    Stop when the relative residual satisfies conditions:
+
+    \item \textbf{Evaluate the predictor.}  
+    For target points \(\{x_\ell^*\}_{\ell=1}^{N_{\mathrm{test}}}\), compute
+    \[
+    \widetilde{f}(x_\ell^*)=\sum_{j\in J_m}\beta_j\phi_j(x_\ell^*),
+    \qquad \ell=1,\dots,N_{\mathrm{test}},
+    \]
+    where
+    \[
+    \beta\in\mathbb{C}^{M}.
+    \]
+    This batched evaluation is performed using type-2 NUFFT.
+\end{enumerate}
+
+\section{Problem to be solved}
+\begin{enumerate}
+    \item How to estimate the top-k eigen pairs
+    \item Eigenpro 3.0(Subsampling-based Approximation, Delayed Projections)
+    \item (Multi-)GPU, mini-batch 
+    \item Parameter estimation and selection; stepsize\(\mu\) etc
+    \item Small d
+\end{enumerate}
+
+\end{document}
