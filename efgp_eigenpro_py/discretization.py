@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Tuple
 
+import math
 import numpy as np
 
 from .kernels import KernelSpec
@@ -44,8 +45,8 @@ def choose_grid_params(
             rl2sq = (
                 (2 * nu / np.pi / l**2) ** (dim / 2)
                 * kernel.khat(0.0) ** 2 / 2
-                * np.math.gamma(dim / 2 + 2 * nu)
-                / np.math.gamma(dim + 2 * nu)
+                * math.gamma(dim / 2 + 2 * nu)
+                / math.gamma(dim + 2 * nu)
                 * 2 ** (-dim / 2)
             )
             eps_use = eps * np.sqrt(rl2sq)
