@@ -1,0 +1,89 @@
+Directory for RLCM method of Chen-Stein, for speciic kernels.
+
+Jie Chen & Michael L. Stein (2021): Linear-Cost Covariance Functions
+for Gaussian Random Fields, Journal of the American Statistical Association
+DOI: 10.1080/01621459.2021.1919122
+
+Their code is in the git submodule RLCM (their package name; crucial to use
+my ahbarnett fork which has ahb new executables that MATLAB wraps).
+("RLCF" was a mistaken name?)
+
+To build it (compiles C++ stuff):
+./buildit.sh
+
+Test with RLCM from MATLAB.
+
+
+
+...... Dev notes:
+If you need to update the git submodule do:
+cd RLCM
+git pull origin master
+cd ..
+Then copy RLCM/ahb_try/RLCM.m to this directory, then modify
+the path to executables, on the following line, to:
+dir = [h '/RLCM/app/KRR'];     % app dir of ahb-hacked RLCM executables
+......
+
+
+
+
+--------- lesser scribbles/notes:
+
+KRR_RLCM.cpp   -> gets compiled multiple times for diff kernels, eg:
+KRR_RLCM_IsotropicGaussian_DPoint.ex
+
+SPoint vs DPoint?  S = sparse, D = dense.  Use dense.
+see: include/Matrices/DPoint.hpp   This was not documented.
+
+how to use DPoint, PointArrayFormat  & read IO:
+see: src/Misc/LibSVM_IO_binary.cpp
+
+
+How to write/read LibSVM format:  (C MEX files callable from MATLAB):
+https://github.com/cjlin1/libsvm/blob/master/matlab/libsvmwrite.c
+https://github.com/cjlin1/libsvm/blob/master/matlab/libsvmread.c
+
+txt format:
+
+<label> <index1>:<value1> <index2>:<value2> ...
+
+bin format?
+
+Note that Isotropic Laplace = Matern 1/2    so could use w/ KRR.
+
+Iso Gaussian is s * exp(-0.5 * r^2/sigma^2)
+
+run with:
+NumClasses = 1
+Budget = 0
+
+Sigma  = \ell, the lengthscale
+What is lambda ? The nugget? (ie for K(x,x) only)?
+test/Test_IsotropicGaussian.cpp
+
+SE kernel done, end April 2022, tested. good.
+
+
+............... Matern          5/5/22
+
+IsotropicMatern mKernel(s, nu, ell);
+//                     r^nu * besselk(nu,r)
+//     phi(x,y) = s * ----------------------
+//                     2^(nu-1) * gamma(nu)
+// 
+// where r is the elliptical radius
+// 
+//     r = sqrt[2*nu] * sqrt[ sum [ (x_i-y_i)^2 / ell^2 ]]
+
+ie r = (sqrt(2.nu)/ell).dist
+
+Eg check nu=1/2. We use (gp-shootout): ker = var*exp(-d/ell),  d = dist.
+RLCM uses: var -> s.    r = d/l
+r = s. sqrt(d/l) K_{1/2}(d/l) * sqrt(2) / sqrt(pi) = s.exp(-d/l)
+matches.
+
+Others seem to converge w/ opts.rank, but slowly.
+
+
+

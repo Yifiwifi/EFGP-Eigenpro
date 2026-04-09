@@ -1,0 +1,7 @@
+# Core dependencies for efgp_eigenpro_py
+numpy>=1.23,<3
+scipy>=1.10,<2
+finufft>=2.3,<3
+
+# Optional (used by benchmark memory metrics)
+psutil>=5.9,<8
