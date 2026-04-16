@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Tuple
+from typing import Callable, Iterable, List, Optional, Tuple
 
 import numpy as np
 
@@ -46,25 +46,99 @@ def richardson(
     tol: float,
     maxiter: int,
     precond: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    *,
+    relres_check_every: int = 1,
 ) -> Tuple[np.ndarray, int, float]:
     """
-    Preconditioned Richardson iteration.
+    Preconditioned Richardson iteration: x <- x - eta * P r, r <- r - eta * A P r.
+
+    Convergence needs 0 < eta < 2 / lambda_max(PA) (roughly, when PA is SPD-like);
+    a fixed eta=1.0 is often suboptimal or unstable — use ``tune_richardson_eta`` or
+    set ``eta`` from a spectral estimate for fair comparisons.
+
+    relres_check_every: if > 1, only compute ||r||/||b|| every k steps (faster for
+    timing); the returned relres is always computed on the final iterate.
     """
+    if relres_check_every < 1:
+        raise ValueError("relres_check_every must be >= 1")
+
+    norm_b = max(float(np.linalg.norm(b)), 1e-12)
     x = x0.copy()
     r = matvec(x) - b
-    relres = np.linalg.norm(r) / max(np.linalg.norm(b), 1e-12)
+    relres = float(np.linalg.norm(r) / norm_b)
     if relres <= tol or maxiter <= 0:
         return x, 0, relres
 
     for it in range(maxiter):
         z = precond(r) if precond is not None else r
+        if not np.all(np.isfinite(z)):
+            relres = float("inf")
+            return x, it, relres
         Az = matvec(z)
+        if not np.all(np.isfinite(Az)):
+            relres = float("inf")
+            return x, it + 1, relres
         x = x - eta * z
         r = r - eta * Az
-        relres = np.linalg.norm(r) / max(np.linalg.norm(b), 1e-12)
-        if relres <= tol:
+        if not np.all(np.isfinite(r)):
+            relres = float("inf")
             return x, it + 1, relres
+        step = it + 1
+        if step % relres_check_every == 0 or step == maxiter:
+            relres = float(np.linalg.norm(r) / norm_b)
+            if relres <= tol:
+                return x, step, relres
+    relres = float(np.linalg.norm(r) / norm_b)
     return x, maxiter, relres
+
+
+def tune_richardson_eta(
+    matvec: Callable[[np.ndarray], np.ndarray],
+    b: np.ndarray,
+    x0: np.ndarray,
+    etas: Iterable[float],
+    tol: float,
+    maxiter: int,
+    precond: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    *,
+    pilot_iters: Optional[int] = None,
+    relres_check_every: int = 1,
+) -> Tuple[float, List[Tuple[float, int, float]]]:
+    """
+    Pilot each candidate eta with the same iteration cap and pick the one with the
+    lowest relative residual (tie-break: fewer iterations).
+
+    If pilot_iters is set, each candidate is run for at most that many steps instead
+    of maxiter (cheap screening before a full solve).
+    """
+    etas_list: List[float] = list(etas)
+    if not etas_list:
+        raise ValueError("etas must be non-empty")
+
+    cap = maxiter if pilot_iters is None else min(int(pilot_iters), maxiter)
+    records: List[Tuple[float, int, float]] = []
+    best_eta = etas_list[0]
+    best_rel = float("inf")
+    best_it = cap + 1
+
+    for eta in etas_list:
+        _x, it, rr = richardson(
+            matvec,
+            b,
+            x0,
+            eta,
+            tol,
+            cap,
+            precond=precond,
+            relres_check_every=relres_check_every,
+        )
+        records.append((float(eta), int(it), float(rr)))
+        if rr < best_rel or (rr == best_rel and it < best_it):
+            best_rel = rr
+            best_it = it
+            best_eta = float(eta)
+
+    return best_eta, records
 
 
 if __name__ == "__main__":

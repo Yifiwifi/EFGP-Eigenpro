@@ -31,6 +31,50 @@ from .toeplitz import (
 from .kernels import KernelSpec
 
 
+def _mul_ifft_result_inplace_scale(vfft: np.ndarray, scale: float) -> None:
+    """vfft *= scale without a single huge multiply (avoids overflow warnings)."""
+    if scale == 1.0:
+        return
+    if not np.isfinite(scale):
+        vfft.fill(np.nan + 0.0j)
+        return
+    s = float(scale)
+    cap = 1e80
+    while s > cap:
+        vfft *= cap
+        s /= cap
+    while s != 0.0 and abs(s) < 1.0 / cap:
+        vfft /= cap
+        s *= cap
+    if s != 1.0 and np.isfinite(s):
+        with np.errstate(over="ignore", invalid="ignore"):
+            vfft *= s
+
+
+def _ifft_of_fft_times_Gf(af: np.ndarray, Gf: np.ndarray) -> np.ndarray:
+    """
+    Compute ifftn(af * Gf) while reducing float64 overflow in the elementwise product
+    (large ||af|| with large |Gf| modes during diverging iterates, e.g. Richardson).
+    """
+    gmax = float(np.max(np.abs(Gf)))
+    amax = float(np.max(np.abs(af)))
+    if not (np.isfinite(amax) and np.isfinite(gmax)):
+        with np.errstate(over="ignore", invalid="ignore"):
+            prod = np.multiply(af, Gf)
+            return _ifftn(prod, overwrite_x=_HAS_SCIPY_FFT)
+    finf = np.finfo(np.float64).max
+    safe = 0.25 * finf / max(gmax, 1e-300)
+    scale = 1.0
+    if amax > safe:
+        scale = amax / safe
+        np.divide(af, scale, out=af)
+    np.multiply(af, Gf, out=af)
+    vfft = _ifftn(af, overwrite_x=_HAS_SCIPY_FFT)
+    if scale != 1.0:
+        _mul_ifft_result_inplace_scale(vfft, scale)
+    return vfft
+
+
 @dataclass
 class PrecomputeState:
     grid: GridSpec
@@ -43,7 +87,6 @@ class PrecomputeState:
     toeplitz_ws_block: Optional[ToeplitzBlockWorkspace] = None
     apply_w: Optional[np.ndarray] = None
     apply_w_block: Optional[np.ndarray] = None
-    multi_index: Optional[np.ndarray] = None
     multi_index: Optional[np.ndarray] = None
 
 
@@ -359,6 +402,8 @@ class EFGPSolver:
             w = np.empty_like(v, dtype=np.result_type(v.dtype, weights.dtype, np.complex128))
             state.apply_w = w
         np.multiply(weights, v, out=w)
+        if not np.all(np.isfinite(w)):
+            return np.full(v.shape, np.nan + 0.0j, dtype=np.result_type(v.dtype, np.complex128))
 
         ws = state.toeplitz_ws
         if ws is None:
@@ -370,11 +415,14 @@ class EFGPSolver:
         mtot = state.grid.mtot
         pad[:mtot] = w
         af = _fftn(pad, overwrite_x=_HAS_SCIPY_FFT)
-        np.multiply(af, state.Gf, out=af)
-        vfft = _ifftn(af, overwrite_x=_HAS_SCIPY_FFT)
+        vfft = _ifft_of_fft_times_Gf(af, state.Gf)
         out = ws.out
         np.copyto(out, vfft[mtot - 1 :])
-        np.multiply(weights, out, out=out)
+        with np.errstate(invalid="ignore", over="ignore"):
+            np.multiply(weights, out, out=out)
+        if not np.all(np.isfinite(out)):
+            out.fill(np.nan)
+            return out
         out += self.reg_lambda * v
         return out
 
@@ -385,6 +433,8 @@ class EFGPSolver:
             w = np.empty_like(v, dtype=np.result_type(v.dtype, weights.dtype, np.complex128))
             state.apply_w = w
         np.multiply(weights, v, out=w)
+        if not np.all(np.isfinite(w)):
+            return np.full(v.shape, np.nan + 0.0j, dtype=np.result_type(v.dtype, np.complex128))
 
         ws = state.toeplitz_ws
         if ws is None:
@@ -396,12 +446,15 @@ class EFGPSolver:
         mtot = state.grid.mtot
         pad[:mtot, :mtot] = w.reshape(mtot, mtot)
         af = _fftn(pad, overwrite_x=_HAS_SCIPY_FFT)
-        np.multiply(af, state.Gf, out=af)
-        vfft = _ifftn(af, overwrite_x=_HAS_SCIPY_FFT)
+        vfft = _ifft_of_fft_times_Gf(af, state.Gf)
         out = ws.out
         t = vfft[mtot - 1 : 2 * mtot - 1, mtot - 1 : 2 * mtot - 1]
         np.copyto(out, t.reshape(-1))
-        np.multiply(weights, out, out=out)
+        with np.errstate(invalid="ignore", over="ignore"):
+            np.multiply(weights, out, out=out)
+        if not np.all(np.isfinite(out)):
+            out.fill(np.nan)
+            return out
         out += self.reg_lambda * v
         return out
 
@@ -431,6 +484,7 @@ class EFGPSolver:
         top_q: Optional[int] = None,
         use_richardson: bool = False,
         eta: float = 0.8,
+        richardson_relres_check_every: int = 1,
         cg_tol: float = 1e-6,
         cg_maxiter: int = 1000,
         solver_type: Optional[str] = None,
@@ -443,6 +497,9 @@ class EFGPSolver:
     ) -> tuple[np.ndarray, PrecomputeState]:
         """
         Solve for beta with optional EigenPro preconditioning.
+
+        For Richardson, pick ``eta`` carefully (e.g. ``linear_solvers.tune_richardson_eta``);
+        ``richardson_relres_check_every`` > 1 skips some ||r|| evaluations for timing only.
         """
         state = self.precompute(x, y)
 
@@ -493,6 +550,7 @@ class EFGPSolver:
                 cg_tol,
                 cg_maxiter,
                 precond=precond,
+                relres_check_every=int(richardson_relres_check_every),
             )
         else:
             beta, _, _ = pcg(
