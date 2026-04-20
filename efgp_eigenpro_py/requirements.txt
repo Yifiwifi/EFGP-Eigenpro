@@ -5,3 +5,5 @@ finufft>=2.3,<3
 
 # Optional (used by benchmark memory metrics)
 psutil>=5.9,<8
+
+# Colab/GPU: see requirements-colab.txt
