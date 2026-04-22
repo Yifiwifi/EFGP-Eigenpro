@@ -90,22 +90,16 @@ def estimate_top_eigenspace_v3(
         raise ValueError("apply_A_block_gpu returned dtype mismatch on eigvecs.")
     resid = AU - eigvecs * eigvals.reshape(1, -1)
     res_norm = float(xp.linalg.norm(resid))
-    res_cols = xp.linalg.norm(resid, axis=0)
     au_norm = float(xp.linalg.norm(AU))
-    au_cols = xp.linalg.norm(AU, axis=0)
     denom = max(au_norm, 1e-30)
     res_norm_rel = float(res_norm / denom)
-    res_cols_rel = res_cols / xp.maximum(au_cols, 1e-30)
-    asnumpy = getattr(xp, "asnumpy", None)
-    res_cols_host = asnumpy(res_cols) if callable(asnumpy) else res_cols
-    res_cols_rel_host = asnumpy(res_cols_rel) if callable(asnumpy) else res_cols_rel
     diag = {
         "method": cfg.method,
         "n_iter": int(cfg.n_iter),
         "block_size": int(block),
         "residual_fro": res_norm,
         "residual_fro_rel": res_norm_rel,
-        "residual_cols": res_cols_host,
-        "residual_cols_rel": res_cols_rel_host,
+        "residual_cols": None,
+        "residual_cols_rel": None,
     }
     return eigvals, eigvecs, diag

@@ -1,0 +1,37 @@
+{
+  "timestamp": "2026-04-22T00:12:39.686173",
+  "python": "3.12.3 | packaged by conda-forge | (main, Apr 15 2024, 18:20:11) [MSC v.1938 64 bit (AMD64)]",
+  "platform": "win32",
+  "device_name": "NVIDIA GeForce RTX 3050 Laptop GPU",
+  "eps": 1e-05,
+  "solve_tol": 1e-06,
+  "gpu_maxiter": 3000,
+  "nufft_mode": "auto",
+  "l2_scaled": true,
+  "dim": 2,
+  "kernel": "Mat32",
+  "nu": 1.5,
+  "lengthscale": 0.1,
+  "reg_lambda": 0.1,
+  "n_test": 1000,
+  "n_list": [
+    100000,
+    300000
+  ],
+  "mode_specs": [
+    {
+      "mode": "gpu_v1_topq0",
+      "top_q": 0
+    },
+    {
+      "mode": "gpu_v3_topq",
+      "top_q": 32
+    },
+    {
+      "mode": "gpu_v3_topq",
+      "top_q": 64
+    }
+  ],
+  "cupy": "13.3.0",
+  "cufinufft": "unavailable"
+}

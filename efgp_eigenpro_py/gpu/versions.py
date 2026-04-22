@@ -18,7 +18,9 @@ from .v1_ops import (
 )
 from .v2_preconditioner import (
     GPUPreconditionerData,
+    apply_preconditioner_dominant_subspace,
     apply_preconditioner_v2,
+    build_dominant_subspace_preconditioner,
     build_gpu_preconditioner_data,
 )
 from .iterative_solvers import pcg_solve_gpu
@@ -335,6 +337,130 @@ def run_v3_full_gpu_eigenspace(
             "eig_residual_fro": float(eig_diag.get("residual_fro", float("nan"))),
             "eig_residual_fro_rel": float(eig_diag.get("residual_fro_rel", float("nan"))),
             "eig_residual_cols_rel": eig_diag.get("residual_cols_rel"),
+            "t_matvec_avg": float(stats["t_matvec_avg"]),
+            "t_matvec_total": float(stats["t_matvec_total"]),
+            "n_matvec": int(stats["n_matvec"]),
+            "t_precond_total": float(stats["t_precond_total"]),
+            "t_precond_avg": float(stats["t_precond_avg"]),
+            "n_precond": int(stats["n_precond"]),
+            "device_name": backend.device_name,
+            "has_nufft": backend.has_nufft,
+            "chunk_size": cfg.chunk_size,
+            "debug_finite_checks": bool(cfg.debug_finite_checks),
+        },
+    )
+
+
+def run_v4_dominant_subspace_preconditioner(
+    solver: EFGPSolver,
+    x: np.ndarray,
+    y: np.ndarray,
+    cfg: GPURunConfig,
+    q: int,
+    *,
+    s: int = 8,
+    kmax: int = 2,
+    keep_factor: float = 5.0,
+) -> V1Outputs:
+    """
+    V4: GPU dominant-subspace preconditioner + GPU PCG.
+    """
+    backend = build_gpu_backend_bundle(cfg.backend)
+    data_ctx = ensure_gpu_data_context(backend, x, y, state=None)
+    data_ctx.meta["debug_finite_checks"] = bool(cfg.debug_finite_checks)
+    op_ctx = GPUOperatorContext()
+
+    t0 = time.perf_counter()
+    data_ctx = gpu_precompute_v1(
+        backend,
+        solver.kernel,
+        solver.eps,
+        solver.nufft_tol,
+        data_ctx,
+        op_ctx,
+        l2scaled=solver.l2scaled,
+        chunk_size=cfg.chunk_size,
+    )
+    t1 = time.perf_counter()
+
+    if q <= 0:
+        raise ValueError("q must be > 0 for dominant-subspace preconditioning.")
+
+    sigma2 = float(cfg.reg_lambda)
+
+    def _apply_A_block(v_block: Any) -> Any:
+        from .v1_ops import apply_A_v1
+
+        xp = backend.xp
+        v_block = xp.asarray(v_block, dtype=xp.complex128)
+        if v_block.ndim == 1:
+            v_block = v_block.reshape(-1, 1)
+        out_block = xp.empty_like(v_block)
+        for i in range(v_block.shape[1]):
+            apply_A_v1(
+                backend,
+                data_ctx,
+                v_block[:, i],
+                sigma2,
+                op_ctx,
+                out=out_block[:, i],
+            )
+        return out_block
+
+    precond_data, precond_diag = build_dominant_subspace_preconditioner(
+        backend=backend,
+        apply_A_block=_apply_A_block,
+        size=int(data_ctx.rhs_gpu.size),
+        sigma2=sigma2,
+        q=q,
+        s=s,
+        kmax=kmax,
+        keep_factor=keep_factor,
+    )
+    t2 = time.perf_counter()
+
+    def _matvec(v: Any, out: Any) -> None:
+        from .v1_ops import apply_A_v1
+
+        apply_A_v1(backend, data_ctx, v, sigma2, op_ctx, out=out)
+
+    def _precond(v: Any, out: Any) -> None:
+        apply_preconditioner_dominant_subspace(backend, precond_data, v, op_ctx=op_ctx, out=out)
+
+    beta_gpu, it, relres, stats = pcg_solve_gpu(
+        backend,
+        _matvec,
+        _precond,
+        data_ctx.rhs_gpu,
+        op_ctx,
+        cfg.tol,
+        cfg.maxiter,
+        return_stats=True,
+    )
+    t3 = time.perf_counter()
+    _ = predict_v1(backend, data_ctx, x, beta_gpu)
+    t4 = time.perf_counter()
+
+    return V1Outputs(
+        beta_gpu=beta_gpu,
+        diagnostics={
+            "version": "v4_dominant_subspace",
+            "status": "ok",
+            "precond_q": int(q),
+            "precond_s": int(precond_diag["s"]),
+            "precond_p": int(precond_diag["p"]),
+            "precond_kmax": int(precond_diag["kmax"]),
+            "precond_keep_factor": float(precond_diag["keep_factor"]),
+            "precond_rank": int(precond_diag["kept_rank"]),
+            "nufft_backend": backend.nufft_name,
+            "nufft_stage": data_ctx.meta.get("nufft_stage"),
+            "cg_iters": int(it),
+            "cg_relres": float(relres),
+            "time_precompute": float(t1 - t0),
+            "time_precond_build": float(t2 - t1),
+            "time_solve": float(t3 - t2),
+            "time_predict": float(t4 - t3),
+            "time_total": float(t4 - t0),
             "t_matvec_avg": float(stats["t_matvec_avg"]),
             "t_matvec_total": float(stats["t_matvec_total"]),
             "n_matvec": int(stats["n_matvec"]),

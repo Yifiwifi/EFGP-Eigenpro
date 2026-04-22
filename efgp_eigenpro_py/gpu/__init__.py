@@ -13,10 +13,15 @@ from .versions import (
     run_v1_pure_efgp,
     run_v2_with_preconditioner_apply,
     run_v3_full_gpu_eigenspace,
+    run_v4_dominant_subspace_preconditioner,
 )
 from .v2_preconditioner import (
+    GPUDominantSubspacePreconditionerData,
     GPUPreconditionerData,
+    apply_preconditioner_dominant_subspace,
     apply_preconditioner_v2,
+    build_dominant_subspace_preconditioner,
+    build_gpu_dominant_subspace_data,
     build_gpu_preconditioner_data,
 )
 from .iterative_solvers import cg_solve_gpu, pcg_solve_gpu
@@ -37,7 +42,12 @@ __all__ = [
     "run_v1_pure_efgp",
     "run_v2_with_preconditioner_apply",
     "run_v3_full_gpu_eigenspace",
+    "run_v4_dominant_subspace_preconditioner",
+    "GPUDominantSubspacePreconditionerData",
     "GPUPreconditionerData",
+    "build_gpu_dominant_subspace_data",
+    "build_dominant_subspace_preconditioner",
+    "apply_preconditioner_dominant_subspace",
     "build_gpu_preconditioner_data",
     "apply_preconditioner_v2",
     "gpu_precompute_v1",
