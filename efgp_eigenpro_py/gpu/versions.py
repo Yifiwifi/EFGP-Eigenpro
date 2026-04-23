@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 
@@ -349,6 +349,92 @@ def run_v3_full_gpu_eigenspace(
             "debug_finite_checks": bool(cfg.debug_finite_checks),
         },
     )
+
+
+def build_v3_pcg_left_precond_matvec(
+    solver: EFGPSolver,
+    x: np.ndarray,
+    y: np.ndarray,
+    cfg: GPURunConfig,
+    eig_cfg: EigenspaceConfig,
+) -> tuple[Any, Callable[[Any, Any], None], int, dict[str, Any]]:
+    """
+    Build the linear map used in ``pcg_solve_gpu``-style analysis: ``v -> P(A v)``,
+    where ``A`` is the original SPD EFGP operator and ``P`` is ``apply_preconditioner_v2``,
+    the same as applying the preconditioner to a residual after an ``A``-apply in the
+    left-preconditioned view ``M^{-1} A`` (PCG: ``z = P(r)``, ``A`` on search directions).
+    """
+    from .v1_ops import apply_A_v1
+
+    backend = build_gpu_backend_bundle(cfg.backend)
+    data_ctx = ensure_gpu_data_context(backend, x, y, state=None)
+    data_ctx.meta["debug_finite_checks"] = bool(cfg.debug_finite_checks)
+    op_ctx = GPUOperatorContext()
+    data_ctx = gpu_precompute_v1(
+        backend,
+        solver.kernel,
+        solver.eps,
+        solver.nufft_tol,
+        data_ctx,
+        op_ctx,
+        l2scaled=solver.l2scaled,
+        chunk_size=cfg.chunk_size,
+    )
+
+    def _apply_A_block(v_block: Any) -> Any:
+        xp = backend.xp
+        v_block = xp.asarray(v_block, dtype=xp.complex128)
+        if v_block.ndim == 1:
+            v_block = v_block.reshape(-1, 1)
+        out_block = xp.empty_like(v_block)
+        for i in range(v_block.shape[1]):
+            apply_A_v1(
+                backend,
+                data_ctx,
+                v_block[:, i],
+                float(cfg.reg_lambda),
+                op_ctx,
+                out=out_block[:, i],
+            )
+        return out_block
+
+    vals_gpu, vecs_gpu, eig_diag = estimate_top_eigenspace_v3(
+        backend=backend,
+        apply_A_block_gpu=_apply_A_block,
+        size=int(data_ctx.rhs_gpu.size),
+        cfg=eig_cfg,
+    )
+    q = int(eig_cfg.q_max)
+    if vals_gpu.size <= q:
+        mu = float(vals_gpu[-1])
+    else:
+        mu = float(vals_gpu[q])
+    scale_gpu = backend.xp.asarray(1.0 - (mu / vals_gpu[:q]))
+    precond_data = GPUPreconditionerData(
+        U_gpu=vecs_gpu[:, :q],
+        UH_gpu=vecs_gpu[:, :q].conj().T,
+        scale_gpu=scale_gpu,
+        scale_col_gpu=scale_gpu.reshape(-1, 1),
+    )
+    n = int(data_ctx.rhs_gpu.size)
+    av_buf: list[Any] = [None]
+
+    def matvec(v: Any, out: Any) -> None:
+        xp = backend.xp
+        va = xp.asarray(v, dtype=xp.complex128).reshape(-1)
+        if av_buf[0] is None or int(av_buf[0].size) != int(va.size):
+            av_buf[0] = xp.empty((int(va.size),), dtype=xp.complex128)
+        oa = xp.asarray(out, dtype=xp.complex128).reshape(-1)
+        apply_A_v1(backend, data_ctx, va, float(cfg.reg_lambda), op_ctx, out=av_buf[0])
+        apply_preconditioner_v2(backend, precond_data, av_buf[0], op_ctx=op_ctx, out=oa)
+
+    meta: dict[str, Any] = {
+        "slq_spectrum": "M_inv_A",
+        "slq_spectrum_desc": "P(A v); same P as apply_preconditioner_v2 in PCG.",
+        "top_q": int(q),
+        "eig_residual_fro_rel": float(eig_diag.get("residual_fro_rel", float("nan"))),
+    }
+    return backend, matvec, n, meta
 
 
 def run_v4_dominant_subspace_preconditioner(

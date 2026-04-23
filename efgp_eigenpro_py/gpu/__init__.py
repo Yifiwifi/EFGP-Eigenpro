@@ -9,6 +9,7 @@ Staged migration layout:
 
 from .backends import BackendConfig, GPUBackendBundle, build_gpu_backend_bundle
 from .contexts import GPUDataContext, GPUOperatorContext, ensure_gpu_data_context
+from .benchmark_plots import save_complexity_benchmark_plots
 from .versions import (
     run_v1_pure_efgp,
     run_v2_with_preconditioner_apply,
@@ -31,6 +32,7 @@ from .v1_ops import (
     predict_v1,
     solve_beta_plain_cg_v1,
 )
+from .slq_pcg_spectrum import build_slq_matvec_for_benchmark_mode
 from .slq_diagnostics import (
     SLQAnalysis,
     SLQAtomPack,
@@ -56,6 +58,7 @@ __all__ = [
     "GPUDataContext",
     "GPUOperatorContext",
     "ensure_gpu_data_context",
+    "save_complexity_benchmark_plots",
     "run_v1_pure_efgp",
     "run_v2_with_preconditioner_apply",
     "run_v3_full_gpu_eigenspace",
@@ -88,4 +91,5 @@ __all__ = [
     "evaluate_cdf",
     "evaluate_gaussian_density",
     "summarize_slq_diagnostics",
+    "build_slq_matvec_for_benchmark_mode",
 ]
