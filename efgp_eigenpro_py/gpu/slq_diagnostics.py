@@ -14,6 +14,12 @@ def _sync_device(xp: Any) -> None:
         cuda.Stream.null.synchronize()
 
 
+def _legend_if_any(ax: Any, *, loc: str = "best") -> None:
+    handles, labels = ax.get_legend_handles_labels()
+    if handles and labels:
+        ax.legend(loc=loc)
+
+
 def _weighted_quantile(values: np.ndarray, weights: np.ndarray, q: float) -> float:
     if values.size == 0:
         return float("nan")
@@ -331,6 +337,8 @@ def run_slq_lanczos_diagnostic(
 
     t1 = time.perf_counter()
     diag = {
+        "matrix_dim": int(n),
+        "eigenvalue_count": int(n),
         "nv": int(nv),
         "k_max": int(k_max),
         "n_matvec": int(n_matvec),
@@ -808,6 +816,8 @@ def package_slq_output(
     raw = {
         "config": result.cfg,
         "run_diagnostics": result.diagnostics,
+        "matrix_dim": int(result.diagnostics.get("matrix_dim", result.alpha.shape[1])),
+        "eigenvalue_count": int(result.diagnostics.get("eigenvalue_count", result.alpha.shape[1])),
         "alpha": result.alpha,
         "beta": result.beta,
         "active_steps": result.active_steps,
@@ -915,6 +925,12 @@ def build_slq_plot_payload(
     cloud = raw.get("extremal_ritz_cloud", {}) if isinstance(raw, dict) else {}
     top_cloud = np.asarray(cloud.get("top", []), dtype=np.float64)
     bottom_cloud = np.asarray(cloud.get("bottom", []), dtype=np.float64)
+    matrix_dim = int(
+        raw.get(
+            "matrix_dim",
+            (raw.get("run_diagnostics", {}) or {}).get("matrix_dim", 0),
+        )
+    )
 
     return {
         "global": {"x": x, "cdf": cdf, "density_002": dens_002, "density_005": dens_005, "density_010": dens_010},
@@ -938,6 +954,7 @@ def build_slq_plot_payload(
             "top": top_cloud,
             "bottom": bottom_cloud,
         },
+        "meta": {"matrix_dim": matrix_dim, "eigenvalue_count": matrix_dim},
     }
 
 
@@ -974,11 +991,13 @@ def save_slq_plots(
     k05 = payload["prefix"]["kappa05"]
     top = payload["ritz"]["top"]
     bottom = payload["ritz"]["bottom"]
+    matrix_dim = int(payload.get("meta", {}).get("matrix_dim", 0))
+    dim_tag = f" (n={matrix_dim:,})" if matrix_dim > 0 else ""
 
     if x.size > 0 and cdf.size == x.size:
         fig, ax = plt.subplots(figsize=(6.4, 4.2))
         ax.plot(x, cdf)
-        ax.set_title("Global spectral CDF")
+        ax.set_title(f"Global spectral CDF{dim_tag}")
         ax.set_xlabel("eigenvalue")
         ax.set_ylabel("CDF")
         ax.set_ylim(-0.02, 1.02)
@@ -991,7 +1010,7 @@ def save_slq_plots(
         fig, ax = plt.subplots(figsize=(6.4, 4.2))
         ax.plot(x, cdf)
         ax.set_xscale("symlog", linthresh=1.0)
-        ax.set_title("Global spectral CDF (symlog-x)")
+        ax.set_title(f"Global spectral CDF (symlog-x){dim_tag}")
         ax.set_xlabel("eigenvalue")
         ax.set_ylabel("CDF")
         ax.set_ylim(-0.02, 1.02)
@@ -1009,10 +1028,10 @@ def save_slq_plots(
             ax.plot(xz, dz10, label="sigma=0.01")
         if math.isfinite(lam_min):
             ax.axvline(lam_min, linestyle="--", alpha=0.6, label="lambda_min")
-        ax.set_title("Density near left edge (local grid)")
+        ax.set_title(f"Density near left edge (local grid){dim_tag}")
         ax.set_xlabel("eigenvalue")
         ax.set_ylabel("density")
-        ax.legend(loc="best")
+        _legend_if_any(ax)
         fig.tight_layout()
         p = out / "fig2_left_edge_density_local.png"
         fig.savefig(p, dpi=dpi)
@@ -1023,10 +1042,10 @@ def save_slq_plots(
         fig, ax = plt.subplots(figsize=(6.4, 4.2))
         ax.plot(m, q001, label="q0.001")
         ax.plot(m, q095, label="q0.95")
-        ax.set_title("Prefix bulk quantiles vs m")
+        ax.set_title(f"Prefix bulk quantiles vs m{dim_tag}")
         ax.set_xlabel("Lanczos steps m")
         ax.set_ylabel("value")
-        ax.legend(loc="best")
+        _legend_if_any(ax)
         fig.tight_layout()
         p = out / "fig3a_prefix_bulk_quantiles.png"
         fig.savefig(p, dpi=dpi)
@@ -1035,10 +1054,10 @@ def save_slq_plots(
 
         fig, ax = plt.subplots(figsize=(6.4, 4.2))
         ax.plot(m, q099, label="q0.99")
-        ax.set_title("Prefix upper-tail quantile vs m")
+        ax.set_title(f"Prefix upper-tail quantile vs m{dim_tag}")
         ax.set_xlabel("Lanczos steps m")
         ax.set_ylabel("value")
-        ax.legend(loc="best")
+        _legend_if_any(ax)
         fig.tight_layout()
         p = out / "fig3b_prefix_upper_tail_q99.png"
         fig.savefig(p, dpi=dpi)
@@ -1051,10 +1070,10 @@ def save_slq_plots(
         if np.any(np.isfinite(k05)):
             ax.plot(m, k05, label="kappa_eff(0.05)")
         ax.set_yscale("log")
-        ax.set_title("Effective condition surrogates vs m")
+        ax.set_title(f"Effective condition surrogates vs m{dim_tag}")
         ax.set_xlabel("Lanczos steps m")
         ax.set_ylabel("value (log)")
-        ax.legend(loc="best")
+        _legend_if_any(ax)
         fig.tight_layout()
         p = out / "fig3c_prefix_kappa_eff.png"
         fig.savefig(p, dpi=dpi)
@@ -1064,7 +1083,7 @@ def save_slq_plots(
     if bottom.size > 0:
         fig, ax = plt.subplots(figsize=(6.4, 4.2))
         ax.scatter(np.arange(bottom.size), bottom, s=10)
-        ax.set_title("Bottom Ritz cloud")
+        ax.set_title(f"Bottom Ritz cloud{dim_tag}")
         ax.set_xlabel("index")
         ax.set_ylabel("Ritz value")
         fig.tight_layout()
@@ -1076,7 +1095,7 @@ def save_slq_plots(
     if top.size > 0:
         fig, ax = plt.subplots(figsize=(6.4, 4.2))
         ax.scatter(np.arange(top.size), top, s=10)
-        ax.set_title("Top Ritz cloud")
+        ax.set_title(f"Top Ritz cloud{dim_tag}")
         ax.set_xlabel("index")
         ax.set_ylabel("Ritz value")
         fig.tight_layout()
@@ -1089,7 +1108,7 @@ def save_slq_plots(
         fig, axes = plt.subplots(2, 2, figsize=(12, 8))
         axes[0, 0].plot(x, cdf)
         axes[0, 0].set_xscale("symlog", linthresh=1.0)
-        axes[0, 0].set_title("Global CDF (symlog-x)")
+        axes[0, 0].set_title(f"Global CDF (symlog-x){dim_tag}")
         axes[0, 0].set_xlabel("eigenvalue")
         axes[0, 0].set_ylabel("CDF")
 
@@ -1099,26 +1118,26 @@ def save_slq_plots(
             axes[0, 1].plot(xz, dz10, label="sigma=0.01")
         if math.isfinite(lam_min):
             axes[0, 1].axvline(lam_min, linestyle="--", alpha=0.6, label="lambda_min")
-        axes[0, 1].set_title("Left-edge density (local grid)")
+        axes[0, 1].set_title(f"Left-edge density (local grid){dim_tag}")
         axes[0, 1].set_xlabel("eigenvalue")
         axes[0, 1].set_ylabel("density")
-        axes[0, 1].legend(loc="best")
+        _legend_if_any(axes[0, 1])
 
         axes[1, 0].plot(m, q001, label="q0.001")
         axes[1, 0].plot(m, q095, label="q0.95")
-        axes[1, 0].set_title("Prefix bulk quantiles")
+        axes[1, 0].set_title(f"Prefix bulk quantiles{dim_tag}")
         axes[1, 0].set_xlabel("m")
         axes[1, 0].set_ylabel("value")
-        axes[1, 0].legend(loc="best")
+        _legend_if_any(axes[1, 0])
 
         if top.size > 0:
             axes[1, 1].scatter(np.arange(top.size), top, s=10, label="top")
         if bottom.size > 0:
             axes[1, 1].scatter(np.arange(bottom.size), bottom, s=10, label="bottom")
-        axes[1, 1].set_title("Extremal Ritz cloud")
+        axes[1, 1].set_title(f"Extremal Ritz cloud{dim_tag}")
         axes[1, 1].set_xlabel("index")
         axes[1, 1].set_ylabel("Ritz value")
-        axes[1, 1].legend(loc="best")
+        _legend_if_any(axes[1, 1])
 
         fig.tight_layout()
         p = out / "dashboard_2x2.png"
