@@ -348,13 +348,27 @@ def build_slq_matvec_for_benchmark_mode(
     m = str(mode).strip()
     if m == "gpu_v1_topq0":
         return build_unprecond_A_matvec(solver, x, y, cfg)
-    if m == "gpu_v3_topq":
+    if m in ("gpu_v3_topq", "gpu_v3_topq_cupy_eigsh", "gpu_v3_topq_rand_subspace_rr"):
         if int(top_q) <= 0:
-            raise ValueError("top_q must be > 0 for gpu_v3_topq")
+            raise ValueError(f"top_q must be > 0 for {m}")
+        eig_method = "subspace_iter"
+        eig_method_cfg: Optional[dict[str, Any]] = None
+        if m == "gpu_v3_topq_cupy_eigsh":
+            eig_method = "cupy_eigsh"
+            eig_method_cfg = {"tol": 1e-6, "oversample": int(v3_oversample)}
+        elif m == "gpu_v3_topq_rand_subspace_rr":
+            eig_method = "rand_subspace_rr"
+            eig_method_cfg = {
+                "tol": 1e-6,
+                "oversample": int(v3_oversample),
+                "maxiter": int(v3_n_iter),
+            }
         eig_cfg = EigenspaceConfig(
             q_max=int(top_q),
             block_size=int(top_q + v3_oversample),
             n_iter=int(v3_n_iter),
+            method=eig_method,
+            method_cfg=eig_method_cfg,
         )
         return _build_v3_pcg_left_precond_matvec_local(solver, x, y, cfg, eig_cfg)
     if m == "gpu_v3_topq_combo":
