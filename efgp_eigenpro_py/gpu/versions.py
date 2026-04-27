@@ -24,7 +24,12 @@ from .v2_preconditioner import (
     build_gpu_preconditioner_data,
 )
 from .iterative_solvers import pcg_solve_gpu
-from .v3_eigenspace import EigenspaceConfig, estimate_top_eigenspace_v3
+from .v3_eigenspace import (
+    EigenspaceConfig,
+    estimate_top_eigenspace_eigenpro_nystrom,
+    estimate_top_eigenspace_v3,
+    mu_for_precond_from_eig,
+)
 
 
 @dataclass
@@ -252,6 +257,11 @@ def run_v3_full_gpu_eigenspace(
     t1 = time.perf_counter()
 
     eig_cfg = eig_cfg or EigenspaceConfig(q_max=32, block_size=40)
+    method_name = str((eig_cfg.eig_method if eig_cfg.eig_method is not None else eig_cfg.method) or "subspace_iter").lower()
+    if method_name in ("eigenpro_nystrom", "nystrom", "ep_nystrom"):
+        eig_cfg.method_cfg = dict(eig_cfg.method_cfg or {})
+        eig_cfg.method_cfg.setdefault("data_ctx", data_ctx)
+        eig_cfg.method_cfg.setdefault("reg_lambda", float(cfg.reg_lambda))
 
     def _apply_A_block(v_block: Any) -> Any:
         from .v1_ops import apply_A_v1
@@ -281,10 +291,7 @@ def run_v3_full_gpu_eigenspace(
     t2 = time.perf_counter()
 
     q = int(eig_cfg.q_max)
-    if vals_gpu.size <= q:
-        mu = float(vals_gpu[-1])
-    else:
-        mu = float(vals_gpu[q])
+    mu = mu_for_precond_from_eig(vals_gpu, q, eig_diag)
     scale_gpu = backend.xp.asarray(1.0 - (mu / vals_gpu[:q]))
     precond_data = GPUPreconditionerData(
         U_gpu=vecs_gpu[:, :q],
@@ -337,6 +344,8 @@ def run_v3_full_gpu_eigenspace(
             "eig_residual_fro": float(eig_diag.get("residual_fro", float("nan"))),
             "eig_residual_fro_rel": float(eig_diag.get("residual_fro_rel", float("nan"))),
             "eig_residual_cols_rel": eig_diag.get("residual_cols_rel"),
+            "surrogate_tag": str(eig_diag.get("surrogate_tag", "")),
+            "eig_nystrom_kernel_s": float(eig_diag.get("eig_nystrom_kernel_s", float("nan"))),
             "t_matvec_avg": float(stats["t_matvec_avg"]),
             "t_matvec_total": float(stats["t_matvec_total"]),
             "n_matvec": int(stats["n_matvec"]),
@@ -398,6 +407,12 @@ def build_v3_pcg_left_precond_matvec(
             )
         return out_block
 
+    method_name = str((eig_cfg.eig_method if eig_cfg.eig_method is not None else eig_cfg.method) or "subspace_iter").lower()
+    if method_name in ("eigenpro_nystrom", "nystrom", "ep_nystrom"):
+        eig_cfg.method_cfg = dict(eig_cfg.method_cfg or {})
+        eig_cfg.method_cfg.setdefault("data_ctx", data_ctx)
+        eig_cfg.method_cfg.setdefault("reg_lambda", float(cfg.reg_lambda))
+
     vals_gpu, vecs_gpu, eig_diag = estimate_top_eigenspace_v3(
         backend=backend,
         apply_A_block_gpu=_apply_A_block,
@@ -405,10 +420,7 @@ def build_v3_pcg_left_precond_matvec(
         cfg=eig_cfg,
     )
     q = int(eig_cfg.q_max)
-    if vals_gpu.size <= q:
-        mu = float(vals_gpu[-1])
-    else:
-        mu = float(vals_gpu[q])
+    mu = mu_for_precond_from_eig(vals_gpu, q, eig_diag)
     scale_gpu = backend.xp.asarray(1.0 - (mu / vals_gpu[:q]))
     precond_data = GPUPreconditionerData(
         U_gpu=vecs_gpu[:, :q],

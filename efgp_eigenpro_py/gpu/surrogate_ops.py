@@ -11,7 +11,12 @@ from ..kernels import KernelSpec
 from .backends import GPUBackendBundle
 from .contexts import GPUDataContext, GPUOperatorContext
 from .nufft_adapter import type1_coeffs_rhs, type1_ones_xtx
-from .v3_eigenspace import EigenspaceConfig, estimate_top_eigenspace_v3
+from .v3_eigenspace import (
+    EigenspaceConfig,
+    estimate_top_eigenspace_eigenpro_nystrom,
+    estimate_top_eigenspace_v3,
+    mu_for_precond_from_eig,
+)
 
 
 def _device_array_to_numpy(arr: Any, dtype: Optional[np.dtype] = None) -> np.ndarray:

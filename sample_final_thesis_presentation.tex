@@ -1,0 +1,755 @@
+\documentclass[aspectratio=169,10pt]{beamer}
+
+\usetheme{metropolis}
+\metroset{sectionpage=none}
+\usepackage{amsmath,amssymb,bm,mathtools}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multicol}
+\usepackage{hyperref}
+
+\title{Fast KRR via Frequency-Space Preconditioning}
+\subtitle{EigenPro-style deflation for Equispaced Fourier Gaussian Processes}
+\author{[Your Name]}
+\institute{Final Thesis Presentation}
+\date{[Date]}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\C}{\mathbb{C}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\norm}[1]{\left\lVert #1 \right\rVert}
+\newcommand{\kmat}{K}
+\newcommand{\Ph}{\Phi}
+\newcommand{\sig}{\sigma^2}
+\newcommand{\lam}{\lambda}
+
+\begin{document}
+
+% ---------------------------------------------------------
+\begin{frame}
+  \titlepage
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}{Thesis message in one slide}
+\begin{block}{Problem}
+Kernel ridge regression (KRR) is statistically attractive, but standard solvers scale poorly because they require dense kernel linear algebra.
+\end{block}
+
+\begin{block}{Existing progress}
+\begin{itemize}
+  \item \textbf{EigenPro}: accelerates iterative kernel solvers by deflating the largest spectral modes.
+  \item \textbf{EFGP}: uses Fourier grids and NUFFT/FFT to reduce low-dimensional translation-invariant kernel regression to fast weight-space linear algebra.
+\end{itemize}
+\end{block}
+
+\begin{block}{My direction}
+Put the deflation idea directly in the \textbf{frequency / weight-space system} of EFGP, aiming to keep EFGP's near-linear data pass while reducing CG iteration counts.
+\end{block}
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}{Roadmap for a 30-minute talk}
+\begin{enumerate}
+  \item KRR fundamentals and why kernel methods are still relevant.
+  \item Computational bottleneck: direct solve vs. iterative solve.
+  \item EigenPro: spectral deflation as preconditioning.
+  \item Translation-invariant kernels and EFGP.
+  \item Proposed algorithm: frequency-space deflation preconditioner.
+  \item Experiments: speed, conditioning, and the top-$q$ trade-off.
+\end{enumerate}
+\end{frame}
+
+% ---------------------------------------------------------
+\section{Motivation and KRR fundamentals}
+
+\begin{frame}{Why KRR is still useful now}
+\begin{itemize}
+  \item \textbf{Strong inductive bias}: kernels encode smoothness, locality, periodicity, and invariances explicitly.
+  \item \textbf{Theory}: convex objective, unique solution, and a mature generalization theory.
+  \item \textbf{Connections to modern ML}: wide neural networks and NTK regimes renew interest in kernel viewpoints.
+  \item \textbf{Recent scalability}: Fourier/NUFFT-based methods show that some kernel estimators can reach $O(n\log n)$ time and memory.
+\end{itemize}
+
+\vspace{0.5em}
+\begin{block}{Key tension}
+The statistics are clean, but the computational linear algebra is the bottleneck.
+\end{block}
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}{KRR problem statement}
+Given data $(x_i,y_i)_{i=1}^N$, kernel $k$, and RKHS $\mathcal{H}$:
+\[
+\hat f = \arg\min_{f\in\mathcal{H}}
+\frac{1}{N}\sum_{i=1}^{N}(f(x_i)-y_i)^2 + \lambda\norm{f}_{\mathcal{H}}^2.
+\]
+
+By the representer theorem,
+\[
+\hat f(x)=\sum_{i=1}^N \alpha_i k(x,x_i).
+\]
+
+The coefficients solve
+\[
+(K+N\lambda I)\alpha = y,
+\quad K_{ij}=k(x_i,x_j).
+\]
+
+\begin{block}{Same linear algebra as GP posterior mean}
+In GP notation, the posterior mean solve is $(K+\sigma^2 I)\alpha=y$.
+\end{block}
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}{The two computational obstacles}
+\begin{columns}[T,totalwidth=\textwidth]
+\begin{column}{0.48\textwidth}
+\textbf{Direct method}
+\[
+(K+\sig I)\alpha=y
+\]
+\begin{itemize}
+  \item Store $K$: $O(N^2)$ memory.
+  \item Cholesky solve: $O(N^3)$ time.
+  \item Practical only for moderate $N$.
+\end{itemize}
+\end{column}
+\begin{column}{0.48\textwidth}
+\textbf{Iterative method}
+\[
+\alpha_{t+1}=\alpha_t+\text{correction}
+\]
+\begin{itemize}
+  \item Avoids explicit inverse.
+  \item Needs repeated matrix-vector products.
+  \item Dense kernel matvec is $O(N^2)$.
+  \item Slow if the system is ill-conditioned.
+\end{itemize}
+\end{column}
+\end{columns}
+
+\vspace{0.6em}
+\begin{alertblock}{Target}
+Move from a dense $O(N^2)$ bottleneck toward $O(N\log N)$ or $O(N+M\log M)$ workflows.
+\end{alertblock}
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}{Conjugate gradient and condition number}
+For a symmetric positive definite system $A z=b$, CG satisfies
+\[
+\frac{\norm{e_t}_A}{\norm{e_0}_A}
+\leq
+2\left(\frac{\sqrt{\kappa(A)}-1}{\sqrt{\kappa(A)}+1}\right)^t,
+\quad
+\kappa(A)=\frac{\lambda_{\max}(A)}{\lambda_{\min}(A)}.
+\]
+
+\begin{block}{Interpretation}
+The number of iterations scales roughly like
+\[
+ t = O\!\left(\sqrt{\kappa(A)}\log\frac{1}{\varepsilon}\right).
+\]
+\end{block}
+
+\begin{alertblock}{For kernel systems}
+The largest eigenvalue often grows with data size, while the smallest eigenvalue is controlled by regularization/noise. A typical upper scale is
+\[
+\kappa(K+\sig I) \lesssim 1+\frac{N}{\sig}.
+\]
+\end{alertblock}
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}{Why the bottleneck is not only the matvec}
+Even with a fast approximate matvec, the solve can still be slow:
+\[
+\text{total time} \approx
+\underbrace{T_{\rm setup}}_{\text{kernel/feature preprocessing}}+
+\underbrace{n_{\rm iter}}_{\text{depends on }\kappa}
+\times
+\underbrace{T_{\rm matvec}}_{\text{dense, FFT, or NUFFT}}.
+\]
+
+\begin{itemize}
+  \item Classical CG with dense kernel: $T_{\rm matvec}=O(N^2)$.
+  \item EFGP: $T_{\rm matvec}=O(M\log M)$, independent of $N$ after setup.
+  \item But if $n_{\rm iter}$ grows with $N/\sigma^2$, the FFT speedup is not enough.
+\end{itemize}
+
+\begin{block}{Main numerical-analysis question}
+Can we reduce the iteration count without destroying the fast Fourier structure?
+\end{block}
+\end{frame}
+
+% ---------------------------------------------------------
+\section{EigenPro: spectral deflation preconditioning}
+
+\begin{frame}{EigenPro intuition}
+Kernel matrices often have a few very large eigenvalues:
+\[
+\lambda_1 \ge \lambda_2 \ge \cdots \ge \lambda_N.
+\]
+
+These top modes force small stable step sizes and slow iterative convergence.
+
+\begin{block}{EigenPro idea}
+Estimate the leading $q$ eigenvectors and construct a preconditioner that flattens the top of the spectrum.
+\end{block}
+
+\vspace{0.4em}
+For a Richardson-style iteration,
+\[
+\alpha_{t+1}=\alpha_t-\eta (I-Q)(K\alpha_t-y),
+\]
+where $Q$ is a rank-$q$ spectral correction from top eigenpairs.
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}{Deflation preconditioner: the clean algebra}
+Let
+\[
+A = U\Theta U^*, \quad \theta_1\ge \theta_2\ge\cdots\ge\theta_n>0.
+\]
+Let $U_q=[u_1,\dots,u_q]$ and choose $\tau=\theta_{q+1}$. Define
+\[
+P_q = I-U_q\operatorname{diag}\!\left(1-\frac{\tau}{\theta_i}\right)_{i=1}^q U_q^*.
+\]
+
+Then, for exact eigenvectors,
+\[
+P_q A u_i =
+\begin{cases}
+\tau u_i, & i\le q,\\
+\theta_i u_i, & i>q.
+\end{cases}
+\]
+
+\begin{block}{Effect}
+The top $q$ outlier eigenvalues are flattened to $\theta_{q+1}$, so
+\[
+\kappa(P_qA)\approx \frac{\theta_{q+1}}{\theta_{\min}(A)}
+\quad \text{instead of}\quad
+\frac{\theta_1}{\theta_{\min}(A)}.
+\]
+\end{block}
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}{EigenPro gives the preconditioning template}
+\begin{columns}[T,totalwidth=\textwidth]
+\begin{column}{0.48\textwidth}
+\textbf{What EigenPro does well}
+\begin{itemize}
+  \item Reduces effective condition number.
+  \item Uses only a low-rank spectral correction.
+  \item Turns large top eigenvalues into a manageable plateau.
+\end{itemize}
+\end{column}
+\begin{column}{0.48\textwidth}
+\textbf{What remains challenging}
+\begin{itemize}
+  \item Computing top eigenpairs can be expensive.
+  \item Applying kernel matrices can still be costly.
+  \item Classical EigenPro is in data/function space.
+\end{itemize}
+\end{column}
+\end{columns}
+
+\vspace{0.8em}
+\begin{alertblock}{Thesis transition}
+If EFGP gives a fast frequency-space linear system, we can transfer this spectral flattening idea to that smaller structured system.
+\end{alertblock}
+\end{frame}
+
+% ---------------------------------------------------------
+\section{Translation-invariant kernels and EFGP}
+
+\begin{frame}{Translation-invariant kernels}
+A kernel is translation invariant if
+\[
+k(x,x')=\psi(x-x').
+\]
+
+\begin{itemize}
+  \item Common in spatial statistics, time series, and low-dimensional regression.
+  \item Encodes a stationary prior: correlations depend on displacement, not absolute location.
+  \item Examples: squared exponential, Mat\'ern, rational quadratic.
+\end{itemize}
+
+\begin{block}{Why prefer them here?}
+Translation invariance exposes Fourier structure. Fourier structure exposes fast FFT/NUFFT algorithms.
+\end{block}
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}{Bochner's theorem: kernels become spectra}
+For continuous positive definite translation-invariant kernels,
+\[
+k(t)=\int_{\R^d} e^{2\pi i \omega^\top t}\, d\mu(\omega).
+\]
+If a spectral density exists,
+\[
+k(t)=\int_{\R^d} \widehat{k}(\omega)e^{2\pi i \omega^\top t}\,d\omega,
+\quad \widehat{k}(\omega)\ge 0.
+\]
+
+\begin{block}{Practical meaning}
+The kernel is a weighted superposition of Fourier modes.
+Smooth kernels have rapidly decaying spectra; rough kernels have heavier spectral tails.
+\end{block}
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}{EFGP: equispaced Fourier approximation}
+Choose an equispaced frequency grid
+\[
+J_m=\{-m,\ldots,m\}^d,\quad M=(2m+1)^d.
+\]
+Approximate the inverse Fourier integral by a quadrature rule:
+\[
+k(x-x')\approx \tilde k(x-x')=
+\sum_{j\in J_m} h^d\widehat{k}(hj)e^{2\pi i h j^\top(x-x')}.
+\]
+This is a feature factorization:
+\[
+\tilde k(x,x')=\sum_{j\in J_m}\phi_j(x)\overline{\phi_j(x')},
+\quad
+\phi_j(x)=\sqrt{h^d\widehat{k}(hj)}e^{2\pi i h j^\top x}.
+\]
+
+\begin{block}{Result}
+The dense kernel matrix is approximated as $K\approx\Phi\Phi^*$ with $\Phi\in\C^{N\times M}$.
+\end{block}
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}{Weight-space system}
+Instead of solving the $N\times N$ function-space system,
+\[
+(K+\sig I)\alpha=y,
+\]
+EFGP solves the $M\times M$ weight-space system
+\[
+(\Phi^*\Phi+\sig I)\beta = \Phi^*y.
+\]
+Then predictions are
+\[
+\hat f(x)=\sum_{j\in J_m}\beta_j\phi_j(x).
+\]
+
+\begin{block}{Key advantage}
+After Fourier discretization, prediction and linear algebra depend on $M$, not directly on $N$.
+\end{block}
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}{Where FFT and NUFFT enter}
+Write
+\[
+\Phi = F D,
+\quad
+F_{n,j}=e^{2\pi i h j^\top x_n},
+\quad
+D_{j,j}=\sqrt{h^d\widehat{k}(hj)}.
+\]
+Then
+\[
+\Phi^*\Phi=D(F^*F)D.
+\]
+Because frequencies are equispaced,
+\[
+(F^*F)_{j,\ell}=\sum_{n=1}^N e^{2\pi i h(j-\ell)^\top x_n},
+\]
+which depends only on $j-\ell$.
+
+\begin{block}{Consequences}
+\begin{itemize}
+  \item Build Toeplitz coefficients by type-1 NUFFT: $O(N+M\log M)$.
+  \item Apply $\Phi^*\Phi$ by padded FFT convolution: $O(M\log M)$ per iteration.
+\end{itemize}
+\end{block}
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}{EFGP complexity summary}
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Step & Operation & Cost \\
+\midrule
+Precompute Toeplitz vector & NUFFT over data & $O(N+M\log M)$ \\
+Build right-hand side $\Phi^*y$ & NUFFT over data & $O(N+M\log M)$ \\
+One CG matvec & FFT convolution & $O(M\log M)$ \\
+Predict at $q$ points & type-2 NUFFT & $O(q+M\log M)$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\vspace{0.8em}
+\begin{alertblock}{Remaining issue}
+The weight-space system can still be poorly conditioned, with iteration counts growing when $N/\sigma^2$ is large.
+\end{alertblock}
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}{Why preconditioning EFGP is natural}
+EFGP changes the bottleneck:
+\[
+\text{from dense data-space kernel algebra}
+\quad\longrightarrow\quad
+\text{structured frequency-space linear algebra}.
+\]
+
+\begin{block}{Opportunity}
+Use fast EFGP matvecs to estimate the leading spectrum of
+\[
+A_{\rm WS}=\Phi^*\Phi+\sig I,
+\]
+and apply a low-rank deflation preconditioner inside CG.
+\end{block}
+
+\begin{alertblock}{Goal}
+Keep the data pass $O(N+M\log M)$, but reduce the number of FFT-CG iterations.
+\end{alertblock}
+\end{frame}
+
+% ---------------------------------------------------------
+\section{Proposed method}
+
+\begin{frame}{Core idea}
+\begin{block}{Frequency-space EigenPro}
+Apply EigenPro-style spectral deflation to the EFGP weight-space matrix
+\[
+A = \Phi^*\Phi+\sig I\in\C^{M\times M}.
+\]
+\end{block}
+
+\begin{enumerate}
+  \item Use NUFFT/FFT to implement fast $z\mapsto Az$.
+  \item Estimate top $q+1$ eigenpairs of $A$ by Lanczos or randomized subspace iteration.
+  \item Build a low-rank spectral preconditioner $P_q$.
+  \item Run preconditioned CG on $A\beta=b$, $b=\Phi^*y$.
+\end{enumerate}
+
+\begin{block}{Expected benefit}
+Large spectral outliers are removed before CG, so residual convergence is controlled by the remaining spectrum.
+\end{block}
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}{Algorithm: preconditioned EFGP}
+\small
+\begin{enumerate}
+  \item \textbf{Choose Fourier grid:} select $h,m$ from kernel family, tolerance, and dimension; set $M=(2m+1)^d$.
+  \item \textbf{NUFFT setup:} compute Toeplitz coefficients for $F^*F$ and RHS $b=\Phi^*y$.
+  \item \textbf{Fast operator:} define $A(z)=D(F^*F)(Dz)+\sig z$ using padded FFT convolution.
+  \item \textbf{Spectral setup:} estimate top eigenpairs
+  \[
+  A u_i \approx \theta_i u_i,
+  \quad i=1,\dots,q+1.
+  \]
+  \item \textbf{Preconditioner:}
+  \[
+  P_q z=z-U_q\operatorname{diag}\!\left(1-\frac{\theta_{q+1}}{\theta_i}\right)U_q^*z.
+  \]
+  \item \textbf{Solve and predict:} run PCG for $A\beta=b$; evaluate $\hat f(x)$ by type-2 NUFFT.
+\end{enumerate}
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}{Complexity of the proposed solver}
+Let $T_A=O(M\log M)$ be the EFGP matvec cost.
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Part & Cost & Comment \\
+\midrule
+EFGP setup & $O(N+M\log M)$ & one pass through data \\
+Eigen setup & $O(rT_A)$ & $r$ Lanczos/randomized matvecs \\
+Preconditioner apply & $O(qM)$ & low-rank projection \\
+PCG solve & $n_{\rm pcg}(q)(T_A+O(qM))$ & fewer iterations if spectrum is deflated \\
+Prediction & $O(q_{\rm test}+M\log M)$ & type-2 NUFFT \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{block}{Optimization problem}
+Choose $q$ to minimize
+\[
+T(q)=T_{\rm setup}(q)+n_{\rm pcg}(q)\bigl(T_A+O(qM)\bigr).
+\]
+\end{block}
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}{Why the preconditioner should help}
+If eigenpairs are accurate and $\theta_1\ge\cdots\ge\theta_M$,
+\[
+\kappa(A)=\frac{\theta_1}{\theta_M},
+\quad
+\kappa(P_qA)\approx\frac{\theta_{q+1}}{\theta_M}.
+\]
+
+CG iteration count changes from roughly
+\[
+O\!\left(\sqrt{\frac{\theta_1}{\theta_M}}\log\frac{1}{\varepsilon}\right)
+\quad\text{to}\quad
+O\!\left(\sqrt{\frac{\theta_{q+1}}{\theta_M}}\log\frac{1}{\varepsilon}\right).
+\]
+
+\begin{block}{The best case}
+A small number of large spectral outliers dominate the condition number; removing them gives a large iteration reduction.
+\end{block}
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}{Top-$q$ selection: the central trade-off}
+\begin{columns}[T,totalwidth=\textwidth]
+\begin{column}{0.48\textwidth}
+\textbf{Small $q$}
+\begin{itemize}
+  \item Cheap eigen setup.
+  \item Cheap preconditioner application.
+  \item But large spectral modes remain.
+  \item More CG iterations.
+\end{itemize}
+\end{column}
+\begin{column}{0.48\textwidth}
+\textbf{Large $q$}
+\begin{itemize}
+  \item Better spectral flattening.
+  \item Fewer CG iterations.
+  \item More eigenpair estimation cost.
+  \item Eigenvectors/eigenvalues may be harder to estimate accurately.
+\end{itemize}
+\end{column}
+\end{columns}
+
+\vspace{0.8em}
+\begin{alertblock}{Practical rule}
+Pick $q$ near the spectral elbow: increase $q$ only while the saved CG time is larger than the spectral setup and projection cost.
+\end{alertblock}
+\end{frame}
+
+% ---------------------------------------------------------
+\section{Experiments}
+
+\begin{frame}{Experimental questions}
+\begin{enumerate}
+  \item \textbf{Conditioning:} how does $\kappa(A)$ scale with $N$, $\sigma^2$, kernel lengthscale, and Fourier grid size?
+  \item \textbf{Iteration reduction:} how much does deflation reduce CG/PCG iterations?
+  \item \textbf{Runtime:} when does the eigen setup pay for itself?
+  \item \textbf{Top-$q$ balance:} where is the best $q$ for total wall-clock time?
+  \item \textbf{Accuracy:} does preconditioning preserve posterior mean / KRR prediction accuracy?
+\end{enumerate}
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}{Recommended experiment matrix}
+\small
+\begin{center}
+\begin{tabular}{>{\raggedright}p{0.22\textwidth}p{0.68\textwidth}}
+\toprule
+Factor & Values to test \\
+\midrule
+Kernel & Squared exponential; Mat\'ern $\nu\in\{1/2,3/2,5/2\}$ \\
+Dimension & $d=1,2,3$ where EFGP is most suitable \\
+Data size & $N=10^5,10^6,10^7$ if available \\
+Noise / regularization & several $\sigma^2$ or $\lambda$ values; especially small-noise regimes \\
+Preconditioner size & $q\in\{0,8,16,32,64,128,256\}$ \\
+Metrics & iterations, setup time, solve time, total time, residual, RMSE/EEPM \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{block}{Baselines}
+Unpreconditioned EFGP-CG, diagonal/Jacobi preconditioning, and the proposed frequency-space deflation.
+\end{block}
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}{Results slide template: runtime and iterations}
+\small
+Replace the bracketed entries with your measured numbers.
+\begin{center}
+\begin{tabular}{rrrrrr}
+\toprule
+$q$ & eig. setup & PCG iters & solve time & total time & rel. residual \\
+\midrule
+0   & --      & [ ] & [ ] & [ ] & [ ] \\
+8   & [ ]     & [ ] & [ ] & [ ] & [ ] \\
+16  & [ ]     & [ ] & [ ] & [ ] & [ ] \\
+32  & [ ]     & [ ] & [ ] & [ ] & [ ] \\
+64  & [ ]     & [ ] & [ ] & [ ] & [ ] \\
+128 & [ ]     & [ ] & [ ] & [ ] & [ ] \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{block}{Message to emphasize}
+The optimal $q$ is not necessarily the largest $q$: total time balances spectral setup, preconditioner application, and iteration savings.
+\end{block}
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}{Results slide template: accuracy}
+\small
+Preconditioning should change convergence speed, not the target solution.
+\begin{center}
+\begin{tabular}{rrrrr}
+\toprule
+Method & $q$ & RMSE & EEPM / rel. error & final residual \\
+\midrule
+EFGP-CG & 0 & [ ] & [ ] & [ ] \\
+Jacobi-PCG & -- & [ ] & [ ] & [ ] \\
+Deflated PCG & [best] & [ ] & [ ] & [ ] \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{alertblock}{Expected conclusion}
+At matched residual tolerance, all solvers should produce nearly identical predictions; the gain should appear in iteration count and wall-clock time.
+\end{alertblock}
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}{Ablation: when does deflation help most?}
+\begin{itemize}
+  \item \textbf{Low noise / weak regularization}: smallest eigenvalue is close to $\sigma^2$ or $\lambda$, so conditioning worsens.
+  \item \textbf{Large $N$}: largest eigenvalues grow with data scale.
+  \item \textbf{Smooth kernels}: fewer Fourier modes may be needed, making eigen setup cheaper.
+  \item \textbf{Spectral outliers}: clear eigengap makes top-$q$ deflation effective and stable.
+\end{itemize}
+
+\begin{block}{Failure mode}
+If the spectrum decays slowly with no elbow, large $q$ may be required, and preconditioning may not amortize its setup cost.
+\end{block}
+\end{frame}
+
+% ---------------------------------------------------------
+\section{Summary}
+
+\begin{frame}{Contributions to state clearly}
+\begin{enumerate}
+  \item Formulate EFGP's weight-space solve as a natural target for spectral deflation.
+  \item Design a frequency-space preconditioner that preserves FFT/NUFFT structure.
+  \item Analyze the expected condition-number improvement from top-$q$ flattening.
+  \item Benchmark the top-$q$ trade-off: setup cost vs. iteration reduction.
+  \item Identify regimes where preconditioning is most valuable: large $N/\sigma^2$, low dimension, translation-invariant kernels.
+\end{enumerate}
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}{Limitations and future work}
+\begin{itemize}
+  \item \textbf{Dimensionality}: EFGP uses $M=(2m+1)^d$ modes, so high dimension remains difficult.
+  \item \textbf{Eigenpair quality}: approximate top eigenvectors must be accurate enough to keep the preconditioner stable.
+  \item \textbf{Choosing $q$}: current rule is empirical; a more automatic spectral-elbow criterion is desirable.
+  \item \textbf{Theory}: need sharper bounds relating the deflated weight-space spectrum to data distribution and kernel parameters.
+  \item \textbf{Extensions}: posterior variance, hyperparameter learning, GPU implementation, and randomized eigensolvers.
+\end{itemize}
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}{Takeaway}
+\begin{center}
+\Large
+KRR is not obsolete; its bottleneck is linear algebra.
+\end{center}
+
+\vspace{1em}
+\begin{block}{Main thesis insight}
+EFGP makes low-dimensional translation-invariant KRR fast per iteration; EigenPro-style spectral deflation can make it fast in iteration count.
+\end{block}
+
+\vspace{0.5em}
+\begin{center}
+\Large
+\textbf{Fast Fourier structure + spectral preconditioning}
+\end{center}
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}[allowframebreaks]{References}
+\small
+\begin{thebibliography}{9}
+\bibitem{greengard2023}
+P. Greengard, M. Rachh, and A. Barnett.
+\newblock Equispaced Fourier representations for efficient Gaussian process regression from a billion data points.
+\newblock 2023.
+
+\bibitem{barnett2023}
+A. Barnett, P. Greengard, and M. Rachh.
+\newblock Uniform approximation of common Gaussian process kernels using equispaced Fourier grids.
+\newblock 2023.
+
+\bibitem{eigenpro3}
+A. Abedsoltan, M. Belkin, and P. Pandit.
+\newblock Toward Large Kernel Models.
+\newblock ICML 2023.
+
+\bibitem{doumeche2025}
+N. Doum\`eche, F. Bach, G. Biau, and C. Boyer.
+\newblock Fast Kernel Methods: Sobolev, Physics-Informed, and Additive Models.
+\newblock 2025.
+
+\bibitem{bach2024}
+F. Bach.
+\newblock Learning Theory from First Principles.
+\newblock MIT Press, 2024.
+\end{thebibliography}
+\end{frame}
+
+% ---------------------------------------------------------
+\appendix
+\section{Backup slides}
+
+\begin{frame}{Backup: function space vs. weight space equivalence}
+If $K\approx \Phi\Phi^*$, then the function-space approximate solve is
+\[
+(\Phi\Phi^*+\sig I)\tilde\alpha=y.
+\]
+The weight-space solve is
+\[
+(\Phi^*\Phi+\sig I)\beta=\Phi^*y.
+\]
+They are linked by
+\[
+\beta=\Phi^*\tilde\alpha,
+\qquad
+\tilde\alpha=\frac{y-\Phi\beta}{\sig}.
+\]
+Therefore the posterior mean can be evaluated as
+\[
+\mu(x)=\sum_j \beta_j\phi_j(x).
+\]
+\end{frame}
+
+\begin{frame}{Backup: kernel approximation error in EFGP}
+The Fourier grid approximation error can be decomposed into
+\[
+\tilde{k}(x)-k(x)
+= -\sum_{n\in\mathbb{Z}^d,n\ne 0} k\!\left(x+\frac{n}{h}\right)
++ h^d\sum_{j\in\mathbb{Z}^d,j\notin J_m}\widehat{k}(hj)e^{2\pi i h j^\top x}.
+\]
+
+\begin{itemize}
+  \item First term: aliasing error from grid spacing $h$.
+  \item Second term: truncation error from finite frequency box $J_m$.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Backup: preconditioner stability checklist}
+\begin{itemize}
+  \item Verify eigenvalues are positive and ordered.
+  \item Clip factors $1-\tau/\theta_i$ to avoid negative preconditioner weights under numerical noise.
+  \item Check $\norm{U_q^*U_q-I}$ for orthogonality.
+  \item Monitor PCG residual in the original system, not only the preconditioned residual.
+  \item Compare final predictions against unpreconditioned CG at matched tolerance.
+\end{itemize}
+\end{frame}
+
+\end{document}
