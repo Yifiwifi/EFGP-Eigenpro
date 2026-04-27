@@ -1,0 +1,90 @@
+{
+  "timestamp": "2026-04-27T01:06:10.201689",
+  "python": "3.12.3 | packaged by conda-forge | (main, Apr 15 2024, 18:20:11) [MSC v.1938 64 bit (AMD64)]",
+  "platform": "win32",
+  "device_name": "NVIDIA GeForce RTX 3050 Laptop GPU",
+  "eps": 1e-06,
+  "solve_tol": 1e-06,
+  "gpu_maxiter": 3000,
+  "nufft_mode": "auto",
+  "l2_scaled": true,
+  "dim": 2,
+  "kernel": "Mat32",
+  "nu": 1.5,
+  "lengthscale": 0.1,
+  "reg_lambda": 0.1,
+  "n_test": 1000,
+  "n_list": [
+    100000,
+    300000
+  ],
+  "mode_specs": [
+    {
+      "mode": "gpu_v1_topq0",
+      "top_q": 0
+    },
+    {
+      "mode": "gpu_v3_topq",
+      "top_q": 64
+    },
+    {
+      "mode": "gpu_v3_topq_cupy_eigsh",
+      "top_q": 64
+    },
+    {
+      "mode": "gpu_v3_topq_rand_subspace_rr",
+      "top_q": 64
+    },
+    {
+      "mode": "gpu_v3_topq_eigenpro_nystrom",
+      "top_q": 64
+    },
+    {
+      "mode": "gpu_v3_topq_combo",
+      "top_q": 32,
+      "combo_cfg": {
+        "name": "combo_g0p1_e100_s0p3",
+        "kind": "combo",
+        "grid_scale": 0.1,
+        "grid_m": null,
+        "eps_factor": 100.0,
+        "subsample_frac": 0.3,
+        "subsample_seed": 0,
+        "sur_iter": 1,
+        "refine_iter": 1,
+        "oversample": 16,
+        "block_size": null
+      }
+    },
+    {
+      "mode": "gpu_v3_topq_combo",
+      "top_q": 64,
+      "combo_cfg": {
+        "name": "combo_g0p1_e100_s0p3",
+        "kind": "combo",
+        "grid_scale": 0.1,
+        "grid_m": null,
+        "eps_factor": 100.0,
+        "subsample_frac": 0.3,
+        "subsample_seed": 0,
+        "sur_iter": 1,
+        "refine_iter": 1,
+        "oversample": 16,
+        "block_size": null
+      }
+    }
+  ],
+  "eigenpro_nystrom": {
+    "precond_kind": "coordinate_nystrom",
+    "surrogate_size": 1600,
+    "lowfreq_ratio": 0.25,
+    "oversample": 10,
+    "ritz_refine": false,
+    "seed": 0,
+    "block_rows": 8192,
+    "ritz_block_cols": 16,
+    "lift": false
+  },
+  "cupy": "13.3.0",
+  "cufinufft": "2.5.1"
+}
