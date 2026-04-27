@@ -20,6 +20,21 @@ class GPUPreconditionerData:
 
 
 @dataclass
+class CoordinateNystromPreconditionerData:
+    """
+    Compact coordinate Nyström preconditioner data.
+
+    P(z) = z - I_S V diag(1 - mu / theta) V^* z_S.
+    """
+
+    S_gpu: Any
+    V_gpu: Any
+    VH_gpu: Any
+    alpha_gpu: Any
+    alpha_col_gpu: Any
+
+
+@dataclass
 class GPUDominantSubspacePreconditionerData:
     """
     GPU resident dominant-subspace preconditioner data.
@@ -45,6 +60,42 @@ def build_gpu_preconditioner_data(
         UH_gpu=UH,
         scale_gpu=scale,
         scale_col_gpu=scale.reshape(-1, 1),
+    )
+
+
+def build_coordinate_nystrom_preconditioner_data(
+    backend: GPUBackendBundle,
+    S: Any,
+    V: Any,
+    theta: Any,
+    mu: float,
+    *,
+    theta_floor: Optional[float] = None,
+    theta_floor_ratio: float = 1e-12,
+) -> CoordinateNystromPreconditionerData:
+    xp = backend.xp
+    S_gpu = xp.ascontiguousarray(xp.asarray(S, dtype=xp.int64).reshape(-1))
+    V_gpu = xp.ascontiguousarray(xp.asarray(V, dtype=xp.complex128))
+    theta_gpu = xp.ascontiguousarray(xp.real(xp.asarray(theta, dtype=xp.float64).reshape(-1)))
+    if V_gpu.ndim != 2:
+        raise ValueError("V must be 2D.")
+    if theta_gpu.ndim != 1:
+        raise ValueError("theta must be 1D.")
+    if int(V_gpu.shape[0]) != int(S_gpu.size):
+        raise ValueError("V rows must match S length.")
+    if int(V_gpu.shape[1]) != int(theta_gpu.size):
+        raise ValueError("theta length must match V columns.")
+    theta_max = float(xp.max(theta_gpu)) if theta_gpu.size else 0.0
+    floor = float(theta_floor) if theta_floor is not None else 0.0
+    floor = max(floor, float(theta_floor_ratio) * max(theta_max, 0.0))
+    theta_safe = xp.maximum(theta_gpu, floor)
+    alpha = xp.ascontiguousarray(1.0 - (float(mu) / theta_safe))
+    return CoordinateNystromPreconditionerData(
+        S_gpu=S_gpu,
+        V_gpu=V_gpu,
+        VH_gpu=xp.ascontiguousarray(V_gpu.conj().T),
+        alpha_gpu=alpha,
+        alpha_col_gpu=alpha.reshape(-1, 1),
     )
 
 
@@ -254,7 +305,7 @@ def apply_preconditioner_v2(
     UH = precond_data.UH_gpu
     scale = precond_data.scale_gpu
     scale_col = precond_data.scale_col_gpu
-    v = xp.asarray(v_gpu, dtype=U.dtype)
+    v = xp.asarray(v_gpu)
 
     if U.ndim != 2:
         raise ValueError("U_gpu must be 2D.")
@@ -263,7 +314,19 @@ def apply_preconditioner_v2(
     if v.ndim not in (1, 2):
         raise ValueError("v_gpu must be 1D or 2D.")
     if v.shape[0] != U.shape[0]:
-        raise ValueError("Leading dimension of v must match U.shape[0].")
+        # Compatibility: some call sites may accidentally store U as (q, n) instead of (n, q).
+        # If dimensions are unambiguous, transpose once here instead of hard-failing.
+        if (
+            v.shape[0] == U.shape[1]
+            and scale.shape[0] == U.shape[0]
+            and UH.shape == (U.shape[1], U.shape[0])
+        ):
+            U = xp.ascontiguousarray(U.conj().T)
+            UH = xp.ascontiguousarray(U.conj().T)
+            scale_col = scale.reshape(-1, 1)
+        else:
+            raise ValueError("Leading dimension of v must match U.shape[0].")
+    v = xp.asarray(v, dtype=U.dtype)
 
     proj = None
     scaled = None
@@ -306,6 +369,59 @@ def apply_preconditioner_v2(
     if out_buf is None or out_buf.shape != v.shape or out_buf.dtype != U.dtype or shares_mem:
         out_buf = xp.empty_like(v, dtype=U.dtype)
     xp.subtract(v, tmp, out=out_buf)
+    return out_buf
+
+
+def apply_preconditioner_coordinate_nystrom(
+    backend: GPUBackendBundle,
+    precond_data: CoordinateNystromPreconditionerData,
+    v_gpu: Any,
+    op_ctx: Optional[GPUOperatorContext] = None,
+    out: Optional[Any] = None,
+) -> Any:
+    """
+    Compact coordinate Nyström preconditioner:
+    P(v) = v - I_S V((alpha) .* (V^* v[S])).
+    """
+
+    del op_ctx
+    xp = backend.xp
+    S = precond_data.S_gpu
+    V = precond_data.V_gpu
+    VH = precond_data.VH_gpu
+    alpha = precond_data.alpha_gpu
+    alpha_col = precond_data.alpha_col_gpu
+    v = xp.asarray(v_gpu, dtype=V.dtype)
+
+    if V.ndim != 2:
+        raise ValueError("V_gpu must be 2D.")
+    if alpha.ndim != 1 or alpha.shape[0] != V.shape[1]:
+        raise ValueError("alpha shape is incompatible with V.")
+    if v.ndim not in (1, 2):
+        raise ValueError("v_gpu must be 1D or 2D.")
+    if int(S.size) != int(V.shape[0]):
+        raise ValueError("S length must match V rows.")
+
+    out_buf = out
+    may_share = getattr(xp, "may_share_memory", None)
+    shares_mem = False
+    if out_buf is not None and callable(may_share):
+        try:
+            shares_mem = bool(may_share(out_buf, v))
+        except Exception:
+            shares_mem = False
+    if out_buf is None or out_buf.shape != v.shape or out_buf.dtype != V.dtype or shares_mem:
+        out_buf = xp.empty_like(v, dtype=V.dtype)
+    xp.copyto(out_buf, v)
+
+    z_s = v[S] if v.ndim == 1 else v[S, :]
+    coeff = VH @ z_s
+    coeff = alpha * coeff if coeff.ndim == 1 else alpha_col * coeff
+    corr_s = V @ coeff
+    if out_buf.ndim == 1:
+        out_buf[S] -= corr_s
+    else:
+        out_buf[S, :] -= corr_s
     return out_buf
 
 

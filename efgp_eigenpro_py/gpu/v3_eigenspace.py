@@ -30,6 +30,15 @@ class EigenspaceConfig:
     surrogate_ritz_block_cols: int = 8
     # False: only embed W0 eigenvectors on coordinate indices S (no K[:,S] T^-1 lift); for profiling.
     surrogate_lift: bool = True
+    # After full Toeplitz lift: "auto"/"qr" → reduced QR; "normalize" → column L2; "none" → skip.
+    # No-lift (I_S V) is already orthonormal; this flag is ignored there.
+    surrogate_orthogonalize: str = "auto"
+    # Top eigenpairs of dense W0(s×s): "dense_eigh" (full) vs "cupy_eigsh" (Lanczos via LinearOperator + matvec).
+    # If s is too small for eigsh (need k ≤ s−2), we fall back to dense_eigh and record in diag.
+    surrogate_small_eig_method: str = "cupy_eigsh"
+    surrogate_small_eig_tol: float = 1e-6
+    surrogate_small_eig_ncv: Optional[int] = None
+    surrogate_small_eig_maxiter: Optional[int] = None
     eig_floor: float = 1e-12
 
 
@@ -85,7 +94,13 @@ def estimate_top_eigenspace_v3(
         return _estimate_via_cupy_methods(
             backend, apply_A_block_gpu, int(size), cfg, method=method, init_Q=init_Q
         )
-    if method in ("eigenpro_nystrom", "nystrom", "ep_nystrom"):
+    if method in (
+        "eigenpro_nystrom",
+        "nystrom",
+        "ep_nystrom",
+        "coordinate_nystrom",
+        "coord_nystrom",
+    ):
         return _estimate_eigenpro_nystrom(
             backend=backend,
             apply_A_block_gpu=apply_A_block_gpu,
@@ -305,6 +320,64 @@ def _auto_block_rows(s: int, *, target_mb: int = 256) -> int:
     return max(1, int(target_mb * 1024**2 // max(bytes_per_row, 1)))
 
 
+def _small_eig_with_existing_cupy_eigsh(
+    xp: Any,
+    w0: Any,
+    n_eigs: int,
+    cfg: EigenspaceConfig,
+) -> tuple[Any, Any]:
+    """
+    Top ``n_eigs`` eigenpairs of a small dense Hermitian ``w0`` using :func:`cupy_eigsh` on a
+    matvec ``w0 @ V``. Requires ``1 <= n_eigs <= s - 2`` (CuPy :func:`eigsh` requirement).
+    """
+    s = int(w0.shape[0])
+    n_eigs = int(n_eigs)
+    if n_eigs < 1:
+        raise ValueError("n_eigs must be >= 1")
+    if n_eigs > s - 2:
+        raise ValueError(
+            f"cupy_eigsh needs n_eigs <= s-2 for size s={s}; got n_eigs={n_eigs}"
+        )
+    w0c = xp.asarray(w0, dtype=xp.complex128)
+
+    def small_matvec_block(V: Any) -> Any:
+        vV = xp.asarray(V, dtype=xp.complex128)
+        if vV.ndim == 1:
+            vV = vV.reshape(-1, 1)
+        return w0c @ vV
+
+    ncv = _cfg_get(cfg, "surrogate_small_eig_ncv", None)
+    maxiter = _cfg_get(cfg, "surrogate_small_eig_maxiter", None)
+    small_cfg: dict[str, Any] = {
+        "tol": float(_cfg_get(cfg, "surrogate_small_eig_tol", 1e-6)),
+        "ncv": ncv,
+        "maxiter": maxiter,
+        "which": "LA",
+        "min_oversample": 16,
+    }
+    if ncv is None:
+        small_cfg["ncv"] = max(2 * n_eigs + 32, n_eigs + 2)
+    block_size = int(min(s - 1, max(n_eigs + 16, 2 * n_eigs)))
+    # :func:`cupy_eigsh` takes ``top_q`` s.t. the returned count is ``top_q + 1``.
+    top_q = n_eigs - 1
+    res = cupy_eigsh(
+        None,
+        s,
+        top_q,
+        matvec_block=small_matvec_block,
+        block_size=block_size,
+        oversample=2,
+        tol=float(small_cfg["tol"]),
+        maxiter=maxiter,
+        xp=xp,
+        cfg=small_cfg,
+    )
+    dtype_out = w0.dtype if hasattr(w0, "dtype") else xp.complex128
+    vals = xp.real(res.values[:n_eigs])
+    vecs = xp.asarray(res.vectors[:, :n_eigs], dtype=dtype_out)
+    return vals, vecs
+
+
 def _cfg_get(cfg: EigenspaceConfig, name: str, default: Any) -> Any:
     if hasattr(cfg, name):
         val = getattr(cfg, name)
@@ -485,6 +558,10 @@ def _estimate_eigenpro_nystrom(
     xp = backend.xp
     q_max = int(cfg.q_max)
     m = int(size)
+    method_name = str(cfg.eig_method if cfg.eig_method is not None else cfg.method).lower()
+    compact_coordinate = method_name in ("coordinate_nystrom", "coord_nystrom") or str(
+        mcfg.get("precond_kind", "")
+    ).lower() in ("coordinate_nystrom", "coord_nystrom")
     weights_gpu = xp.asarray(data_ctx.weights_gpu_flat, dtype=xp.float64).reshape(-1)
     if int(weights_gpu.size) != int(size):
         raise ValueError(
@@ -519,16 +596,89 @@ def _estimate_eigenpro_nystrom(
         except Exception:
             pass
     w0 = _toeplitz_submatrix_gpu(xp, xtxcol_gpu, weights_gpu, s_idx_np, mtot=mtot, dim=dim)
-    ew, ev = xp.linalg.eigh(w0)
-    order = xp.argsort(ew)[::-1]
-    n_top = int(min(q_max + 1, int(ew.size)))
-    pos = order[:n_top]
-    tau_lift = xp.real(ew[pos])
-    v_lift = ev[:, pos]
+    n_top_need = int(min(q_max + 1, s))
+    sm_req = str(
+        _cfg_get(cfg, "surrogate_small_eig_method", "cupy_eigsh") or "cupy_eigsh"
+    ).strip().lower()
+    if sm_req not in ("cupy_eigsh", "dense_eigh"):
+        raise ValueError(
+            "surrogate_small_eig_method must be 'cupy_eigsh' or 'dense_eigh'; "
+            f"got {sm_req!r}"
+        )
+    eigsh_ok = s > 2 and n_top_need <= s - 2
+    small_eig_fallback: Optional[str] = None
+    if sm_req == "cupy_eigsh" and eigsh_ok:
+        tau_lift, v_lift = _small_eig_with_existing_cupy_eigsh(
+            xp, w0, n_top_need, cfg
+        )
+        small_eig_effective = "cupy_eigsh"
+    else:
+        if sm_req == "cupy_eigsh" and not eigsh_ok:
+            small_eig_fallback = "eigsh_infeasible"
+        ew, ev = xp.linalg.eigh(w0)
+        order = xp.argsort(ew)[::-1]
+        n_top = int(min(n_top_need, int(ew.size)))
+        pos = order[:n_top]
+        tau_lift = xp.real(ew[pos])
+        v_lift = ev[:, pos]
+        small_eig_effective = "dense_eigh"
     q_lift = int(min(q_max + 1, int(v_lift.shape[1])))
 
+    scale_cfg = _cfg_get(cfg, "surrogate_eig_scale", None)
+    scale = float(m / max(1, s)) if scale_cfg is None else float(scale_cfg)
+    if compact_coordinate:
+        q_take = int(min(q_max, q_lift))
+        theta_all = xp.real(tau_lift[:q_lift])
+        theta_all = xp.maximum(theta_all, 0.0) + reg_lambda
+        theta_q = xp.ascontiguousarray(theta_all[:q_take])
+        V_q = xp.ascontiguousarray(v_lift[:, :q_take])
+        if int(theta_all.size) > q_take:
+            mu = float(theta_all[q_take])
+        else:
+            mu = float(theta_q[-1])
+        t_eig = float(time.perf_counter() - t0)
+        s_gpu = xp.ascontiguousarray(xp.asarray(s_idx_np, dtype=xp.int64))
+        diag = {
+            "method": _diag_method_name(cfg),
+            "eig_method": "coordinate_nystrom",
+            "precond_kind": "coordinate_nystrom",
+            "n_iter": 0,
+            "block_size": int(s),
+            "residual_fro": float("nan"),
+            "residual_fro_rel": float("nan"),
+            "residual_cols": None,
+            "residual_cols_rel": None,
+            "init_used": False,
+            "init_cols": 0,
+            "eig_nystrom_kernel_s": t_eig,
+            "time_eigenspace": t_eig,
+            "surrogate_tag": f"coordinate_nystrom_s{s}_q{q_take}_oversample{so}_low{lfr:g}",
+            "surrogate_indices": s_idx_np,
+            "surrogate_mu": mu,
+            "mu": mu,
+            "surrogate_scale": 1.0,
+            "surrogate_block_rows_used": 0,
+            "surrogate_lift": False,
+            "surrogate_orthogonalize": "none",
+            "surrogate_orthogonalize_effective": "compact_coordinate",
+            "surrogate_small_eig_method": small_eig_effective,
+            "surrogate_small_eig_method_requested": sm_req,
+            "S_gpu": s_gpu,
+            "V_gpu": V_q,
+            "theta_gpu": theta_q,
+            **(
+                {"surrogate_small_eig_fallback": small_eig_fallback}
+                if small_eig_fallback is not None
+                else {}
+            ),
+        }
+        return theta_q, V_q, diag
+
     use_full_lift = bool(_cfg_get(cfg, "surrogate_lift", True))
+    orth_raw = str(_cfg_get(cfg, "surrogate_orthogonalize", "auto") or "auto").strip()
+    orth = orth_raw.lower()
     block_rows = 0
+    orth_effective = "skipped_nolift"
     if use_full_lift:
         block_rows_cfg = _cfg_get(cfg, "surrogate_block_rows", None)
         if block_rows_cfg is None:
@@ -548,16 +698,28 @@ def _estimate_eigenpro_nystrom(
             block_rows=block_rows,
             eig_floor=float(_cfg_get(cfg, "eig_floor", 1e-12)),
         )
+        if orth in ("qr", "auto"):
+            u, _ = xp.linalg.qr(u, mode="reduced")
+            orth_effective = "qr"
+        elif orth == "normalize":
+            nrm = xp.linalg.norm(u, axis=0)
+            u = u / xp.maximum(nrm[None, :], 1e-30)
+            orth_effective = "normalize"
+        elif orth == "none":
+            orth_effective = "none"
+        else:
+            raise ValueError(
+                "surrogate_orthogonalize must be one of 'auto', 'qr', 'none', 'normalize'; "
+                f"got {orth_raw!r}"
+            )
+        u = xp.ascontiguousarray(u)
     else:
-        # Coordinate subspace: U = I[:,S] V_q (no Nyström cross-lift); weak precondition, fast setup.
+        # U = I[:,S] V_q: V_q from eigh(W0) is orthonormal, so columns stay orthonormal in R^M; no op.
         u = xp.zeros((m, q_max), dtype=xp.complex128)
         s_gpu = xp.asarray(s_idx_np, dtype=xp.int64)
         u[s_gpu, :] = v_lift[:, :q_max]
-    u, _ = xp.linalg.qr(u, mode="reduced")
-    u = xp.ascontiguousarray(u)
+        u = xp.ascontiguousarray(u)
 
-    scale_cfg = _cfg_get(cfg, "surrogate_eig_scale", None)
-    scale = float(m / max(1, s)) if scale_cfg is None else float(scale_cfg)
     use_ritz = bool(_cfg_get(cfg, "surrogate_ritz_refine", True))
     ritz_cols = int(_cfg_get(cfg, "surrogate_ritz_block_cols", 8))
     residual_fro = float("nan")
@@ -618,6 +780,15 @@ def _estimate_eigenpro_nystrom(
         "surrogate_scale": float(scale),
         "surrogate_block_rows_used": int(block_rows),
         "surrogate_lift": bool(use_full_lift),
+        "surrogate_orthogonalize": orth_raw,
+        "surrogate_orthogonalize_effective": orth_effective,
+        "surrogate_small_eig_method": small_eig_effective,
+        "surrogate_small_eig_method_requested": sm_req,
+        **(
+            {"surrogate_small_eig_fallback": small_eig_fallback}
+            if small_eig_fallback is not None
+            else {}
+        ),
     }
     if (not use_ritz) and scale_cfg is None:
         diag["surrogate_scale_warning"] = (

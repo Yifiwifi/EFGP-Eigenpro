@@ -17,10 +17,13 @@ from .v1_ops import (
     solve_beta_plain_cg_v1,
 )
 from .v2_preconditioner import (
+    CoordinateNystromPreconditionerData,
     GPUPreconditionerData,
     apply_preconditioner_dominant_subspace,
+    apply_preconditioner_coordinate_nystrom,
     apply_preconditioner_v2,
     build_dominant_subspace_preconditioner,
+    build_coordinate_nystrom_preconditioner_data,
     build_gpu_preconditioner_data,
 )
 from .iterative_solvers import pcg_solve_gpu
@@ -258,7 +261,13 @@ def run_v3_full_gpu_eigenspace(
 
     eig_cfg = eig_cfg or EigenspaceConfig(q_max=32, block_size=40)
     method_name = str((eig_cfg.eig_method if eig_cfg.eig_method is not None else eig_cfg.method) or "subspace_iter").lower()
-    if method_name in ("eigenpro_nystrom", "nystrom", "ep_nystrom"):
+    if method_name in (
+        "eigenpro_nystrom",
+        "nystrom",
+        "ep_nystrom",
+        "coordinate_nystrom",
+        "coord_nystrom",
+    ):
         eig_cfg.method_cfg = dict(eig_cfg.method_cfg or {})
         eig_cfg.method_cfg.setdefault("data_ctx", data_ctx)
         eig_cfg.method_cfg.setdefault("reg_lambda", float(cfg.reg_lambda))
@@ -291,14 +300,26 @@ def run_v3_full_gpu_eigenspace(
     t2 = time.perf_counter()
 
     q = int(eig_cfg.q_max)
-    mu = mu_for_precond_from_eig(vals_gpu, q, eig_diag)
-    scale_gpu = backend.xp.asarray(1.0 - (mu / vals_gpu[:q]))
-    precond_data = GPUPreconditionerData(
-        U_gpu=vecs_gpu[:, :q],
-        UH_gpu=vecs_gpu[:, :q].conj().T,
-        scale_gpu=scale_gpu,
-        scale_col_gpu=scale_gpu.reshape(-1, 1),
-    )
+    precond_kind = str(eig_diag.get("precond_kind", "full_eigenpro")).lower()
+    if precond_kind == "coordinate_nystrom":
+        precond_data: GPUPreconditionerData | CoordinateNystromPreconditionerData = (
+            build_coordinate_nystrom_preconditioner_data(
+                backend,
+                eig_diag["S_gpu"],
+                eig_diag["V_gpu"],
+                eig_diag["theta_gpu"],
+                float(eig_diag["mu"]),
+            )
+        )
+    else:
+        mu = mu_for_precond_from_eig(vals_gpu, q, eig_diag)
+        scale_gpu = backend.xp.asarray(1.0 - (mu / vals_gpu[:q]))
+        precond_data = GPUPreconditionerData(
+            U_gpu=vecs_gpu[:, :q],
+            UH_gpu=vecs_gpu[:, :q].conj().T,
+            scale_gpu=scale_gpu,
+            scale_col_gpu=scale_gpu.reshape(-1, 1),
+        )
     t3 = time.perf_counter()
 
     def _matvec(v: Any, out: Any) -> None:
@@ -307,7 +328,14 @@ def run_v3_full_gpu_eigenspace(
         apply_A_v1(backend, data_ctx, v, float(cfg.reg_lambda), op_ctx, out=out)
 
     def _precond(v: Any, out: Any) -> None:
-        apply_preconditioner_v2(backend, precond_data, v, op_ctx=op_ctx, out=out)
+        if precond_kind == "coordinate_nystrom" or all(
+            hasattr(precond_data, k) for k in ("S_gpu", "V_gpu", "VH_gpu")
+        ):
+            apply_preconditioner_coordinate_nystrom(
+                backend, precond_data, v, op_ctx=op_ctx, out=out
+            )
+        else:
+            apply_preconditioner_v2(backend, precond_data, v, op_ctx=op_ctx, out=out)
 
     beta_gpu, it, relres, stats = pcg_solve_gpu(
         backend,
@@ -329,6 +357,7 @@ def run_v3_full_gpu_eigenspace(
             "version": "v3",
             "status": "ok",
             "top_q": int(q),
+            "precond_kind": precond_kind,
             "nufft_backend": backend.nufft_name,
             "nufft_stage": data_ctx.meta.get("nufft_stage"),
             "cg_iters": int(it),
@@ -408,7 +437,13 @@ def build_v3_pcg_left_precond_matvec(
         return out_block
 
     method_name = str((eig_cfg.eig_method if eig_cfg.eig_method is not None else eig_cfg.method) or "subspace_iter").lower()
-    if method_name in ("eigenpro_nystrom", "nystrom", "ep_nystrom"):
+    if method_name in (
+        "eigenpro_nystrom",
+        "nystrom",
+        "ep_nystrom",
+        "coordinate_nystrom",
+        "coord_nystrom",
+    ):
         eig_cfg.method_cfg = dict(eig_cfg.method_cfg or {})
         eig_cfg.method_cfg.setdefault("data_ctx", data_ctx)
         eig_cfg.method_cfg.setdefault("reg_lambda", float(cfg.reg_lambda))
@@ -420,14 +455,24 @@ def build_v3_pcg_left_precond_matvec(
         cfg=eig_cfg,
     )
     q = int(eig_cfg.q_max)
-    mu = mu_for_precond_from_eig(vals_gpu, q, eig_diag)
-    scale_gpu = backend.xp.asarray(1.0 - (mu / vals_gpu[:q]))
-    precond_data = GPUPreconditionerData(
-        U_gpu=vecs_gpu[:, :q],
-        UH_gpu=vecs_gpu[:, :q].conj().T,
-        scale_gpu=scale_gpu,
-        scale_col_gpu=scale_gpu.reshape(-1, 1),
-    )
+    precond_kind = str(eig_diag.get("precond_kind", "full_eigenpro")).lower()
+    if precond_kind == "coordinate_nystrom":
+        precond_data = build_coordinate_nystrom_preconditioner_data(
+            backend,
+            eig_diag["S_gpu"],
+            eig_diag["V_gpu"],
+            eig_diag["theta_gpu"],
+            float(eig_diag["mu"]),
+        )
+    else:
+        mu = mu_for_precond_from_eig(vals_gpu, q, eig_diag)
+        scale_gpu = backend.xp.asarray(1.0 - (mu / vals_gpu[:q]))
+        precond_data = GPUPreconditionerData(
+            U_gpu=vecs_gpu[:, :q],
+            UH_gpu=vecs_gpu[:, :q].conj().T,
+            scale_gpu=scale_gpu,
+            scale_col_gpu=scale_gpu.reshape(-1, 1),
+        )
     n = int(data_ctx.rhs_gpu.size)
     av_buf: list[Any] = [None]
 
@@ -438,12 +483,20 @@ def build_v3_pcg_left_precond_matvec(
             av_buf[0] = xp.empty((int(va.size),), dtype=xp.complex128)
         oa = xp.asarray(out, dtype=xp.complex128).reshape(-1)
         apply_A_v1(backend, data_ctx, va, float(cfg.reg_lambda), op_ctx, out=av_buf[0])
-        apply_preconditioner_v2(backend, precond_data, av_buf[0], op_ctx=op_ctx, out=oa)
+        if precond_kind == "coordinate_nystrom" or all(
+            hasattr(precond_data, k) for k in ("S_gpu", "V_gpu", "VH_gpu")
+        ):
+            apply_preconditioner_coordinate_nystrom(
+                backend, precond_data, av_buf[0], op_ctx=op_ctx, out=oa
+            )
+        else:
+            apply_preconditioner_v2(backend, precond_data, av_buf[0], op_ctx=op_ctx, out=oa)
 
     meta: dict[str, Any] = {
         "slq_spectrum": "M_inv_A",
         "slq_spectrum_desc": "P(A v); same P as apply_preconditioner_v2 in PCG.",
         "top_q": int(q),
+        "precond_kind": precond_kind,
         "eig_residual_fro_rel": float(eig_diag.get("residual_fro_rel", float("nan"))),
     }
     return backend, matvec, n, meta
