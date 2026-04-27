@@ -311,6 +311,19 @@ def gpu_precompute_v1(
         and data_ctx.weights_gpu_flat is not None
         and data_ctx.meta.get("mtot") is not None
     ):
+        if getattr(data_ctx, "xtxcol_gpu", None) is None and data_ctx.gf_gpu is not None:
+            xp0 = backend.xp
+            try:
+                data_ctx.xtxcol_gpu = xp0.ascontiguousarray(backend.fft.ifftn(data_ctx.gf_gpu))
+            except Exception:
+                pass
+        if getattr(data_ctx, "weights_np_flat", None) is None and data_ctx.weights_gpu_flat is not None:
+            try:
+                data_ctx.weights_np_flat = np.ascontiguousarray(
+                    _device_array_to_numpy(data_ctx.weights_gpu_flat, np.float64).reshape(-1)
+                )
+            except Exception:
+                pass
         return data_ctx
 
     xp = backend.xp
@@ -399,6 +412,7 @@ def gpu_precompute_v1(
 
     Gf_gpu = backend.fft.fftn(XtXcol_gpu)
     Gf_gpu = xp.ascontiguousarray(Gf_gpu)
+    data_ctx.xtxcol_gpu = xp.ascontiguousarray(XtXcol_gpu)
 
     w_gpu = xp.asarray(weights_np, dtype=xp.float64)
     weights_flat = w_gpu.reshape(-1)
@@ -407,6 +421,7 @@ def gpu_precompute_v1(
 
     data_ctx.weights_gpu_nd = weights_nd
     data_ctx.weights_gpu_flat = weights_flat
+    data_ctx.weights_np_flat = np.ascontiguousarray(np.asarray(weights_np, dtype=np.float64).reshape(-1))
     data_ctx.rhs_gpu = xp.multiply(weights_flat, rhs_flat)
     data_ctx.gf_gpu = Gf_gpu
     data_ctx.x_center_gpu = x_center_gpu

@@ -28,6 +28,8 @@ class EigenspaceConfig:
     surrogate_eig_scale: Optional[float] = None
     surrogate_ritz_refine: bool = True
     surrogate_ritz_block_cols: int = 8
+    # False: only embed W0 eigenvectors on coordinate indices S (no K[:,S] T^-1 lift); for profiling.
+    surrogate_lift: bool = True
     eig_floor: float = 1e-12
 
 
@@ -450,6 +452,7 @@ def _toeplitz_cross_lift_gpu(
         hi = min(lo + rows_step, m)
         rows_np = np.arange(lo, hi, dtype=np.int64)
         multi_r = _unravel_indices_np(rows_np, mtot, dim)
+
         diff = multi_s[None, :, :] - multi_r[:, None, :] + shift
         idx = tuple(xp.asarray(diff[..., k], dtype=xp.int64) for k in range(dim))
         t = xtxcol_gpu[idx]
@@ -488,7 +491,13 @@ def _estimate_eigenpro_nystrom(
             f"size mismatch: size={size}, but weights_gpu_flat.size={weights_gpu.size}. "
             "Check data_ctx / grid_override / precompute cache."
         )
-    weights_np = _asnumpy(weights_gpu)
+    weights_np = getattr(data_ctx, "weights_np_flat", None)
+    if weights_np is None:
+        weights_np = _asnumpy(weights_gpu)
+        try:
+            data_ctx.weights_np_flat = weights_np
+        except Exception:
+            pass
 
     s_idx_np = _sample_frequency_indices(
         weights_np,
@@ -502,7 +511,13 @@ def _estimate_eigenpro_nystrom(
     if s < (q_max + 1):
         raise ValueError(f"surrogate_size={s} is too small for q_max={q_max}.")
 
-    xtxcol_gpu = xp.ascontiguousarray(backend.fft.ifftn(data_ctx.gf_gpu))
+    xtxcol_gpu = getattr(data_ctx, "xtxcol_gpu", None)
+    if xtxcol_gpu is None:
+        xtxcol_gpu = xp.ascontiguousarray(backend.fft.ifftn(data_ctx.gf_gpu))
+        try:
+            data_ctx.xtxcol_gpu = xtxcol_gpu
+        except Exception:
+            pass
     w0 = _toeplitz_submatrix_gpu(xp, xtxcol_gpu, weights_gpu, s_idx_np, mtot=mtot, dim=dim)
     ew, ev = xp.linalg.eigh(w0)
     order = xp.argsort(ew)[::-1]
@@ -512,24 +527,32 @@ def _estimate_eigenpro_nystrom(
     v_lift = ev[:, pos]
     q_lift = int(min(q_max + 1, int(v_lift.shape[1])))
 
-    block_rows_cfg = _cfg_get(cfg, "surrogate_block_rows", None)
-    if block_rows_cfg is None:
-        block_rows = _auto_block_rows(s, target_mb=256)
-    else:
-        block_rows = int(block_rows_cfg)
+    use_full_lift = bool(_cfg_get(cfg, "surrogate_lift", True))
+    block_rows = 0
+    if use_full_lift:
+        block_rows_cfg = _cfg_get(cfg, "surrogate_block_rows", None)
+        if block_rows_cfg is None:
+            block_rows = _auto_block_rows(s, target_mb=256)
+        else:
+            block_rows = int(block_rows_cfg)
 
-    u = _toeplitz_cross_lift_gpu(
-        xp,
-        xtxcol_gpu,
-        weights_gpu,
-        s_idx_np,
-        v_lift[:, :q_lift],
-        tau_lift[:q_lift],
-        mtot=mtot,
-        dim=dim,
-        block_rows=block_rows,
-        eig_floor=float(_cfg_get(cfg, "eig_floor", 1e-12)),
-    )
+        u = _toeplitz_cross_lift_gpu(
+            xp,
+            xtxcol_gpu,
+            weights_gpu,
+            s_idx_np,
+            v_lift[:, :q_lift],
+            tau_lift[:q_lift],
+            mtot=mtot,
+            dim=dim,
+            block_rows=block_rows,
+            eig_floor=float(_cfg_get(cfg, "eig_floor", 1e-12)),
+        )
+    else:
+        # Coordinate subspace: U = I[:,S] V_q (no Nyström cross-lift); weak precondition, fast setup.
+        u = xp.zeros((m, q_max), dtype=xp.complex128)
+        s_gpu = xp.asarray(s_idx_np, dtype=xp.int64)
+        u[s_gpu, :] = v_lift[:, :q_max]
     u, _ = xp.linalg.qr(u, mode="reduced")
     u = xp.ascontiguousarray(u)
 
@@ -585,12 +608,16 @@ def _estimate_eigenpro_nystrom(
         "init_cols": 0,
         "eig_nystrom_kernel_s": t_eig,
         "time_eigenspace": t_eig,
-        "surrogate_tag": f"nystrom_s{s}_q{q_max}_oversample{so}_low{lfr:g}",
+        "surrogate_tag": (
+            f"nystrom_s{s}_q{q_max}_oversample{so}_low{lfr:g}"
+            + ("" if use_full_lift else "_coord_nolift")
+        ),
         "surrogate_indices": s_idx_np,
         "surrogate_mu": mu,
         "mu": mu,
         "surrogate_scale": float(scale),
         "surrogate_block_rows_used": int(block_rows),
+        "surrogate_lift": bool(use_full_lift),
     }
     if (not use_ritz) and scale_cfg is None:
         diag["surrogate_scale_warning"] = (

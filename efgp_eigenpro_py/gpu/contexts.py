@@ -21,8 +21,13 @@ class GPUDataContext:
     y_gpu: Any
     weights_gpu_nd: Optional[Any] = None
     weights_gpu_flat: Optional[Any] = None
+    # CPU copy of flat weights (for Nyström sampling, etc.); filled in precompute to avoid D2H each call.
+    weights_np_flat: Optional[Any] = None
     rhs_gpu: Optional[Any] = None
     gf_gpu: Optional[Any] = None
+    # First column of F^*F in the extended XTX grid (Toeplitz kernel); for Nyström and hot matvec.
+    # Preferred source: precompute stores ``fftn`` of this as ``gf_gpu``; this is the spatial form.
+    xtxcol_gpu: Optional[Any] = None
     x_center_gpu: Optional[Any] = None
     meta: dict[str, Any] = field(default_factory=dict)
 
@@ -76,8 +81,15 @@ def ensure_gpu_data_context(
         w = xp.asarray(state.weights)
         ctx.weights_gpu_nd = w
         ctx.weights_gpu_flat = w.reshape(-1)
+        ctx.weights_np_flat = np.ascontiguousarray(
+            np.asarray(state.weights, dtype=np.float64).reshape(-1)
+        )
         ctx.rhs_gpu = xp.asarray(state.rhs)
         ctx.gf_gpu = xp.asarray(state.Gf)
+        try:
+            ctx.xtxcol_gpu = xp.ascontiguousarray(backend.fft.ifftn(ctx.gf_gpu))
+        except Exception:
+            ctx.xtxcol_gpu = None
         ctx.x_center_gpu = xp.asarray(state.x_center, dtype=float)
 
         ctx.meta.update(
