@@ -22,7 +22,11 @@ from .backends import build_gpu_backend_bundle
 from .contexts import GPUOperatorContext, ensure_gpu_data_context
 from .v1_ops import apply_A_v1, gpu_precompute_v1
 from .v2_preconditioner import GPUPreconditionerData, apply_preconditioner_v2
-from .v3_eigenspace import EigenspaceConfig, estimate_top_eigenspace_v3
+from .v3_eigenspace import (
+    EigenspaceConfig,
+    estimate_top_eigenspace_v3,
+    mu_for_precond_from_eig,
+)
 from .versions import GPURunConfig
 
 
@@ -139,10 +143,7 @@ def _build_v3_pcg_left_precond_matvec_local(
         cfg=eig_cfg,
     )
     q = int(eig_cfg.q_max)
-    if vals_gpu.size <= q:
-        mu = float(vals_gpu[-1])
-    else:
-        mu = float(vals_gpu[q])
+    mu = mu_for_precond_from_eig(vals_gpu, q, eig_diag)
     scale_gpu = backend.xp.asarray(1.0 - (mu / vals_gpu[:q]))
     precond_data = GPUPreconditionerData(
         U_gpu=vecs_gpu[:, :q],
