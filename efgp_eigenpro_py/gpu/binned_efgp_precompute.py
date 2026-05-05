@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import math
 import sys
+import time
 import warnings
 from pathlib import Path
 from typing import Any, Iterator
@@ -546,6 +547,350 @@ def sparsify_bin_stats(bin_stats: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _import_cupy_binned() -> Any:
+    try:
+        import cupy as cp  # type: ignore
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("CuPy is required for GPU binning (build_bin_stats_from_arrays_gpu_dense).") from exc
+    return cp
+
+
+def build_bin_stats_from_arrays_gpu_dense(
+    X: np.ndarray,
+    y: np.ndarray,
+    r: int,
+    d: int,
+    order: str,
+    *,
+    xp: Any | None = None,
+    dtype: Any | None = None,
+) -> dict[str, Any]:
+    """
+    Dense GPU bin statistics via CuPy ``bincount`` (full ``G=r^d`` arrays).
+
+    Assumes normalized ``X`` in ``[0,1]^d`` like the CPU path. Does **not**
+    allocate Python dict-merge sparse structures.
+
+    Parameters
+    ----------
+    xp :
+        CuPy module; default ``import cupy``.
+    """
+    order = _resolve_order(order, d)
+    cp = xp if xp is not None else _import_cupy_binned()
+    if dtype is None:
+        dtype = cp.float64
+    rt = dtype
+
+    X64 = validate_normalized_X(X, d)
+    y64 = np.asarray(y, dtype=np.float64).reshape(-1)
+    if X64.shape[0] != y64.shape[0]:
+        raise ValueError("X and y length mismatch.")
+
+    rr = int(r)
+    pairs_c2 = _pair_indices_upper(d) if order == "C2" else []
+
+    Xg = cp.asarray(X64, dtype=cp.float64)
+    yg = cp.asarray(y64, dtype=cp.float64).reshape(-1)
+
+    q = cp.floor(rr * Xg).astype(cp.int64)
+    q = cp.clip(q, 0, rr - 1)
+
+    idx = q[:, 0].astype(cp.int64, copy=True)
+    mult = rr
+    for k in range(1, int(d)):
+        idx = idx + mult * q[:, k].astype(cp.int64, copy=False)
+        mult *= rr
+
+    G = int(rr**d)
+    one = cp.ones_like(yg, dtype=rt)
+    c = cp.bincount(idx, weights=one, minlength=G).astype(rt, copy=False)
+    s = cp.bincount(idx, weights=yg, minlength=G).astype(rt, copy=False)
+
+    z = (q.astype(cp.float64, copy=False) + 0.5) / float(rr)
+    delta = Xg - z
+
+    out: dict[str, Any] = {
+        "c": c,
+        "s": s,
+        "r": rr,
+        "d": int(d),
+        "order": order,
+        "dense": True,
+        "binning_dense_allocated": True,
+        "on_gpu": True,
+    }
+
+    if order in ("C1", "C2"):
+        a = cp.zeros((G, int(d)), dtype=rt)
+        ay = cp.zeros((G, int(d)), dtype=rt)
+        for k in range(int(d)):
+            dk = delta[:, k]
+            a[:, k] = cp.bincount(idx, weights=dk, minlength=G).astype(rt, copy=False)
+            ay[:, k] = cp.bincount(idx, weights=yg * dk, minlength=G).astype(rt, copy=False)
+        out["a"] = a
+        out["ay"] = ay
+
+    if order == "C2":
+        pairs = pairs_c2
+        npairs = len(pairs)
+        Q = cp.zeros((G, npairs), dtype=rt)
+        Qy = cp.zeros((G, npairs), dtype=rt)
+        for p, (i, j) in enumerate(pairs):
+            dij = delta[:, i] * delta[:, j]
+            Q[:, p] = cp.bincount(idx, weights=dij, minlength=G).astype(rt, copy=False)
+            Qy[:, p] = cp.bincount(idx, weights=yg * dij, minlength=G).astype(rt, copy=False)
+        out["Q"] = Q
+        out["Qy"] = Qy
+        out["pairs"] = pairs
+
+    return out
+
+
+def sparsify_bin_stats_gpu(bin_stats: dict[str, Any], xp: Any | None = None) -> dict[str, Any]:
+    """
+    Compress dense GPU stats to occupied bins only; arrays remain on GPU.
+    """
+    if not bin_stats.get("dense", True):
+        return bin_stats
+    if not bin_stats.get("on_gpu"):
+        raise ValueError("sparsify_bin_stats_gpu expects dense GPU stats (on_gpu=True).")
+
+    cp = xp if xp is not None else _import_cupy_binned()
+    c = bin_stats["c"]
+    mask = c > 0
+    idx_occ = cp.nonzero(mask)[0].astype(cp.int64)
+    rr = int(bin_stats["r"])
+    d = int(bin_stats["d"])
+    order = str(bin_stats["order"])
+
+    nocc = int(idx_occ.size)
+    q = cp.zeros((nocc, d), dtype=cp.int64)
+    rem = idx_occ.astype(cp.int64, copy=True)
+    for k in range(d):
+        q[:, k] = rem % rr
+        rem = rem // rr
+
+    z_occ = (q.astype(cp.float64, copy=False) + 0.5) / float(rr)
+
+    out: dict[str, Any] = {
+        "idx_occ": idx_occ,
+        "q_occ": q,
+        "z_occ": z_occ,
+        "c_occ": c[idx_occ],
+        "s_occ": bin_stats["s"][idx_occ],
+        "r": rr,
+        "d": d,
+        "order": order,
+        "dense": False,
+        "on_gpu": True,
+        "binning_dense_allocated": bool(bin_stats.get("binning_dense_allocated", True)),
+    }
+    if order in ("C1", "C2"):
+        out["a_occ"] = bin_stats["a"][idx_occ, :]
+        out["ay_occ"] = bin_stats["ay"][idx_occ, :]
+    if order == "C2":
+        out["Q_occ"] = bin_stats["Q"][idx_occ, :]
+        out["Qy_occ"] = bin_stats["Qy"][idx_occ, :]
+        out["pairs"] = bin_stats["pairs"]
+    return out
+
+
+def build_bin_stats_from_arrays_gpu(
+    X: np.ndarray,
+    y: np.ndarray,
+    r: int,
+    d: int,
+    order: str,
+    backend: Any,
+    *,
+    dense: bool = True,
+    return_occupied: bool = True,
+    dtype: Any | None = None,
+) -> dict[str, Any]:
+    """
+    GPU bin statistics entry point: dense CuPy ``bincount``, optionally compact to occupied bins.
+
+    ``dense=False`` is reserved for future sparse GPU paths and currently raises.
+    """
+    if backend is None:
+        raise ValueError("build_bin_stats_from_arrays_gpu requires backend.")
+    xp = backend.xp
+    if not dense:
+        raise NotImplementedError("Only dense=True GPU bincount is implemented.")
+    out_dense = build_bin_stats_from_arrays_gpu_dense(X, y, r, d, order, xp=xp, dtype=dtype)
+    if return_occupied:
+        return sparsify_bin_stats_gpu(out_dense, xp=xp)
+    return out_dense
+
+
+def tphx_from_centers_gpu(
+    z_centers: Any,
+    h: float,
+    x_center: np.ndarray,
+    xp: Any,
+    *,
+    allow_clip: bool = False,
+    boundary_tol: float = TPHX_BOUNDARY_TOL,
+) -> Any:
+    """GPU analogue of ``tphx_from_centers`` (``z_centers`` CuPy array)."""
+    cp = xp
+    z_centers = cp.asarray(z_centers, dtype=cp.float64)
+    xc = cp.asarray(np.asarray(x_center, dtype=np.float64).reshape(1, -1), dtype=cp.float64)
+    raw = 2.0 * cp.pi * float(h) * (z_centers - xc)
+    upper = float(np.nextafter(np.pi, 0.0))
+    amax = float(cp.max(cp.abs(raw)))
+    if allow_clip:
+        return cp.clip(raw, -cp.pi, upper)
+    if amax > np.pi + float(boundary_tol):
+        raise ValueError(
+            "tphx outside [-pi, pi] beyond numerical tolerance; "
+            "check h, scaling, x_center, or set allow_clip=True. "
+            f"max|tphx|={amax}, tol={boundary_tol}."
+        )
+    return cp.clip(raw, -cp.pi, upper)
+
+
+def _dispatch_type1_keep_gpu(
+    backend: Any,
+    tphx_gpu: Any,
+    weights_real: Any,
+    dim: int,
+    ms: int,
+    eps: float,
+    isign: int,
+) -> Any:
+    """Like ``_dispatch_type1`` but avoids host round-trip; returns device FFT coeffs."""
+    xp = backend.xp
+    w = xp.asarray(weights_real, dtype=xp.float64).reshape(-1)
+    c = w.astype(xp.complex128)
+    tphx_gpu = xp.asarray(tphx_gpu, dtype=xp.float64)
+    return _type1_coeffs_gpu(backend, tphx_gpu, c, dim, ms, eps, isign)
+
+
+def _as_numpy_optional_gpu(arr: Any, xp: Any) -> np.ndarray:
+    if arr is None:
+        raise TypeError("expected array")
+    if hasattr(arr, "get"):
+        return np.asarray(arr.get(), dtype=np.complex128)
+    return np.asarray(arr, dtype=np.complex128)
+
+
+def compute_binned_fourier_sums_gpu(
+    bin_stats: dict[str, Any],
+    h: float,
+    m: int,
+    *,
+    x_center: np.ndarray,
+    backend: Any,
+    nufft_tol: float,
+    isign: int = -1,
+    tphx_allow_clip: bool = False,
+    return_gpu: bool = False,
+) -> tuple[np.ndarray | Any, np.ndarray | Any, dict[str, Any]]:
+    """
+    Fourier sums for **GPU-compacted** bin stats (``dense=False``, ``on_gpu=True``).
+
+    When ``return_gpu=False`` (default), results are copied to host NumPy arrays.
+    When ``return_gpu=True``, ``v_tilde`` and ``rhs_tilde`` remain on device.
+    """
+    if backend is None:
+        raise ValueError("compute_binned_fourier_sums_gpu requires a GPU backend bundle.")
+    if not bin_stats.get("on_gpu"):
+        raise ValueError("compute_binned_fourier_sums_gpu expects bin_stats['on_gpu'] True.")
+    if bin_stats.get("dense", True):
+        raise ValueError("Pass sparsify_bin_stats_gpu output (dense=False).")
+
+    xp = backend.xp
+    order = _resolve_order(str(bin_stats["order"]), int(bin_stats["d"]))
+    dim = int(bin_stats["d"])
+    z_used = bin_stats["z_occ"]
+    c_w = bin_stats["c_occ"]
+    s_w = bin_stats["s_occ"]
+
+    modes_rhs = generate_multi_index(int(m), dim)
+    modes_v = generate_multi_index(2 * int(m), dim)
+    om_rhs = _omega_modes(modes_rhs, h)
+    om_v = _omega_modes(modes_v, h)
+    ms_rhs = 2 * int(m) + 1
+    ms_v = 4 * int(m) + 1
+
+    tphx = tphx_from_centers_gpu(z_used, h, x_center, xp, allow_clip=tphx_allow_clip)
+
+    if order == "C0":
+        info = {"num_transforms_v": 1, "num_transforms_rhs": 1}
+        v_tilde = _dispatch_type1_keep_gpu(backend, tphx, c_w, dim, ms_v, nufft_tol, isign)
+        rhs_tilde = _dispatch_type1_keep_gpu(backend, tphx, s_w, dim, ms_rhs, nufft_tol, isign)
+
+    elif order == "C1":
+        a = bin_stats["a_occ"]
+        ay = bin_stats["ay_occ"]
+        n_tr_v = 1 + dim
+        n_tr_r = 1 + dim
+        om_v_g = xp.asarray(om_v, dtype=xp.float64)
+        om_rhs_g = xp.asarray(om_rhs, dtype=xp.float64)
+
+        T0v = _dispatch_type1_keep_gpu(backend, tphx, c_w, dim, ms_v, nufft_tol, isign)
+        v_tilde = T0v.astype(xp.complex128, copy=True)
+        for k in range(dim):
+            Tk = _dispatch_type1_keep_gpu(backend, tphx, a[:, k], dim, ms_v, nufft_tol, isign)
+            v_tilde = v_tilde + (1.0j * float(isign)) * (om_v_g[:, k].astype(xp.complex128) * Tk)
+
+        T0r = _dispatch_type1_keep_gpu(backend, tphx, s_w, dim, ms_rhs, nufft_tol, isign)
+        rhs_tilde = T0r.astype(xp.complex128, copy=True)
+        for k in range(dim):
+            Tk = _dispatch_type1_keep_gpu(backend, tphx, ay[:, k], dim, ms_rhs, nufft_tol, isign)
+            rhs_tilde = rhs_tilde + (1.0j * float(isign)) * (om_rhs_g[:, k].astype(xp.complex128) * Tk)
+        info = {"num_transforms_v": n_tr_v, "num_transforms_rhs": n_tr_r}
+
+    else:
+        pairs: list[tuple[int, int]] = bin_stats["pairs"]  # type: ignore[assignment]
+        a = bin_stats["a_occ"]
+        ay = bin_stats["ay_occ"]
+        Qm = bin_stats["Q_occ"]
+        Qym = bin_stats["Qy_occ"]
+        npair = len(pairs)
+        n_tr_v = 1 + dim + npair
+        n_tr_r = 1 + dim + npair
+        om_v_g = xp.asarray(om_v, dtype=xp.float64)
+        om_rhs_g = xp.asarray(om_rhs, dtype=xp.float64)
+
+        T0v = _dispatch_type1_keep_gpu(backend, tphx, c_w, dim, ms_v, nufft_tol, isign)
+        v_tilde = T0v.astype(xp.complex128, copy=True)
+        for k in range(dim):
+            Tk = _dispatch_type1_keep_gpu(backend, tphx, a[:, k], dim, ms_v, nufft_tol, isign)
+            v_tilde = v_tilde + (1.0j * float(isign)) * (om_v_g[:, k].astype(xp.complex128) * Tk)
+
+        T0r = _dispatch_type1_keep_gpu(backend, tphx, s_w, dim, ms_rhs, nufft_tol, isign)
+        rhs_tilde = T0r.astype(xp.complex128, copy=True)
+        for k in range(dim):
+            Tk = _dispatch_type1_keep_gpu(backend, tphx, ay[:, k], dim, ms_rhs, nufft_tol, isign)
+            rhs_tilde = rhs_tilde + (1.0j * float(isign)) * (om_rhs_g[:, k].astype(xp.complex128) * Tk)
+
+        for p, (i, j) in enumerate(pairs):
+            Tqv = _dispatch_type1_keep_gpu(backend, tphx, Qm[:, p], dim, ms_v, nufft_tol, isign)
+            factor_v = om_v_g[:, i] * om_v_g[:, j]
+            if i != j:
+                factor_v = factor_v * 2.0
+            v_tilde = v_tilde + (-0.5 * factor_v.astype(xp.complex128) * Tqv)
+
+            Tqr = _dispatch_type1_keep_gpu(backend, tphx, Qym[:, p], dim, ms_rhs, nufft_tol, isign)
+            factor_r = om_rhs_g[:, i] * om_rhs_g[:, j]
+            if i != j:
+                factor_r = factor_r * 2.0
+            rhs_tilde = rhs_tilde + (-0.5 * factor_r.astype(xp.complex128) * Tqr)
+
+        info = {"num_transforms_v": n_tr_v, "num_transforms_rhs": n_tr_r}
+
+    if return_gpu:
+        return v_tilde, rhs_tilde, info
+    return (
+        _as_numpy_optional_gpu(v_tilde, xp),
+        _as_numpy_optional_gpu(rhs_tilde, xp),
+        info,
+    )
+
+
 def _as_numpy(x: Any) -> np.ndarray:
     if hasattr(x, "get"):
         return np.asarray(x.get())
@@ -869,9 +1214,27 @@ def summarize_bin_stats_layout(stats: dict[str, Any]) -> dict[str, Any]:
     Gtot = int(r**d)
     dense = bool(stats.get("dense", True))
     if dense:
-        nocc = int(np.sum(np.asarray(stats["c"]) > 0))
+        c = stats["c"]
+        try:
+            import cupy as cp  # type: ignore
+
+            if isinstance(c, cp.ndarray):
+                nocc = int(cp.count_nonzero(c > 0))
+            else:
+                nocc = int(np.sum(np.asarray(c) > 0))
+        except Exception:
+            nocc = int(np.sum(np.asarray(c) > 0))
     else:
-        nocc = int(np.asarray(stats["c_occ"]).shape[0])
+        c_occ = stats["c_occ"]
+        try:
+            import cupy as cp  # type: ignore
+
+            if isinstance(c_occ, cp.ndarray):
+                nocc = int(c_occ.shape[0])
+            else:
+                nocc = int(np.asarray(c_occ).shape[0])
+        except Exception:
+            nocc = int(np.asarray(c_occ).shape[0])
     bda = stats.get("binning_dense_allocated")
     return {
         "num_occupied_bins": nocc,
@@ -923,12 +1286,19 @@ def build_binned_efgp_system(
     *,
     return_bin_stats: bool = False,
     tphx_allow_clip: bool = False,
+    use_gpu_dense_bins: bool = False,
+    gpu_timing: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """
     由分箱经验测度构造近似 EFGP 预计算量。
 
     参数 ``X, y`` 为完整数据（函数内部校验 ``N``）；也可改用
     ``build_binned_efgp_system_streaming`` 做真正流式多块读取。
+
+    ``use_gpu_dense_bins=True`` 时使用 CuPy ``bincount`` 在 GPU 上 dense 聚合，
+    再在 GPU 上压缩非空 bin，NUFFT 链路尽量保持在设备上直到返回前 ``asnumpy``。
+    该路径需要 ``backend`` 且与 ``use_sparse_bins`` 互斥语义：启用 GPU dense 时
+    忽略 CPU 稀疏 dict binning。
 
     Returns
     -------
@@ -998,20 +1368,50 @@ def build_binned_efgp_system(
         if x_center_np.size != int(d):
             raise ValueError("x_center must have length d.")
 
-    use_dense_bins = not bool(use_sparse_bins)
-    stats = build_bin_stats_from_arrays(
-        X, y_work, r_use, int(d), order_eff, dtype=dtype, use_dense_bins=use_dense_bins
-    )
+    gpu_timings: dict[str, float] = {}
+    if use_gpu_dense_bins:
+        if backend is None:
+            raise ValueError("use_gpu_dense_bins=True requires a GPU backend bundle.")
+        xp = backend.xp
+        t_bin0 = time.perf_counter()
+        stats_dense = build_bin_stats_from_arrays_gpu_dense(
+            X, y_work, r_use, int(d), order_eff, xp=xp
+        )
+        if gpu_timing:
+            gpu_timings["t_dense_bincount_s"] = time.perf_counter() - t_bin0
+        t_comp = time.perf_counter()
+        stats = sparsify_bin_stats_gpu(stats_dense, xp=xp)
+        del stats_dense
+        if gpu_timing:
+            gpu_timings["t_compact_occupied_s"] = time.perf_counter() - t_comp
+        t_ft = time.perf_counter()
+        v_tilde, rhs_tilde, ft_info = compute_binned_fourier_sums_gpu(
+            stats,
+            float(h),
+            int(m),
+            x_center=x_center_np,
+            backend=backend,
+            nufft_tol=nufft_tol,
+            tphx_allow_clip=tphx_allow_clip,
+            return_gpu=False,
+        )
+        if gpu_timing:
+            gpu_timings["t_fourier_gpu_path_s"] = time.perf_counter() - t_ft
+    else:
+        use_dense_bins = not bool(use_sparse_bins)
+        stats = build_bin_stats_from_arrays(
+            X, y_work, r_use, int(d), order_eff, dtype=dtype, use_dense_bins=use_dense_bins
+        )
 
-    v_tilde, rhs_tilde, ft_info = compute_binned_fourier_sums(
-        stats,
-        float(h),
-        int(m),
-        x_center=x_center_np,
-        backend=backend,
-        nufft_tol=nufft_tol,
-        tphx_allow_clip=tphx_allow_clip,
-    )
+        v_tilde, rhs_tilde, ft_info = compute_binned_fourier_sums(
+            stats,
+            float(h),
+            int(m),
+            x_center=x_center_np,
+            backend=backend,
+            nufft_tol=nufft_tol,
+            tphx_allow_clip=tphx_allow_clip,
+        )
 
     D = np.asarray(D, dtype=np.float64).reshape(-1)
     if D.shape[0] != (2 * int(m) + 1) ** int(d):
@@ -1028,13 +1428,19 @@ def build_binned_efgp_system(
     if "warning_phase" in grid_diag:
         warnings.append(str(grid_diag["warning_phase"]))
 
-    bin_note = (
-        "sparse binning: never allocated dense length-G accumulator vectors."
-        if not stats.get("binning_dense_allocated", True)
-        else (
-            "dense binning: allocated full G=r^d vectors (see estimated_dense_memory_bytes in grid)."
+    if use_gpu_dense_bins:
+        bin_note = (
+            "GPU dense CuPy bincount on full G=r^d, then GPU compaction to occupied bins; "
+            "NUFFT on GPU arrays."
         )
-    )
+    else:
+        bin_note = (
+            "sparse binning: never allocated dense length-G accumulator vectors."
+            if not stats.get("binning_dense_allocated", True)
+            else (
+                "dense binning: allocated full G=r^d vectors (see estimated_dense_memory_bytes in grid)."
+            )
+        )
 
     diagnostics: dict[str, Any] = {
         "N": int(N),
@@ -1059,8 +1465,11 @@ def build_binned_efgp_system(
         "use_sparse_bins_request": bool(use_sparse_bins),
         "binning_dense_allocated": stats.get("binning_dense_allocated"),
         "binning_memory_note": bin_note,
+        "use_gpu_dense_bins": bool(use_gpu_dense_bins),
         **summarize_bin_stats_layout(stats),
     }
+    if gpu_timing and gpu_timings:
+        diagnostics["gpu_precompute_timings_s"] = gpu_timings
     if return_bin_stats:
         diagnostics["bin_stats"] = stats
     return v_tilde, b_tilde, diagnostics

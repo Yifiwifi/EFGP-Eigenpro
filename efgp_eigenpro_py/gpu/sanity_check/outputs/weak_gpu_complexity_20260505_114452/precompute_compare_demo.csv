@@ -1,0 +1,5 @@
+method,time_s,rhs_rel_err,note,rhs_direct_sum_s,theta_actual,G,num_occupied_bins
+original,0.3555110000015702,,EFGPSolver.precompute (CPU grid state),68.7810049999971,,,
+C0,0.5550230999942869,2.200889892262731,"GPU dense CuPy bincount on full G=r^d, then GPU compaction to occupied bins; NUFFT on GPU arrays.",68.7810049999971,17.498004134427372,1225.0,1225.0
+C1,0.16029070000513457,2.5685966273216114,"GPU dense CuPy bincount on full G=r^d, then GPU compaction to occupied bins; NUFFT on GPU arrays.",68.7810049999971,17.498004134427372,1225.0,1225.0
+C2,0.07032800000160933,4.203537063651342,"GPU dense CuPy bincount on full G=r^d, then GPU compaction to occupied bins; NUFFT on GPU arrays.",68.7810049999971,17.498004134427372,1225.0,1225.0

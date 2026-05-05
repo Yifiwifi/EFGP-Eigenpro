@@ -1133,13 +1133,8 @@ def save_slq_plots(
         saved["fig1b_global_cdf_symlogx"] = str(p)
 
         fig, ax = plt.subplots(figsize=(6.4, 4.2))
-        for arr, lab, c in (
-            (d002, "σ_fac=0.002", "C0"),
-            (d005, "σ_fac=0.005", "C1"),
-            (d010, "σ_fac=0.01", "C2"),
-        ):
-            if arr.size == x.size and np.any(np.isfinite(arr)):
-                ax.plot(x, arr, label=lab, color=c, linewidth=1.2)
+        if d010.size == x.size and np.any(np.isfinite(d010)):
+            ax.plot(x, d010, label="σ_fac=0.01", color="C2", linewidth=1.2)
         ax.set_title(f"Gaussian-smoothed PSD ρ(λ){dim_tag}")
         ax.set_xlabel("eigenvalue λ")
         ax.set_ylabel("ρ(λ)")
@@ -1152,13 +1147,11 @@ def save_slq_plots(
                 ax.set_xscale("log")
         ymax = 0.0
         ymin_pos = float("inf")
-        for arr in (d002, d005, d010):
-            if arr.size != x.size:
-                continue
-            m = np.isfinite(arr) & (arr > 0.0)
-            if np.any(m):
-                ymax = max(ymax, float(np.max(arr[m])))
-                ymin_pos = min(ymin_pos, float(np.min(arr[m])))
+        if d010.size == x.size:
+            mask_den = np.isfinite(d010) & (d010 > 0.0)
+            if np.any(mask_den):
+                ymax = max(ymax, float(np.max(d010[mask_den])))
+                ymin_pos = min(ymin_pos, float(np.min(d010[mask_den])))
         if math.isfinite(ymin_pos) and ymax > 0.0 and ymax / ymin_pos > 50.0:
             ax.set_yscale("log")
         ax.grid(True, which="both", alpha=0.25, linestyle=":")
@@ -1173,9 +1166,9 @@ def save_slq_plots(
         had = False
         if d005.size == x.size:
             rho_l = _density_wrt_log_lambda(x, d005)
-            m = np.isfinite(x) & (x > 0.0) & np.isfinite(rho_l)
-            if np.any(m):
-                ax.plot(np.log(x[m]), rho_l[m], color="C1", label="σ_fac=0.005 → λ·ρ(λ)")
+            ok_rho = np.isfinite(x) & (x > 0.0) & np.isfinite(rho_l)
+            if np.any(ok_rho):
+                ax.plot(np.log(x[ok_rho]), rho_l[ok_rho], color="C1", label="σ_fac=0.005 → λ·ρ(λ)")
                 had = True
         if d010.size == x.size:
             rho_l2 = _density_wrt_log_lambda(x, d010)
