@@ -13,8 +13,12 @@ NUFFT 相位约定与仓库其余部分一致（``benchmark.py`` / ``v1_ops``）
 默认 ``x_center=0.5`` 对应 ``[0,1]^d``；若要与 ``gpu_precompute_v1`` 完全一致，
 可传入 ``(x_min+x_max)/2``。
 
-``use_sparse_bins=True`` 时使用 **稀疏 binning**：binning 阶段不分配 ``G=r^d`` 稠密向量，
-仅合并非空 bin（适合 ``G`` 很大）；若为 ``False`` 则分配 dense 数组。
+``use_sparse_bins=True`` 时使用 **稀疏 binning**（Python dict 路径，偏向正确性校验，大批量可能很慢）。
+默认 ``build_binned_efgp_system(use_sparse_bins=False, use_gpu_dense_bins=True)`` 走 **融合 CUDA binning + GPU 上 compact + 批量 strengths 的 cuFINUFFT**（需 ``backend``）。
+
+GPU dense（``return_gpu=True``）：``D``、``x_center`` 等按需求 H2D；bin 统计、fused launch、compact、NUFFT 组合与 ``b_tilde=D*rhs`` 尽量留在设备上。``gpu_timing=False`` 时不为细粒度计时而频繁 ``cuda`` 同步。
+
+纯 CPU 或调试 dict 路径：``use_gpu_dense_bins=False``，可按需 ``use_sparse_bins=True``。
 诊断字段会标明 binning 是否曾分配 dense。
 """
 from __future__ import annotations
@@ -57,7 +61,7 @@ THETA_MAX: dict[str, dict[str, float]] = {
 
 def _resolve_order(order: str, d: int) -> str:
     if order == "auto":
-        return "C1" if d <= 2 else "C2"
+        return "C1"
     if order not in ("C0", "C1", "C2"):
         raise ValueError(f"order must be one of C0, C1, C2, auto; got {order!r}")
     return order
@@ -210,21 +214,35 @@ def direct_fourier_sum_type1(
     isign: int = -1,
     *,
     tphx_allow_clip: bool = False,
+    max_points_per_chunk: int = 4096,
 ) -> np.ndarray:
     """
     直接求 ``sum_n w_n exp(i * isign * tphx_n · modes)``，与 type-1 NUFFT（``isign``）对照用。
 
     ``tphx`` 由 ``tphx_from_centers(X_points, ...)`` 生成（默认严格范围检查）。
     ``modes`` 须与 ``generate_multi_index`` 行顺序一致。
+
+    按样本分块累加，避免分配 ``(N, M)`` 的 ``phase``（大 ``N``、大 ``M`` 时会爆 RAM）。
     """
     X_points = np.asarray(X_points, dtype=np.float64)
     w = np.asarray(weights, dtype=np.complex128).reshape(-1)
     if w.shape[0] != X_points.shape[0]:
         raise ValueError("weights length must match X_points.")
     modes = np.asarray(modes, dtype=np.float64)
-    tphx = tphx_from_centers(X_points, h, x_center, allow_clip=tphx_allow_clip)
-    phase = tphx @ modes.T
-    return (w[:, None] * np.exp(1j * float(isign) * phase)).sum(axis=0)
+    n = int(X_points.shape[0])
+    m = int(modes.shape[0])
+    if n == 0:
+        return np.zeros(m, dtype=np.complex128)
+    out = np.zeros(m, dtype=np.complex128)
+    isign_f = float(isign)
+    bs = max(1, int(max_points_per_chunk))
+    for i0 in range(0, n, bs):
+        i1 = min(i0 + bs, n)
+        tphx_chunk = tphx_from_centers(X_points[i0:i1], h, x_center, allow_clip=tphx_allow_clip)
+        phase = tphx_chunk @ modes.T
+        contrib = (w[i0:i1, None] * np.exp(1j * isign_f * phase)).sum(axis=0)
+        out += contrib
+    return out
 
 
 def _bin_indices_and_delta(X64: np.ndarray, rr: int, d: int) -> tuple[np.ndarray, np.ndarray]:
@@ -272,6 +290,18 @@ def _aggregate_chunk_to_unique_bins(
         out["Q"] = Q_loc
         out["Qy"] = Qy_loc
     return out
+
+
+def _linear_idx_to_q_z_numpy(idx_occ: np.ndarray, rr: int, d: int) -> tuple[np.ndarray, np.ndarray]:
+    """线性 bin 索引 ``0..G-1`` 解码为整数格点 ``q`` 与 bin 中心 ``z``（CPU）。"""
+    idx = np.asarray(idx_occ, dtype=np.int64).reshape(-1)
+    q = np.zeros((idx.size, int(d)), dtype=np.int64)
+    rem = idx.copy()
+    for k in range(int(d)):
+        q[:, k] = rem % rr
+        rem //= rr
+    z = (q.astype(np.float64, copy=False) + 0.5) / float(rr)
+    return q, z
 
 
 class _SparseGlobalBins:
@@ -324,12 +354,7 @@ class _SparseGlobalBins:
         idx_occ = np.array(keys, dtype=np.int64)
         rr = int(r)
         d = self.d
-        q = np.zeros((idx_occ.size, d), dtype=np.int64)
-        rem = idx_occ.copy()
-        for k in range(d):
-            q[:, k] = rem % rr
-            rem //= rr
-        z = (q.astype(np.float64) + 0.5) / float(rr)
+        q, z = _linear_idx_to_q_z_numpy(idx_occ, rr, d)
         order = self.order
         out: dict[str, Any] = {
             "idx_occ": idx_occ,
@@ -353,6 +378,45 @@ class _SparseGlobalBins:
         return out
 
 
+def _grid_diag_for_fixed_r(
+    r_use: int,
+    N: int,
+    d: int,
+    h: float,
+    m: int,
+    order_eff: str,
+    quality: str,
+    theta_target: float,
+) -> tuple[int, float, float, dict[str, Any]]:
+    """用户指定 ``r`` 时与 ``choose_binning_grid`` 对齐的诊断块。"""
+    r_u = max(1, int(r_use))
+    G = int(r_u**d)
+    Delta = 1.0 / float(r_u)
+    theta_actual = 2.0 * math.pi * float(h) * int(m) * int(d) / float(r_u)
+    bytes_pc = _bytes_per_cell(order_eff, int(d))
+    r_phase = int(math.ceil(2.0 * math.pi * float(h) * int(m) * int(d) / float(theta_target)))
+    grid_diag: dict[str, Any] = {
+        "order": order_eff,
+        "quality": quality,
+        "theta_target": theta_target,
+        "theta_actual": theta_actual,
+        "r_phase": r_phase,
+        "r_auto": r_u,
+        "G": G,
+        "Delta": Delta,
+        "bytes_per_cell": bytes_pc,
+        "estimated_dense_memory_bytes": G * bytes_pc,
+        "avg_occupancy": float(N) / float(max(G, 1)),
+        "compression_ratio": float(N) / float(max(G, 1)),
+        "phase_target_met": r_u >= r_phase,
+    }
+    if r_u < r_phase:
+        grid_diag["warning_phase"] = (
+            "phase target not met; binning error may dominate"
+        )
+    return G, Delta, theta_actual, grid_diag
+
+
 def build_bin_stats_from_arrays(
     X: np.ndarray,
     y: np.ndarray,
@@ -360,7 +424,6 @@ def build_bin_stats_from_arrays(
     d: int,
     order: str,
     *,
-    dtype: np.dtype = np.float64,
     use_dense_bins: bool = True,
 ) -> dict[str, Any]:
     """
@@ -376,7 +439,7 @@ def build_bin_stats_from_arrays(
         raise ValueError("X and y length mismatch.")
 
     rr = int(r)
-    rt = np.float64 if np.issubdtype(dtype, np.floating) else np.float64
+    rt = np.float64
     pairs_c2 = _pair_indices_upper(d) if order == "C2" else []
 
     idx, delta = _bin_indices_and_delta(X64, rr, d)
@@ -432,13 +495,12 @@ def build_bin_stats_streaming(
     d: int,
     order: str,
     *,
-    dtype: np.dtype = np.float64,
     use_dense_bins: bool = True,
 ) -> dict[str, Any]:
     """多块流式：``use_dense_bins=False`` 时用 dict 合并，不分配 ``G`` 长度向量。"""
     order = _resolve_order(order, d)
     rr = int(r)
-    rt = np.float64 if np.issubdtype(dtype, np.floating) else np.float64
+    rt = np.float64
     pairs_c2 = _pair_indices_upper(d) if order == "C2" else []
 
     n_seen = 0
@@ -456,21 +518,23 @@ def build_bin_stats_streaming(
 
         for X_chunk, y_chunk in zip(X_loader, y_loader):
             xc = np.asarray(X_chunk)
-            yc = np.asarray(y_chunk).reshape(-1)
+            yc = np.asarray(y_chunk, dtype=np.float64).reshape(-1)
             if xc.shape[0] != yc.shape[0]:
                 raise ValueError("chunk X/y length mismatch in streaming loader.")
             n_seen += int(xc.shape[0])
-            st = build_bin_stats_from_arrays(
-                xc, yc, rr, d, order, dtype=dtype, use_dense_bins=True
-            )
-            c += st["c"]
-            s += st["s"]
+            Xv = validate_normalized_X(xc, d)
+            idx, delta = _bin_indices_and_delta(Xv, rr, d)
+            np.add.at(c, idx, 1.0)
+            np.add.at(s, idx, yc)
             if order in ("C1", "C2"):
-                a += st["a"]
-                ay += st["ay"]
+                for k in range(int(d)):
+                    np.add.at(a[:, k], idx, delta[:, k])
+                    np.add.at(ay[:, k], idx, yc * delta[:, k])
             if order == "C2":
-                Q += st["Q"]
-                Qy += st["Qy"]
+                for p, (i, j) in enumerate(pairs_c2):
+                    dij = delta[:, i] * delta[:, j]
+                    np.add.at(Q[:, p], idx, dij)
+                    np.add.at(Qy[:, p], idx, yc * dij)
 
         out: dict[str, Any] = {
             "c": c,
@@ -517,13 +581,7 @@ def sparsify_bin_stats(bin_stats: dict[str, Any]) -> dict[str, Any]:
     d = int(bin_stats["d"])
     order = str(bin_stats["order"])
 
-    q = np.zeros((idx_occ.size, d), dtype=np.int64)
-    rem = idx_occ.copy()
-    for k in range(d):
-        q[:, k] = rem % rr
-        rem //= rr
-
-    z = (q.astype(np.float64) + 0.5) / float(rr)
+    q, z = _linear_idx_to_q_z_numpy(idx_occ, rr, d)
 
     out: dict[str, Any] = {
         "idx_occ": idx_occ,
@@ -555,60 +613,427 @@ def _import_cupy_binned() -> Any:
     return cp
 
 
+def _sync_cuda_stream(xp: Any) -> None:
+    """等待 CuPy 已提交 CUDA 内核完成（wall 计时有意义）。无 CUDA 或无 Stream 时为 no-op。"""
+    if xp is None:
+        return
+    cuda_mod = getattr(xp, "cuda", None)
+    stream_cls = getattr(cuda_mod, "Stream", None) if cuda_mod is not None else None
+    if stream_cls is None:
+        return
+    try:
+        stream_cls.null.synchronize()
+    except Exception:
+        pass
+
+
+def _sync_cuda_for_timings(xp: Any, timings_s: dict[str, float] | None) -> None:
+    if timings_s is not None:
+        _sync_cuda_stream(xp)
+
+
+# 单次 kernel 遍历 N，对 occupied bin 原子累加全部标量矩（等价于多次 bincount 合并）。
+_FUSED_BIN_MAX_D = 8
+_FUSED_DENSE_CUDA = r"""
+extern "C" __global__ void fused_dense_bin_accum(
+    const double* __restrict__ X,
+    const double* __restrict__ y,
+    int N,
+    int rr,
+    int d,
+    long long G,
+    int order_code,
+    int npairs,
+    const int* __restrict__ pi,
+    const int* __restrict__ pj,
+    double* __restrict__ c_,
+    double* __restrict__ s_,
+    double* __restrict__ a_,
+    double* __restrict__ ay_,
+    double* __restrict__ Q_,
+    double* __restrict__ Qy_)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N)
+        return;
+    const double yi = y[i];
+    double delta[8];
+    int qq;
+    double xv;
+    long long mult;
+    long long g;
+    int k;
+
+    mult = 1;
+    g = 0;
+#pragma unroll 1
+    for (k = 0; k < d; ++k)
+    {
+        xv = X[(size_t)i * (size_t)d + (size_t)k];
+        qq = (int)floor((double)rr * xv);
+        if (qq < 0)
+            qq = 0;
+        if (qq >= rr)
+            qq = rr - 1;
+        double zc = ((double)qq + 0.5) / (double)rr;
+        delta[(size_t)k] = xv - zc;
+        g += mult * (long long)qq;
+        mult *= (long long)rr;
+    }
+    if (g < 0 || g >= G)
+        return;
+
+    atomicAdd(&c_[g], 1.0);
+    atomicAdd(&s_[g], yi);
+
+    if (order_code >= 1)
+    {
+        long long gd = g * (long long)d;
+        for (int kk = 0; kk < d; ++kk)
+        {
+            long long ix = gd + kk;
+            double dk = delta[kk];
+            atomicAdd(&a_[ix], dk);
+            atomicAdd(&ay_[ix], yi * dk);
+        }
+    }
+    if (order_code >= 2)
+    {
+        long long gn = g * (long long)npairs;
+        for (int p = 0; p < npairs; ++p)
+        {
+            int ii = pi[p];
+            int jj = pj[p];
+            double dij = delta[ii] * delta[jj];
+            long long ix = gn + (long long)p;
+            atomicAdd(&Q_[ix], dij);
+            atomicAdd(&Qy_[ix], yi * dij);
+        }
+    }
+}
+"""
+
+
+_fused_bin_kernel_cache: dict[int, Any] = {}
+_gpu_dummy_scratch: dict[int, Any] = {}  # per-device 1-double placeholder
+# C2：`pi/pj` 只依赖 ``d`` 与 device，缓存避免每 chunk 重复 H2D。
+_pair_ij_gpu_cache: dict[tuple[int, int], tuple[Any, Any]] = {}
+
+
+def _get_fused_bin_kernel(cp: Any) -> Any:
+    dev_id = int(cp.cuda.Device().id)
+    kern = _fused_bin_kernel_cache.get(dev_id)
+    if kern is None:
+        kern = cp.RawKernel(_FUSED_DENSE_CUDA, "fused_dense_bin_accum")
+        _fused_bin_kernel_cache[dev_id] = kern
+    return kern
+
+
+def _order_code_from_str(order: str) -> int:
+    if order == "C0":
+        return 0
+    if order == "C1":
+        return 1
+    if order == "C2":
+        return 2
+    raise ValueError(order)
+
+
+_ORDER_RANK = {"C0": 0, "C1": 1, "C2": 2}
+
+
+def _resolved_order_rank(order: str) -> int:
+    if order not in _ORDER_RANK:
+        raise ValueError(f"unknown order rank key: {order!r}")
+    return _ORDER_RANK[order]
+
+
+def _gpu_dense_stats_tail_view(stats_full: dict[str, Any], order_target: str, d: int) -> dict[str, Any]:
+    """同一套 dense GPU 缓冲区上截取 C0/C1/C2 子集，避免 auto-downgrade 重复 fused binning。"""
+    full_order = _resolve_order(str(stats_full["order"]), d)
+    o_t = _resolve_order(order_target, d)
+    if _resolved_order_rank(full_order) < _resolved_order_rank(o_t):
+        raise ValueError(f"cannot view order {o_t} from stats computed with lower order {full_order}")
+    rr = int(stats_full["r"])
+    dd = int(stats_full["d"])
+    out: dict[str, Any] = {
+        "c": stats_full["c"],
+        "s": stats_full["s"],
+        "r": rr,
+        "d": dd,
+        "order": o_t,
+        "dense": True,
+        "binning_dense_allocated": bool(stats_full.get("binning_dense_allocated", True)),
+        "on_gpu": True,
+    }
+    if o_t in ("C1", "C2"):
+        out["a"] = stats_full["a"]
+        out["ay"] = stats_full["ay"]
+    if o_t == "C2":
+        out["Q"] = stats_full["Q"]
+        out["Qy"] = stats_full["Qy"]
+        out["pairs"] = stats_full["pairs"]
+    return out
+
+
+def _get_pair_ij_gpu_arrays(
+    cp: Any,
+    d: int,
+    pairs_c2: list[tuple[int, int]],
+) -> tuple[Any, Any]:
+    dev_id = int(cp.cuda.Device().id)
+    if not pairs_c2:
+        z = cp.zeros(1, dtype=cp.int32)
+        return z, z
+    key = (int(d), dev_id)
+    cached = _pair_ij_gpu_cache.get(key)
+    if cached is not None:
+        return cached
+    pi_np = np.array([p[0] for p in pairs_c2], dtype=np.int32)
+    pj_np = np.array([p[1] for p in pairs_c2], dtype=np.int32)
+    pi_g = cp.asarray(pi_np)
+    pj_g = cp.asarray(pj_np)
+    _pair_ij_gpu_cache[key] = (pi_g, pj_g)
+    return pi_g, pj_g
+
+
+def _occupied_bin_atomic_skew_diag(c_occ: Any) -> dict[str, float]:
+    """由 occupied bin 的 ``c_occ``（NumPy/CuPy）计算 skew 等指标（宿主标量）。"""
+    co = np.asarray(_device_to_numpy(c_occ), dtype=np.float64).reshape(-1)
+    if co.size <= 0:
+        return {
+            "bin_count_max_occ": 0.0,
+            "bin_count_mean_occ": 0.0,
+            "bin_count_p99_occ": 0.0,
+            "atomic_skew_occ_counts": float("nan"),
+        }
+    mx = float(co.max())
+    mu = float(co.mean())
+    p99 = float(np.percentile(co, 99.0))
+    skew = mx / mu if mu > 1e-30 else float("inf")
+    return {
+        "bin_count_max_occ": mx,
+        "bin_count_mean_occ": mu,
+        "bin_count_p99_occ": p99,
+        "atomic_skew_occ_counts": skew,
+    }
+
+
+def _bin_count_skew_from_bin_stats(st: dict[str, Any]) -> dict[str, float]:
+    """优先用 compact ``c_occ``，否则用 dense ``c[c>0]``（宿主上算分位数）。"""
+    co = st.get("c_occ")
+    if co is not None:
+        return _occupied_bin_atomic_skew_diag(co)
+    c = st.get("c")
+    if c is None:
+        return {
+            "bin_count_max_occ": 0.0,
+            "bin_count_mean_occ": 0.0,
+            "bin_count_p99_occ": 0.0,
+            "atomic_skew_occ_counts": float("nan"),
+        }
+    cnp = np.asarray(_device_to_numpy(c), dtype=np.float64).reshape(-1)
+    pos = cnp[cnp > 0]
+    if pos.size <= 0:
+        return {
+            "bin_count_max_occ": 0.0,
+            "bin_count_mean_occ": 0.0,
+            "bin_count_p99_occ": 0.0,
+            "atomic_skew_occ_counts": float("nan"),
+        }
+    mx = float(pos.max())
+    mu = float(pos.mean())
+    p99 = float(np.percentile(pos, 99.0))
+    skew = mx / mu if mu > 1e-30 else float("inf")
+    return {
+        "bin_count_max_occ": mx,
+        "bin_count_mean_occ": mu,
+        "bin_count_p99_occ": p99,
+        "atomic_skew_occ_counts": skew,
+    }
+
+
+def _gpu_dummy_1(cp: Any) -> Any:
+    dev_id = int(cp.cuda.Device().id)
+    if dev_id not in _gpu_dummy_scratch:
+        _gpu_dummy_scratch[dev_id] = cp.zeros(1, dtype=cp.float64)
+    return _gpu_dummy_scratch[dev_id]
+
+
+def _launch_fused_dense_bin_kernel(
+    cp: Any,
+    Xg: Any,
+    yg: Any,
+    rr: int,
+    d: int,
+    G: int,
+    order_str: str,
+    pairs_c2: list[tuple[int, int]],
+    c: Any,
+    s: Any,
+    a: Any | None,
+    ay: Any | None,
+    Q: Any | None,
+    Qy: Any | None,
+) -> None:
+    if d > _FUSED_BIN_MAX_D:
+        raise ValueError(f"fused_dense_bin_accum supports d <= {_FUSED_BIN_MAX_D}, got {d}")
+    oc = _order_code_from_str(order_str)
+    npairs = len(pairs_c2) if oc >= 2 else 0
+    if npairs > 0:
+        pi_g, pj_g = _get_pair_ij_gpu_arrays(cp, int(d), pairs_c2)
+    else:
+        z = cp.zeros(1, dtype=cp.int32)
+        pi_g = pj_g = z
+    dm = _gpu_dummy_1(cp)
+    ap = dm if oc < 1 or a is None else a
+    ayp = dm if oc < 1 or ay is None else ay
+    Qp = dm if oc < 2 or Q is None else Q
+    Qyp = dm if oc < 2 or Qy is None else Qy
+
+    kern = _get_fused_bin_kernel(cp)
+    n = int(Xg.shape[0])
+    threads = 256
+    blocks = max(1, (n + threads - 1) // threads)
+    kern(
+        (blocks,),
+        (threads,),
+        (
+            Xg,
+            yg,
+            np.int32(n),
+            np.int32(int(rr)),
+            np.int32(int(d)),
+            np.int64(int(G)),
+            np.int32(int(oc)),
+            np.int32(int(npairs)),
+            pi_g,
+            pj_g,
+            c,
+            s,
+            ap,
+            ayp,
+            Qp,
+            Qyp,
+        ),
+    )
+
+
 def build_bin_stats_from_arrays_gpu_dense(
-    X: np.ndarray,
-    y: np.ndarray,
+    X: np.ndarray | None,
+    y: np.ndarray | None,
     r: int,
     d: int,
     order: str,
     *,
     xp: Any | None = None,
     dtype: Any | None = None,
+    timings_s: dict[str, float] | None = None,
+    gpu_chunk_rows: int | None = None,
+    skip_normalized_check: bool = False,
+    X_gpu: Any | None = None,
+    y_gpu: Any | None = None,
 ) -> dict[str, Any]:
     """
-    Dense GPU bin statistics via CuPy ``bincount`` (full ``G=r^d`` arrays).
+    在 GPU 上构造 ``G=r^d`` 稠密度量：使用 **单次 fused kernel**（可多次 launch 切块）累加 C0/C1/C2 矩。
 
-    Assumes normalized ``X`` in ``[0,1]^d`` like the CPU path. Does **not**
-    allocate Python dict-merge sparse structures.
+    若 ``X_gpu`` / ``y_gpu`` 已提供（CuPy，形状 ``(N,d)`` / ``(N,)``），则不再从宿主上传整块 ``X``，
+    仅按 ``gpu_chunk_rows`` 对 **显存子区间** 分块 launch（子块仍在 GPU 上切片，无 H2D）。
+    否则从 NumPy ``X,y`` 分块上传（宿主仍持全量数据）。
 
-    Parameters
-    ----------
-    xp :
-        CuPy module; default ``import cupy``.
+    **dtype**：CUDA kernel 仅为 **float64**；仅允许 ``dtype=None`` 或 ``cp.float64``（等价），否则抛错。
     """
     order = _resolve_order(order, d)
     cp = xp if xp is not None else _import_cupy_binned()
     if dtype is None:
-        dtype = cp.float64
-    rt = dtype
-
-    X64 = validate_normalized_X(X, d)
-    y64 = np.asarray(y, dtype=np.float64).reshape(-1)
-    if X64.shape[0] != y64.shape[0]:
-        raise ValueError("X and y length mismatch.")
+        rt = cp.float64
+    else:
+        dt = cp.dtype(dtype)
+        if dt != cp.dtype("float64"):
+            raise ValueError(
+                "GPU fused binning uses double-precision CUDA kernel only; "
+                "use dtype=None or cp.float64."
+            )
+        rt = cp.float64
 
     rr = int(r)
     pairs_c2 = _pair_indices_upper(d) if order == "C2" else []
-
-    Xg = cp.asarray(X64, dtype=cp.float64)
-    yg = cp.asarray(y64, dtype=cp.float64).reshape(-1)
-
-    q = cp.floor(rr * Xg).astype(cp.int64)
-    q = cp.clip(q, 0, rr - 1)
-
-    idx = q[:, 0].astype(cp.int64, copy=True)
-    mult = rr
-    for k in range(1, int(d)):
-        idx = idx + mult * q[:, k].astype(cp.int64, copy=False)
-        mult *= rr
-
     G = int(rr**d)
-    one = cp.ones_like(yg, dtype=rt)
-    c = cp.bincount(idx, weights=one, minlength=G).astype(rt, copy=False)
-    s = cp.bincount(idx, weights=yg, minlength=G).astype(rt, copy=False)
+    if int(d) > _FUSED_BIN_MAX_D:
+        raise ValueError(
+            f"GPU fused binning requires d <= {_FUSED_BIN_MAX_D}; use CPU path or smaller d."
+        )
 
-    z = (q.astype(cp.float64, copy=False) + 0.5) / float(rr)
-    delta = Xg - z
+    c = cp.zeros(G, dtype=rt)
+    s = cp.zeros(G, dtype=rt)
+    a = ay = Q = Qy = None
+    if order in ("C1", "C2"):
+        a = cp.zeros((G, int(d)), dtype=rt)
+        ay = cp.zeros((G, int(d)), dtype=rt)
+    if order == "C2":
+        npairs = len(pairs_c2)
+        Q = cp.zeros((G, npairs), dtype=rt)
+        Qy = cp.zeros((G, npairs), dtype=rt)
+
+    _sync_cuda_for_timings(cp, timings_s)
+    t_h2d0 = time.perf_counter()
+    t_fm0 = time.perf_counter()
+
+    if X_gpu is not None:
+        if y_gpu is None:
+            raise ValueError("build_bin_stats_from_arrays_gpu_dense: y_gpu required with X_gpu")
+        Xg_full = cp.asarray(X_gpu, dtype=cp.float64)
+        yg_full = cp.asarray(y_gpu, dtype=cp.float64).reshape(-1)
+        if Xg_full.ndim != 2 or int(Xg_full.shape[1]) != int(d):
+            raise ValueError("X_gpu must have shape (N, d)")
+        n_full = int(Xg_full.shape[0])
+        if yg_full.shape[0] != n_full:
+            raise ValueError("X_gpu / y_gpu length mismatch")
+        chunk = n_full if gpu_chunk_rows is None else min(n_full, int(gpu_chunk_rows))
+        for s0 in range(0, n_full, chunk):
+            s1 = min(s0 + chunk, n_full)
+            _launch_fused_dense_bin_kernel(
+                cp,
+                Xg_full[s0:s1],
+                yg_full[s0:s1],
+                rr,
+                int(d),
+                G,
+                order,
+                pairs_c2,
+                c,
+                s,
+                a,
+                ay,
+                Q,
+                Qy,
+            )
+    else:
+        if X is None or y is None:
+            raise ValueError("Provide X,y on host or X_gpu,y_gpu on device")
+        if skip_normalized_check:
+            X64 = np.asarray(X, dtype=np.float64).reshape(-1, int(d))
+            if X64.ndim != 2 or X64.shape[1] != int(d):
+                raise ValueError("X shape mismatch.")
+        else:
+            X64 = validate_normalized_X(X, d)
+        y64 = np.asarray(y, dtype=np.float64).reshape(-1)
+        if X64.shape[0] != y64.shape[0]:
+            raise ValueError("X and y length mismatch.")
+        n_full = int(X64.shape[0])
+        chunk = min(n_full, int(gpu_chunk_rows or n_full))
+        for s0 in range(0, n_full, chunk):
+            s1 = min(s0 + chunk, n_full)
+            Xg = cp.asarray(X64[s0:s1], dtype=cp.float64)
+            yg = cp.asarray(y64[s0:s1], dtype=cp.float64).reshape(-1)
+            _launch_fused_dense_bin_kernel(
+                cp, Xg, yg, rr, int(d), G, order, pairs_c2, c, s, a, ay, Q, Qy
+            )
+
+    _sync_cuda_for_timings(cp, timings_s)
+    if timings_s is not None:
+        timings_s["t_h2d_xy_s"] = float(time.perf_counter() - t_h2d0)
+        timings_s["t_gpu_fused_bin_moments_s"] = float(time.perf_counter() - t_fm0)
 
     out: dict[str, Any] = {
         "c": c,
@@ -620,34 +1045,27 @@ def build_bin_stats_from_arrays_gpu_dense(
         "binning_dense_allocated": True,
         "on_gpu": True,
     }
-
-    if order in ("C1", "C2"):
-        a = cp.zeros((G, int(d)), dtype=rt)
-        ay = cp.zeros((G, int(d)), dtype=rt)
-        for k in range(int(d)):
-            dk = delta[:, k]
-            a[:, k] = cp.bincount(idx, weights=dk, minlength=G).astype(rt, copy=False)
-            ay[:, k] = cp.bincount(idx, weights=yg * dk, minlength=G).astype(rt, copy=False)
+    if a is not None:
+        assert ay is not None
         out["a"] = a
         out["ay"] = ay
-
     if order == "C2":
-        pairs = pairs_c2
-        npairs = len(pairs)
-        Q = cp.zeros((G, npairs), dtype=rt)
-        Qy = cp.zeros((G, npairs), dtype=rt)
-        for p, (i, j) in enumerate(pairs):
-            dij = delta[:, i] * delta[:, j]
-            Q[:, p] = cp.bincount(idx, weights=dij, minlength=G).astype(rt, copy=False)
-            Qy[:, p] = cp.bincount(idx, weights=yg * dij, minlength=G).astype(rt, copy=False)
+        assert Q is not None and Qy is not None
         out["Q"] = Q
         out["Qy"] = Qy
-        out["pairs"] = pairs
+        out["pairs"] = pairs_c2
+
+    _sync_cuda_for_timings(cp, timings_s)
 
     return out
 
 
-def sparsify_bin_stats_gpu(bin_stats: dict[str, Any], xp: Any | None = None) -> dict[str, Any]:
+def sparsify_bin_stats_gpu(
+    bin_stats: dict[str, Any],
+    xp: Any | None = None,
+    *,
+    timings_s: dict[str, float] | None = None,
+) -> dict[str, Any]:
     """
     Compress dense GPU stats to occupied bins only; arrays remain on GPU.
     """
@@ -657,6 +1075,8 @@ def sparsify_bin_stats_gpu(bin_stats: dict[str, Any], xp: Any | None = None) -> 
         raise ValueError("sparsify_bin_stats_gpu expects dense GPU stats (on_gpu=True).")
 
     cp = xp if xp is not None else _import_cupy_binned()
+    _sync_cuda_for_timings(cp, timings_s)
+    t0 = time.perf_counter()
     c = bin_stats["c"]
     mask = c > 0
     idx_occ = cp.nonzero(mask)[0].astype(cp.int64)
@@ -693,35 +1113,10 @@ def sparsify_bin_stats_gpu(bin_stats: dict[str, Any], xp: Any | None = None) -> 
         out["Q_occ"] = bin_stats["Q"][idx_occ, :]
         out["Qy_occ"] = bin_stats["Qy"][idx_occ, :]
         out["pairs"] = bin_stats["pairs"]
+    _sync_cuda_for_timings(cp, timings_s)
+    if timings_s is not None:
+        timings_s["t_compact_occupied_s"] = float(time.perf_counter() - t0)
     return out
-
-
-def build_bin_stats_from_arrays_gpu(
-    X: np.ndarray,
-    y: np.ndarray,
-    r: int,
-    d: int,
-    order: str,
-    backend: Any,
-    *,
-    dense: bool = True,
-    return_occupied: bool = True,
-    dtype: Any | None = None,
-) -> dict[str, Any]:
-    """
-    GPU bin statistics entry point: dense CuPy ``bincount``, optionally compact to occupied bins.
-
-    ``dense=False`` is reserved for future sparse GPU paths and currently raises.
-    """
-    if backend is None:
-        raise ValueError("build_bin_stats_from_arrays_gpu requires backend.")
-    xp = backend.xp
-    if not dense:
-        raise NotImplementedError("Only dense=True GPU bincount is implemented.")
-    out_dense = build_bin_stats_from_arrays_gpu_dense(X, y, r, d, order, xp=xp, dtype=dtype)
-    if return_occupied:
-        return sparsify_bin_stats_gpu(out_dense, xp=xp)
-    return out_dense
 
 
 def tphx_from_centers_gpu(
@@ -768,12 +1163,51 @@ def _dispatch_type1_keep_gpu(
     return _type1_coeffs_gpu(backend, tphx_gpu, c, dim, ms, eps, isign)
 
 
-def _as_numpy_optional_gpu(arr: Any, xp: Any) -> np.ndarray:
+def _dispatch_type1_keep_gpu_batched(
+    backend: Any,
+    tphx_gpu: Any,
+    strengths_real: Any,
+    dim: int,
+    ms: int,
+    eps: float,
+    isign: int,
+) -> Any:
+    """多块实数强度 ``(n_tr, M)`` 一次批量 type-1，返回 ``(n_tr, n_modes)`` _device complex。"""
+    xp = backend.xp
+    w = xp.asarray(strengths_real, dtype=xp.float64)
+    if w.ndim == 1:
+        w = w.reshape(1, -1)
+    cplx = w.astype(xp.complex128)
+    tphx_gpu = xp.asarray(tphx_gpu, dtype=xp.float64)
+    return _type1_coeffs_gpu(backend, tphx_gpu, cplx, dim, ms, eps, isign)
+
+
+_omega_modes_gpu_cache: dict[tuple[int, int, float, int], tuple[Any, Any]] = {}
+
+
+def _omega_modes_device_cached(backend: Any, m: int, dim: int, h: float) -> tuple[Any, Any]:
+    xp = backend.xp
+    key = (int(m), int(dim), float(h), int(xp.cuda.Device().id))
+    cached = _omega_modes_gpu_cache.get(key)
+    if cached is not None:
+        return cached
+    modes_rhs = generate_multi_index(int(m), dim)
+    modes_v = generate_multi_index(2 * int(m), dim)
+    om_rhs = _omega_modes(modes_rhs, h)
+    om_v = _omega_modes(modes_v, h)
+    pair = (
+        xp.asarray(om_v, dtype=xp.float64),
+        xp.asarray(om_rhs, dtype=xp.float64),
+    )
+    _omega_modes_gpu_cache[key] = pair
+    return pair
+
+
+def _to_host_complex128(arr: Any) -> np.ndarray:
+    """CuPy / NumPy 阵列 -> host ``complex128``。"""
     if arr is None:
         raise TypeError("expected array")
-    if hasattr(arr, "get"):
-        return np.asarray(arr.get(), dtype=np.complex128)
-    return np.asarray(arr, dtype=np.complex128)
+    return np.asarray(_device_to_numpy(arr), dtype=np.complex128)
 
 
 def compute_binned_fourier_sums_gpu(
@@ -786,13 +1220,14 @@ def compute_binned_fourier_sums_gpu(
     nufft_tol: float,
     isign: int = -1,
     tphx_allow_clip: bool = False,
-    return_gpu: bool = False,
+    return_gpu: bool = True,
+    timings_s: dict[str, float] | None = None,
 ) -> tuple[np.ndarray | Any, np.ndarray | Any, dict[str, Any]]:
     """
     Fourier sums for **GPU-compacted** bin stats (``dense=False``, ``on_gpu=True``).
 
-    When ``return_gpu=False`` (default), results are copied to host NumPy arrays.
-    When ``return_gpu=True``, ``v_tilde`` and ``rhs_tilde`` remain on device.
+    When ``return_gpu=True`` (默认), ``v_tilde`` / ``rhs_tilde`` 留在 GPU。
+    ``return_gpu=False`` 时拷回 NumPy，并在 ``timings_s`` 写入 ``t_gpu_to_cpu_copy_s``。
     """
     if backend is None:
         raise ValueError("compute_binned_fourier_sums_gpu requires a GPU backend bundle.")
@@ -802,20 +1237,24 @@ def compute_binned_fourier_sums_gpu(
         raise ValueError("Pass sparsify_bin_stats_gpu output (dense=False).")
 
     xp = backend.xp
+    _sync_cuda_for_timings(xp, timings_s)
+    t_ft0 = time.perf_counter()
     order = _resolve_order(str(bin_stats["order"]), int(bin_stats["d"]))
     dim = int(bin_stats["d"])
     z_used = bin_stats["z_occ"]
     c_w = bin_stats["c_occ"]
     s_w = bin_stats["s_occ"]
 
-    modes_rhs = generate_multi_index(int(m), dim)
-    modes_v = generate_multi_index(2 * int(m), dim)
-    om_rhs = _omega_modes(modes_rhs, h)
-    om_v = _omega_modes(modes_v, h)
+    om_v_g, om_rhs_g = _omega_modes_device_cached(backend, int(m), dim, float(h))
+
     ms_rhs = 2 * int(m) + 1
     ms_v = 4 * int(m) + 1
 
     tphx = tphx_from_centers_gpu(z_used, h, x_center, xp, allow_clip=tphx_allow_clip)
+
+    jc = 1.0j * float(isign)
+    om_v_c = om_v_g.astype(xp.complex128, copy=False)
+    om_rhs_c = om_rhs_g.astype(xp.complex128, copy=False)
 
     if order == "C0":
         info = {"num_transforms_v": 1, "num_transforms_rhs": 1}
@@ -827,20 +1266,16 @@ def compute_binned_fourier_sums_gpu(
         ay = bin_stats["ay_occ"]
         n_tr_v = 1 + dim
         n_tr_r = 1 + dim
-        om_v_g = xp.asarray(om_v, dtype=xp.float64)
-        om_rhs_g = xp.asarray(om_rhs, dtype=xp.float64)
-
-        T0v = _dispatch_type1_keep_gpu(backend, tphx, c_w, dim, ms_v, nufft_tol, isign)
-        v_tilde = T0v.astype(xp.complex128, copy=True)
-        for k in range(dim):
-            Tk = _dispatch_type1_keep_gpu(backend, tphx, a[:, k], dim, ms_v, nufft_tol, isign)
-            v_tilde = v_tilde + (1.0j * float(isign)) * (om_v_g[:, k].astype(xp.complex128) * Tk)
-
-        T0r = _dispatch_type1_keep_gpu(backend, tphx, s_w, dim, ms_rhs, nufft_tol, isign)
-        rhs_tilde = T0r.astype(xp.complex128, copy=True)
-        for k in range(dim):
-            Tk = _dispatch_type1_keep_gpu(backend, tphx, ay[:, k], dim, ms_rhs, nufft_tol, isign)
-            rhs_tilde = rhs_tilde + (1.0j * float(isign)) * (om_rhs_g[:, k].astype(xp.complex128) * Tk)
+        stacks_v = xp.stack([c_w] + [a[:, kk] for kk in range(dim)], axis=0)
+        stacks_r = xp.stack([s_w] + [ay[:, kk] for kk in range(dim)], axis=0)
+        fv = _dispatch_type1_keep_gpu_batched(backend, tphx, stacks_v, dim, ms_v, nufft_tol, isign)
+        fr = _dispatch_type1_keep_gpu_batched(backend, tphx, stacks_r, dim, ms_rhs, nufft_tol, isign)
+        v_tilde = fv[0].astype(xp.complex128, copy=False)
+        for kk in range(dim):
+            v_tilde = v_tilde + jc * om_v_c[:, kk] * fv[1 + kk]
+        rhs_tilde = fr[0].astype(xp.complex128, copy=False)
+        for kk in range(dim):
+            rhs_tilde = rhs_tilde + jc * om_rhs_c[:, kk] * fr[1 + kk]
         info = {"num_transforms_v": n_tr_v, "num_transforms_rhs": n_tr_r}
 
     else:
@@ -852,46 +1287,53 @@ def compute_binned_fourier_sums_gpu(
         npair = len(pairs)
         n_tr_v = 1 + dim + npair
         n_tr_r = 1 + dim + npair
-        om_v_g = xp.asarray(om_v, dtype=xp.float64)
-        om_rhs_g = xp.asarray(om_rhs, dtype=xp.float64)
+        qcols_v = [Qm[:, p] for p in range(npair)]
+        qcols_r = [Qym[:, p] for p in range(npair)]
+        stacks_v = xp.stack([c_w] + [a[:, kk] for kk in range(dim)] + qcols_v, axis=0)
+        stacks_r = xp.stack([s_w] + [ay[:, kk] for kk in range(dim)] + qcols_r, axis=0)
+        fv = _dispatch_type1_keep_gpu_batched(backend, tphx, stacks_v, dim, ms_v, nufft_tol, isign)
+        fr = _dispatch_type1_keep_gpu_batched(backend, tphx, stacks_r, dim, ms_rhs, nufft_tol, isign)
 
-        T0v = _dispatch_type1_keep_gpu(backend, tphx, c_w, dim, ms_v, nufft_tol, isign)
-        v_tilde = T0v.astype(xp.complex128, copy=True)
-        for k in range(dim):
-            Tk = _dispatch_type1_keep_gpu(backend, tphx, a[:, k], dim, ms_v, nufft_tol, isign)
-            v_tilde = v_tilde + (1.0j * float(isign)) * (om_v_g[:, k].astype(xp.complex128) * Tk)
-
-        T0r = _dispatch_type1_keep_gpu(backend, tphx, s_w, dim, ms_rhs, nufft_tol, isign)
-        rhs_tilde = T0r.astype(xp.complex128, copy=True)
-        for k in range(dim):
-            Tk = _dispatch_type1_keep_gpu(backend, tphx, ay[:, k], dim, ms_rhs, nufft_tol, isign)
-            rhs_tilde = rhs_tilde + (1.0j * float(isign)) * (om_rhs_g[:, k].astype(xp.complex128) * Tk)
+        v_tilde = fv[0].astype(xp.complex128, copy=False)
+        for kk in range(dim):
+            v_tilde = v_tilde + jc * om_v_c[:, kk] * fv[1 + kk]
+        rhs_tilde = fr[0].astype(xp.complex128, copy=False)
+        for kk in range(dim):
+            rhs_tilde = rhs_tilde + jc * om_rhs_c[:, kk] * fr[1 + kk]
 
         for p, (i, j) in enumerate(pairs):
-            Tqv = _dispatch_type1_keep_gpu(backend, tphx, Qm[:, p], dim, ms_v, nufft_tol, isign)
+            fv2 = fv[1 + dim + p]
             factor_v = om_v_g[:, i] * om_v_g[:, j]
             if i != j:
                 factor_v = factor_v * 2.0
-            v_tilde = v_tilde + (-0.5 * factor_v.astype(xp.complex128) * Tqv)
+            v_tilde = v_tilde + (-0.5 * factor_v.astype(xp.complex128) * fv2)
 
-            Tqr = _dispatch_type1_keep_gpu(backend, tphx, Qym[:, p], dim, ms_rhs, nufft_tol, isign)
+            fr2 = fr[1 + dim + p]
             factor_r = om_rhs_g[:, i] * om_rhs_g[:, j]
             if i != j:
                 factor_r = factor_r * 2.0
-            rhs_tilde = rhs_tilde + (-0.5 * factor_r.astype(xp.complex128) * Tqr)
+            rhs_tilde = rhs_tilde + (-0.5 * factor_r.astype(xp.complex128) * fr2)
 
         info = {"num_transforms_v": n_tr_v, "num_transforms_rhs": n_tr_r}
 
+    _sync_cuda_for_timings(xp, timings_s)
+    if timings_s is not None:
+        timings_s["t_binned_cufinufft_on_centers_s"] = float(time.perf_counter() - t_ft0)
+
     if return_gpu:
         return v_tilde, rhs_tilde, info
-    return (
-        _as_numpy_optional_gpu(v_tilde, xp),
-        _as_numpy_optional_gpu(rhs_tilde, xp),
-        info,
-    )
+
+    _sync_cuda_stream(xp)
+    t_cp0 = time.perf_counter()
+    out_v = _to_host_complex128(v_tilde)
+    out_r = _to_host_complex128(rhs_tilde)
+    if timings_s is not None:
+        timings_s["t_gpu_to_cpu_copy_s"] = float(time.perf_counter() - t_cp0)
+    return out_v, out_r, info
 
 
-def _as_numpy(x: Any) -> np.ndarray:
+def _device_to_numpy(x: Any) -> np.ndarray:
+    """CuPy 等到 host；已是 NumPy 则视作数组。"""
     if hasattr(x, "get"):
         return np.asarray(x.get())
     return np.asarray(x)
@@ -921,35 +1363,52 @@ def _type1_coeffs_gpu(
     isign: int,
 ) -> Any:
     xp = backend.xp
-    n = int(tphx.shape[0])
-    c = xp.asarray(coeffs, dtype=xp.complex128).reshape(n)
+    tphx_gpu = xp.asarray(tphx, dtype=xp.float64)
+    n = int(tphx_gpu.shape[0])
+    c_full = xp.asarray(coeffs, dtype=xp.complex128)
+    batched = bool(c_full.ndim == 2)
+    if c_full.ndim == 1:
+        if int(c_full.shape[0]) != n:
+            raise ValueError(f"type-1 coeffs length {c_full.shape[0]} != tphx rows {n}")
+        c_call = c_full
+        n_rows = 1
+    elif c_full.ndim == 2:
+        if int(c_full.shape[1]) != n:
+            raise ValueError(f"type-1 coeffs last dim {c_full.shape[1]} != tphx rows {n}")
+        c_call = c_full
+        n_rows = int(c_full.shape[0])
+    else:
+        raise ValueError("coeffs must be 1-D or 2-D complex on device")
 
     if backend.has_nufft and backend.nufft is not None:
         cuf = backend.nufft
         try:
             if dim == 1:
-                x0 = xp.ascontiguousarray(tphx[:, 0])
-                out = cuf.nufft1d1(x0, c, (int(ms),), eps=eps, isign=isign)
+                x0 = xp.ascontiguousarray(tphx_gpu[:, 0])
+                out = cuf.nufft1d1(x0, c_call, (int(ms),), eps=eps, isign=isign)
             elif dim == 2:
-                x0 = xp.ascontiguousarray(tphx[:, 0])
-                x1 = xp.ascontiguousarray(tphx[:, 1])
-                out = cuf.nufft2d1(x0, x1, c, (int(ms), int(ms)), eps=eps, isign=isign)
+                x0 = xp.ascontiguousarray(tphx_gpu[:, 0])
+                x1 = xp.ascontiguousarray(tphx_gpu[:, 1])
+                out = cuf.nufft2d1(x0, x1, c_call, (int(ms), int(ms)), eps=eps, isign=isign)
             elif dim == 3:
-                x0 = xp.ascontiguousarray(tphx[:, 0])
-                x1 = xp.ascontiguousarray(tphx[:, 1])
-                x2 = xp.ascontiguousarray(tphx[:, 2])
+                x0 = xp.ascontiguousarray(tphx_gpu[:, 0])
+                x1 = xp.ascontiguousarray(tphx_gpu[:, 1])
+                x2 = xp.ascontiguousarray(tphx_gpu[:, 2])
                 out = cuf.nufft3d1(
                     x0,
                     x1,
                     x2,
-                    c,
+                    c_call,
                     (int(ms), int(ms), int(ms)),
                     eps=eps,
                     isign=isign,
                 )
             else:
                 raise NotImplementedError("cuFINUFFT 路径仅支持 dim<=3")
-            return xp.ascontiguousarray(out.reshape(-1))
+            out_arr = xp.ascontiguousarray(out)
+            if batched:
+                return out_arr.reshape(n_rows, -1)
+            return out_arr.reshape(-1)
         except Exception as exc:
             if getattr(backend, "allow_cpu_fallback", False):
                 warnings.warn(
@@ -960,10 +1419,18 @@ def _type1_coeffs_gpu(
             else:
                 raise
 
-    tphx_np = np.ascontiguousarray(_as_numpy(tphx), dtype=np.float64)
-    c_np = np.ascontiguousarray(_as_numpy(c), dtype=np.complex128)
-    host_out = _type1_coeffs_cpu(tphx_np, c_np, dim, ms, eps, isign)
-    return xp.asarray(host_out, dtype=xp.complex128)
+    tphx_np = np.ascontiguousarray(_device_to_numpy(tphx_gpu), dtype=np.float64)
+    if not batched:
+        c_np = np.ascontiguousarray(_device_to_numpy(c_full), dtype=np.complex128)
+        host_out = _type1_coeffs_cpu(tphx_np, c_np, dim, ms, eps, isign)
+        return xp.asarray(host_out, dtype=xp.complex128)
+
+    mats: list[np.ndarray] = []
+    for t in range(n_rows):
+        c_np = np.ascontiguousarray(_device_to_numpy(c_full[int(t)]), dtype=np.complex128)
+        mats.append(_type1_coeffs_cpu(tphx_np, c_np, dim, ms, eps, isign))
+    stacked = np.stack(mats, axis=0)
+    return xp.asarray(stacked, dtype=xp.complex128)
 
 
 def _dispatch_type1(
@@ -983,7 +1450,7 @@ def _dispatch_type1(
     tphx_gpu = xp.asarray(np.ascontiguousarray(tphx_np, dtype=np.float64))
     coeffs_gpu = xp.asarray(coeffs_np)
     out_gpu = _type1_coeffs_gpu(backend, tphx_gpu, coeffs_gpu, dim, ms, eps, isign)
-    return np.asarray(_as_numpy(out_gpu), dtype=np.complex128)
+    return np.asarray(_device_to_numpy(out_gpu), dtype=np.complex128)
 
 
 def _omega_modes(modes: np.ndarray, h: float) -> np.ndarray:
@@ -1207,6 +1674,30 @@ def compute_binned_fourier_sums(
     )
 
 
+def _count_occ_from_dense_c(c: Any) -> int:
+    """dense 计数向量（NumPy / CuPy）上非空的 bin 数。"""
+    try:
+        import cupy as cp  # type: ignore
+
+        if isinstance(c, cp.ndarray):
+            return int(cp.count_nonzero(c > 0))
+    except Exception:
+        pass
+    return int(np.sum(np.asarray(c) > 0))
+
+
+def _count_occ_from_compact_c_occ(c_occ: Any) -> int:
+    """已 compact 时 ``c_occ`` 的行数即占用 bin 数。"""
+    try:
+        import cupy as cp  # type: ignore
+
+        if isinstance(c_occ, cp.ndarray):
+            return int(c_occ.shape[0])
+    except Exception:
+        pass
+    return int(np.asarray(c_occ).shape[0])
+
+
 def summarize_bin_stats_layout(stats: dict[str, Any]) -> dict[str, Any]:
     """默认 diagnostics 中代替完整 ``bin_stats`` 的轻量摘要。"""
     r = int(stats["r"])
@@ -1214,27 +1705,9 @@ def summarize_bin_stats_layout(stats: dict[str, Any]) -> dict[str, Any]:
     Gtot = int(r**d)
     dense = bool(stats.get("dense", True))
     if dense:
-        c = stats["c"]
-        try:
-            import cupy as cp  # type: ignore
-
-            if isinstance(c, cp.ndarray):
-                nocc = int(cp.count_nonzero(c > 0))
-            else:
-                nocc = int(np.sum(np.asarray(c) > 0))
-        except Exception:
-            nocc = int(np.sum(np.asarray(c) > 0))
+        nocc = _count_occ_from_dense_c(stats["c"])
     else:
-        c_occ = stats["c_occ"]
-        try:
-            import cupy as cp  # type: ignore
-
-            if isinstance(c_occ, cp.ndarray):
-                nocc = int(c_occ.shape[0])
-            else:
-                nocc = int(np.asarray(c_occ).shape[0])
-        except Exception:
-            nocc = int(np.asarray(c_occ).shape[0])
+        nocc = _count_occ_from_compact_c_occ(stats["c_occ"])
     bda = stats.get("binning_dense_allocated")
     return {
         "num_occupied_bins": nocc,
@@ -1264,9 +1737,57 @@ def _collect_warnings(
     return w
 
 
+def _n_tr_total_for_bin_order(bin_order: str, d_: int) -> int:
+    o = _resolve_order(bin_order, d_)
+    ntv, ntr = (1, 1)
+    if o == "C0":
+        ntv, ntr = 1, 1
+    elif o == "C1":
+        dd = int(d_)
+        ntv = ntr = 1 + dd
+    else:
+        dd = int(d_)
+        npair = len(_pair_indices_upper(dd))
+        ntv = ntr = 1 + dd + npair
+    return int(ntv + ntr)
+
+
+def _gpu_exact_dual_type1_dense_points(
+    backend: Any,
+    X_pts: Any,
+    y_pts: Any,
+    *,
+    dim: int,
+    h: float,
+    m: int,
+    x_center: np.ndarray,
+    nufft_tol: float,
+    isign: int,
+    tphx_allow_clip: bool,
+    timings_s: dict[str, float] | None = None,
+) -> tuple[Any, Any, dict[str, Any]]:
+    xp = backend.xp
+    X_pts = xp.asarray(X_pts, dtype=xp.float64)
+    y_pts = xp.asarray(y_pts, dtype=xp.float64).reshape(-1)
+    ms_rhs = 2 * int(m) + 1
+    ms_v = 4 * int(m) + 1
+    _sync_cuda_for_timings(xp, timings_s)
+    t0 = time.perf_counter()
+    tphx = tphx_from_centers_gpu(X_pts, float(h), x_center, xp, allow_clip=tphx_allow_clip)
+    nloc = int(X_pts.shape[0])
+    ones = xp.ones(nloc, dtype=xp.float64)
+    v_tilde = _dispatch_type1_keep_gpu(backend, tphx, ones, dim, ms_v, nufft_tol, isign)
+    rhs_tilde = _dispatch_type1_keep_gpu(backend, tphx, y_pts, dim, ms_rhs, nufft_tol, isign)
+    _sync_cuda_for_timings(xp, timings_s)
+    if timings_s is not None:
+        timings_s["t_exact_dense_point_dual_nufft_s"] = float(time.perf_counter() - t0)
+    info = {"num_transforms_v": 1, "num_transforms_rhs": 1}
+    return v_tilde, rhs_tilde, info
+
+
 def build_binned_efgp_system(
-    X: np.ndarray,
-    y: np.ndarray,
+    X: np.ndarray | Any,
+    y: np.ndarray | Any,
     N: int,
     d: int,
     h: float,
@@ -1277,202 +1798,428 @@ def build_binned_efgp_system(
     r: int | None = None,
     memory_budget_bytes: int = 4 * 1024**3,
     min_avg_count: float = 8.0,
-    use_sparse_bins: bool = True,
+    use_sparse_bins: bool = False,
     r_max: int | None = None,
-    dtype: np.dtype = np.float64,
+    dtype: Any = np.float64,
     backend: Any | None = None,
     nufft_tol: float = 1e-9,
     x_center: np.ndarray | None = None,
     *,
     return_bin_stats: bool = False,
     tphx_allow_clip: bool = False,
-    use_gpu_dense_bins: bool = False,
+    use_gpu_dense_bins: bool = True,
+    return_gpu: bool = True,
     gpu_timing: bool = False,
-) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    input_on_gpu: bool = False,
+    assume_normalized: bool = False,
+    skip_cpu_validation: bool = False,
+    gpu_chunk_rows: int | None = None,
+    auto_downgrade_order: bool = True,
+    allow_exact_nufft_fallback: bool = False,
+    nufft_allow_cpu_fallback: bool | None = None,
+) -> tuple[np.ndarray | Any, np.ndarray | Any, dict[str, Any]]:
     """
     由分箱经验测度构造近似 EFGP 预计算量。
 
-    参数 ``X, y`` 为完整数据（函数内部校验 ``N``）；也可改用
-    ``build_binned_efgp_system_streaming`` 做真正流式多块读取。
+    GPU dense 默认：**融合 CUDA binning（单次 N-pass） + 批量 strengths 的 cuFINUFFT(type-1)**。
+    ``gpu_timing=True`` 时记录 ``binned_precompute_breakdown_s`` / ``gpu_precompute_timings_s`` 并在关键点同步；
+    否则多数内部步骤 **不额外同步**，便于与其它 CUDA work 重叠。
 
-    ``use_gpu_dense_bins=True`` 时使用 CuPy ``bincount`` 在 GPU 上 dense 聚合，
-    再在 GPU 上压缩非空 bin，NUFFT 链路尽量保持在设备上直到返回前 ``asnumpy``。
-    该路径需要 ``backend`` 且与 ``use_sparse_bins`` 互斥语义：启用 GPU dense 时
-    忽略 CPU 稀疏 dict binning。
+    ``auto_downgrade_order``（默认启用）：**只 fused binning 一次**（按请求的 ``order``），之后 C2→C1→C0 仅
+    在 **同一套 dense GPU 缓冲** 上做子集视图 + 重新 compact，不重跑 N-pass。
+    compact 后以 ``ratio = ((#v)+(#rhs))*G_eff/N`` 判别；``ratio>1`` 时若 ``allow_exact_nufft_fallback=True`` 则切到
+    全点双 type-1。**纯 binned 评测请保持** ``allow_exact_nufft_fallback=False``（默认），否则结果与 speedup 会与 exact 混淆。
 
-    Returns
-    -------
-    v_tilde : ( (4m+1)^d,) complex
-        ``J_{2m}`` 上近似 Toeplitz 生成元频域列（与 ``generate_multi_index(2m,d)`` 顺序一致）。
-    b_tilde : ( (2m+1)^d,) complex
-        ``b_tilde = D * rhs_tilde``，``D`` 与 ``basis_weights`` 展平顺序一致时应传入展平后的对角。
-    diagnostics : dict
+    ``input_on_gpu=True``：``X,y`` 为 CuPy 数组，已满足 ``[0,1]^d`` 时可设 ``assume_normalized=True`` 只做轻检查。
+    ``gpu_chunk_rows``：宿主模式为 H2D 块大小；``input_on_gpu`` 时为设备上行块大小（显存子区间 launch）。
+
+    ``nufft_allow_cpu_fallback``：若传入则临时覆盖 ``backend.allow_cpu_fallback``（结束后恢复），benchmark 建议 ``False``。
     """
-    order_eff = _resolve_order(order, d)
-    if quality not in THETA_MAX:
-        raise ValueError(f"quality must be one of {list(THETA_MAX.keys())}; got {quality!r}")
+    order_req = _resolve_order(order, d)
+    order_work = str(order_req)
 
-    if np.asarray(X).ndim != 2 or np.asarray(X).shape[1] != int(d):
-        raise ValueError(f"X must have shape (N, {d}).")
-    y_work = np.asarray(y, dtype=dtype).reshape(-1)
-    if np.asarray(X).shape[0] != int(N) or y_work.shape[0] != int(N):
-        raise ValueError("N must match len(X) and len(y).")
+    saved_cpu_fb: bool | None = None
+    fb_mutated = False
+    if backend is not None and nufft_allow_cpu_fallback is not None:
+        saved_cpu_fb = bool(getattr(backend, "allow_cpu_fallback", False))
+        backend.allow_cpu_fallback = bool(nufft_allow_cpu_fallback)
+        fb_mutated = True
 
-    validate_normalized_X(np.asarray(X), int(d))
+    try:
+        if quality not in THETA_MAX:
+            raise ValueError(f"quality must be one of {list(THETA_MAX.keys())}; got {quality!r}")
 
-    theta_target = THETA_MAX[quality][order_eff]
+        y_work_np: np.ndarray | None = None
+        gpu_X = gpu_y = None
+        if input_on_gpu:
+            if not use_gpu_dense_bins:
+                raise ValueError("input_on_gpu=True 需要 use_gpu_dense_bins=True")
+            if backend is None:
+                raise ValueError("input_on_gpu 需要 backend")
+            xp_in = backend.xp
+            gpu_X = xp_in.asarray(X, dtype=xp_in.float64)
+            gpu_y = xp_in.asarray(y, dtype=xp_in.float64).reshape(-1)
+            if int(gpu_X.shape[0]) != int(N) or int(gpu_X.shape[1]) != int(d):
+                raise ValueError(f"X must have shape (N, {d}) on GPU")
+            if int(gpu_y.shape[0]) != int(N):
+                raise ValueError("N must match len(y) on GPU")
+            if not skip_cpu_validation and not assume_normalized:
+                lo = float(xp_in.min(gpu_X))
+                hi = float(xp_in.max(gpu_X))
+                if lo < -X_NORM_TOL or hi > 1.0 + X_NORM_TOL:
+                    raise ValueError(
+                        "input_on_gpu: X 超出 [0,1] 容许范围；可设 assume_normalized=True 跳过此检查"
+                    )
+        else:
+            if np.asarray(X).ndim != 2 or np.asarray(X).shape[1] != int(d):
+                raise ValueError(f"X must have shape (N, {d}).")
+            y_work_np = np.asarray(y, dtype=dtype).reshape(-1)
+            if np.asarray(X).shape[0] != int(N) or y_work_np.shape[0] != int(N):
+                raise ValueError("N must match len(X) and len(y).")
+            if not skip_cpu_validation and not assume_normalized:
+                validate_normalized_X(np.asarray(X), int(d))
 
-    if r is None:
-        r_use, G, Delta, theta_actual, grid_diag = choose_binning_grid(
-            int(N),
-            int(d),
-            float(h),
-            int(m),
-            order=order_eff,
-            quality=quality,
-            memory_budget_bytes=memory_budget_bytes,
-            min_avg_count=min_avg_count,
-            r_max=r_max,
+        theta_target = THETA_MAX[quality][order_req]
+
+        if r is None:
+            r_use, G, Delta, theta_actual, grid_diag = choose_binning_grid(
+                int(N),
+                int(d),
+                float(h),
+                int(m),
+                order=order_req,
+                quality=quality,
+                memory_budget_bytes=memory_budget_bytes,
+                min_avg_count=min_avg_count,
+                r_max=r_max,
+            )
+        else:
+            G, Delta, theta_actual, grid_diag = _grid_diag_for_fixed_r(
+                int(r),
+                int(N),
+                int(d),
+                float(h),
+                int(m),
+                order_req,
+                quality,
+                float(theta_target),
+            )
+            r_use = int(grid_diag["r_auto"])
+
+        if x_center is None:
+            x_center_np = np.full(int(d), 0.5, dtype=np.float64)
+        else:
+            x_center_np = np.asarray(x_center, dtype=np.float64).reshape(-1)
+            if x_center_np.size != int(d):
+                raise ValueError("x_center must have length d.")
+
+        timing_payload: dict[str, float] | None = {} if gpu_timing else None
+        used_exact_nufft = False
+        downgrade_notes: list[str] = []
+
+        if use_gpu_dense_bins:
+            if backend is None:
+                raise ValueError("use_gpu_dense_bins=True requires a GPU backend bundle.")
+            xp = backend.xp
+            stats: dict[str, Any] = {}
+            ft_info: dict[str, Any] = {"num_transforms_v": 0, "num_transforms_rhs": 0}
+            v_tilde: Any
+            rhs_tilde: Any
+            stats_dense_full: dict[str, Any]
+
+            order_work = str(order_req)
+            if input_on_gpu:
+                stats_dense_full = build_bin_stats_from_arrays_gpu_dense(
+                    None,
+                    None,
+                    r_use,
+                    int(d),
+                    str(order_req),
+                    xp=xp,
+                    timings_s=timing_payload,
+                    gpu_chunk_rows=gpu_chunk_rows,
+                    skip_normalized_check=True,
+                    X_gpu=gpu_X,
+                    y_gpu=gpu_y,
+                )
+            else:
+                assert y_work_np is not None
+                stats_dense_full = build_bin_stats_from_arrays_gpu_dense(
+                    np.asarray(X, dtype=np.float64),
+                    y_work_np,
+                    r_use,
+                    int(d),
+                    str(order_req),
+                    xp=xp,
+                    timings_s=timing_payload,
+                    gpu_chunk_rows=gpu_chunk_rows,
+                )
+
+            loop_guard = 0
+            while True:
+                loop_guard += 1
+                if loop_guard > 8:
+                    raise RuntimeError("auto_downgrade_order: exceeded max refinement loops")
+
+                dense_tail = _gpu_dense_stats_tail_view(stats_dense_full, order_work, int(d))
+                stats = sparsify_bin_stats_gpu(dense_tail, xp=xp, timings_s=timing_payload)
+
+                nocc = int(stats["c_occ"].shape[0])
+                n_tot_tr = _n_tr_total_for_bin_order(str(order_work), int(d))
+                ratio = float(n_tot_tr) * float(nocc) / float(max(int(N), 1))
+
+                if ratio > 1.0:
+                    if not allow_exact_nufft_fallback:
+                        raise ValueError(
+                            "effective_work_ratio>1.0：binned NUFFT 在 transform 层难以优于双 NUFFT；"
+                            "请提高 r / 自动降阶，或显式设 allow_exact_nufft_fallback=True 走全点 double type-1。"
+                        )
+                    used_exact_nufft = True
+                    downgrade_notes.append(
+                        f"exact dual type-1 on N points (ratio={ratio:.4g}>1)"
+                    )
+                    if input_on_gpu:
+                        v_tilde, rhs_tilde, ft_info = _gpu_exact_dual_type1_dense_points(
+                            backend,
+                            gpu_X,
+                            gpu_y,
+                            dim=int(d),
+                            h=float(h),
+                            m=int(m),
+                            x_center=x_center_np,
+                            nufft_tol=nufft_tol,
+                            isign=-1,
+                            tphx_allow_clip=tphx_allow_clip,
+                            timings_s=timing_payload,
+                        )
+                    else:
+                        v_tilde, rhs_tilde, ft_info = _gpu_exact_dual_type1_dense_points(
+                            backend,
+                            xp.asarray(np.asarray(X, dtype=np.float64)),
+                            xp.asarray(y_work_np.astype(np.float64)),
+                            dim=int(d),
+                            h=float(h),
+                            m=int(m),
+                            x_center=x_center_np,
+                            nufft_tol=nufft_tol,
+                            isign=-1,
+                            tphx_allow_clip=tphx_allow_clip,
+                            timings_s=timing_payload,
+                        )
+                    break
+
+                if auto_downgrade_order and str(order_work) == "C2" and ratio > 0.4:
+                    order_work = "C1"
+                    downgrade_notes.append(
+                        f"auto downgrade C2->C1 (ratio={ratio:.4g}); reuse dense stats view"
+                    )
+                    continue
+                if auto_downgrade_order and str(order_work) == "C1" and ratio > 0.8:
+                    order_work = "C0"
+                    downgrade_notes.append(
+                        f"auto downgrade C1->C0 (ratio={ratio:.4g}); reuse dense stats view"
+                    )
+                    continue
+
+                v_tilde, rhs_tilde, ft_info = compute_binned_fourier_sums_gpu(
+                    stats,
+                    float(h),
+                    int(m),
+                    x_center=x_center_np,
+                    backend=backend,
+                    nufft_tol=nufft_tol,
+                    tphx_allow_clip=tphx_allow_clip,
+                    return_gpu=bool(return_gpu),
+                    timings_s=timing_payload,
+                )
+                break
+        else:
+            assert y_work_np is not None
+            use_dense_bins = not bool(use_sparse_bins)
+            stats = build_bin_stats_from_arrays(
+                X, y_work_np, r_use, int(d), order_req, use_dense_bins=use_dense_bins
+            )
+            v_tilde, rhs_tilde, ft_info = compute_binned_fourier_sums(
+                stats,
+                float(h),
+                int(m),
+                x_center=x_center_np,
+                backend=backend,
+                nufft_tol=nufft_tol,
+                tphx_allow_clip=tphx_allow_clip,
+            )
+
+        binned_breakdown_s = timing_payload if timing_payload is not None else {}
+
+        D_flat = np.asarray(D, dtype=np.float64).reshape(-1)
+        nf = int((2 * int(m) + 1) ** int(d))
+        if D_flat.shape[0] != nf:
+            raise ValueError(f"D must have length (2m+1)^d = {nf}, got {D_flat.shape[0]}.")
+
+        if use_gpu_dense_bins:
+            xp_dm = backend.xp
+            _sync_cuda_for_timings(xp_dm, timing_payload)
+            _t_dm0 = time.perf_counter()
+            if return_gpu:
+                Dg = xp_dm.asarray(D_flat, dtype=xp_dm.float64).reshape(-1)
+                rhs_flat = rhs_tilde.reshape(-1)
+                if Dg.shape[0] != rhs_flat.shape[0]:
+                    raise ValueError(f"D rhs length mismatch: {Dg.shape[0]} vs {rhs_flat.shape[0]}")
+                b_tilde = Dg * rhs_flat
+            else:
+                rhs_np = np.asarray(rhs_tilde, dtype=np.complex128).reshape(-1)
+                if D_flat.shape[0] != rhs_np.shape[0]:
+                    raise ValueError(f"D rhs length mismatch: {D_flat.shape[0]} vs {rhs_np.shape[0]}")
+                b_tilde = D_flat.astype(np.complex128, copy=False) * rhs_np
+            _sync_cuda_for_timings(xp_dm, timing_payload)
+            if timing_payload is not None:
+                binned_breakdown_s["t_rhs_D_multiply_s"] = float(time.perf_counter() - _t_dm0)
+        else:
+            rhs_np = np.asarray(rhs_tilde, dtype=np.complex128).reshape(-1)
+            b_tilde = D_flat.astype(np.complex128, copy=False) * rhs_np
+        Mf = (2 * int(m) + 1) ** int(d)
+        phase_met = bool(grid_diag.get("phase_target_met", True))
+        warnings = _collect_warnings(
+            int(N), int(d), G, theta_actual, theta_target, phase_met
         )
-    else:
-        r_use = max(1, int(r))
-        G = int(r_use**d)
-        Delta = 1.0 / float(r_use)
-        theta_actual = 2.0 * math.pi * float(h) * int(m) * int(d) / float(r_use)
-        bytes_pc = _bytes_per_cell(order_eff, int(d))
-        r_phase = int(math.ceil(2.0 * math.pi * float(h) * int(m) * int(d) / float(theta_target)))
-        grid_diag = {
-            "order": order_eff,
+        if "warning_phase" in grid_diag:
+            warnings.append(str(grid_diag["warning_phase"]))
+
+        if downgrade_notes:
+            warnings.extend(["auto_route: " + s for s in downgrade_notes])
+
+        if use_gpu_dense_bins:
+            bin_note = (
+                "GPU fused binning kernel + compaction + batched strengths cuFINUFFT on occupied centers; "
+                "or exact dual type-1 on all training points when route selects it."
+            )
+        else:
+            bin_note = (
+                "sparse binning: never allocated dense length-G accumulator vectors."
+                if not stats.get("binning_dense_allocated", True)
+                else (
+                    "dense binning: allocated full G=r^d vectors (see estimated_dense_memory_bytes in grid)."
+                )
+            )
+
+        if used_exact_nufft:
+            bin_layout = {
+                "num_occupied_bins": int(N),
+                "G_total_bins": int(G),
+                "bin_stats_layout_dense": False,
+                "binning_dense_allocated": False,
+            }
+        else:
+            bin_layout = summarize_bin_stats_layout(stats)
+
+        try:
+            skew_sn = _bin_count_skew_from_bin_stats(stats)
+        except Exception:
+            skew_sn = {
+                "bin_count_max_occ": 0.0,
+                "bin_count_mean_occ": 0.0,
+                "bin_count_p99_occ": 0.0,
+                "atomic_skew_occ_counts": float("nan"),
+            }
+
+        diagnostics: dict[str, Any] = {
+            "N": int(N),
+            "d": int(d),
+            "h": float(h),
+            "m": int(m),
+            "M_f": int(Mf),
+            "order": order_req,
+            "order_requested": str(order_req),
+            "order_bins_final": str(stats.get("order", order_req)) if not used_exact_nufft else "EXACT_DUAL_NUFFT",
             "quality": quality,
-            "theta_target": theta_target,
-            "theta_actual": theta_actual,
-            "r_phase": r_phase,
-            "r_auto": r_use,
-            "G": G,
-            "Delta": Delta,
-            "bytes_per_cell": bytes_pc,
-            "estimated_dense_memory_bytes": G * bytes_pc,
+            "r": int(r_use),
+            "G": int(G),
+            "Delta": float(Delta),
+            "theta_actual": float(theta_actual),
             "avg_occupancy": float(N) / float(max(G, 1)),
             "compression_ratio": float(N) / float(max(G, 1)),
-            "phase_target_met": r_use >= r_phase,
+            "estimated_memory_gb": float(grid_diag["estimated_dense_memory_bytes"]) / (1024.0**3),
+            "phase_target_met": phase_met,
+            "num_transforms_v": ft_info["num_transforms_v"],
+            "num_transforms_rhs": ft_info["num_transforms_rhs"],
+            "grid": grid_diag,
+            "warnings": warnings,
+            "use_sparse_bins_request": bool(use_sparse_bins),
+            "binning_dense_allocated": stats.get("binning_dense_allocated"),
+            "binning_memory_note": bin_note,
+            "use_gpu_dense_bins": bool(use_gpu_dense_bins),
+            "input_on_gpu": bool(input_on_gpu),
+            "assume_normalized": bool(assume_normalized),
+            "skip_cpu_validation": bool(skip_cpu_validation),
+            "auto_downgrade_order": bool(auto_downgrade_order),
+            "allow_exact_nufft_fallback": bool(allow_exact_nufft_fallback),
+            "used_exact_dense_point_nufft": bool(used_exact_nufft),
+            "nufft_cpu_fallback_overridden": fb_mutated,
+            "nufft_allow_cpu_fallback_effective": (
+                bool(nufft_allow_cpu_fallback) if nufft_allow_cpu_fallback is not None else None
+            ),
+            **skew_sn,
+            **bin_layout,
         }
-        if r_use < r_phase:
-            grid_diag["warning_phase"] = (
-                "phase target not met; binning error may dominate"
+        nocc_eff = int(diagnostics.get("num_occupied_bins", 0))
+        diagnostics["occupied_fraction_over_G"] = float(nocc_eff) / float(max(int(G), 1))
+        skew_m = diagnostics.get("atomic_skew_occ_counts", float("nan"))
+        if isinstance(skew_m, float) and not math.isnan(skew_m) and skew_m > 100.0:
+            warnings.append(
+                "bin_count max/mean skew>100: fused binning may be limited by atomic contention on hot bins."
             )
-
-    if x_center is None:
-        x_center_np = np.full(int(d), 0.5, dtype=np.float64)
-    else:
-        x_center_np = np.asarray(x_center, dtype=np.float64).reshape(-1)
-        if x_center_np.size != int(d):
-            raise ValueError("x_center must have length d.")
-
-    gpu_timings: dict[str, float] = {}
-    if use_gpu_dense_bins:
-        if backend is None:
-            raise ValueError("use_gpu_dense_bins=True requires a GPU backend bundle.")
-        xp = backend.xp
-        t_bin0 = time.perf_counter()
-        stats_dense = build_bin_stats_from_arrays_gpu_dense(
-            X, y_work, r_use, int(d), order_eff, xp=xp
-        )
-        if gpu_timing:
-            gpu_timings["t_dense_bincount_s"] = time.perf_counter() - t_bin0
-        t_comp = time.perf_counter()
-        stats = sparsify_bin_stats_gpu(stats_dense, xp=xp)
-        del stats_dense
-        if gpu_timing:
-            gpu_timings["t_compact_occupied_s"] = time.perf_counter() - t_comp
-        t_ft = time.perf_counter()
-        v_tilde, rhs_tilde, ft_info = compute_binned_fourier_sums_gpu(
-            stats,
-            float(h),
-            int(m),
-            x_center=x_center_np,
-            backend=backend,
-            nufft_tol=nufft_tol,
-            tphx_allow_clip=tphx_allow_clip,
-            return_gpu=False,
-        )
-        if gpu_timing:
-            gpu_timings["t_fourier_gpu_path_s"] = time.perf_counter() - t_ft
-    else:
-        use_dense_bins = not bool(use_sparse_bins)
-        stats = build_bin_stats_from_arrays(
-            X, y_work, r_use, int(d), order_eff, dtype=dtype, use_dense_bins=use_dense_bins
-        )
-
-        v_tilde, rhs_tilde, ft_info = compute_binned_fourier_sums(
-            stats,
-            float(h),
-            int(m),
-            x_center=x_center_np,
-            backend=backend,
-            nufft_tol=nufft_tol,
-            tphx_allow_clip=tphx_allow_clip,
-        )
-
-    D = np.asarray(D, dtype=np.float64).reshape(-1)
-    if D.shape[0] != (2 * int(m) + 1) ** int(d):
-        raise ValueError(
-            f"D must have length (2m+1)^d = {(2 * int(m) + 1) ** int(d)}, got {D.shape[0]}."
-        )
-    b_tilde = D * rhs_tilde
-
-    Mf = (2 * int(m) + 1) ** int(d)
-    phase_met = bool(grid_diag.get("phase_target_met", True))
-    warnings = _collect_warnings(
-        int(N), int(d), G, theta_actual, theta_target, phase_met
-    )
-    if "warning_phase" in grid_diag:
-        warnings.append(str(grid_diag["warning_phase"]))
-
-    if use_gpu_dense_bins:
-        bin_note = (
-            "GPU dense CuPy bincount on full G=r^d, then GPU compaction to occupied bins; "
-            "NUFFT on GPU arrays."
-        )
-    else:
-        bin_note = (
-            "sparse binning: never allocated dense length-G accumulator vectors."
-            if not stats.get("binning_dense_allocated", True)
-            else (
-                "dense binning: allocated full G=r^d vectors (see estimated_dense_memory_bytes in grid)."
+        if diagnostics["occupied_fraction_over_G"] > 0.5:
+            warnings.append(
+                "G_eff/G>0.5: compaction + per-occupied NUFFT may be a weak win; "
+                "consider exact-N NUFFT or a dense regular-grid FFT path."
             )
+        diagnostics["warnings"] = warnings
+        diagnostics["benchmark_report_field_names"] = [
+            "order_requested",
+            "order_bins_final",
+            "used_exact_dense_point_nufft",
+            "allow_exact_nufft_fallback",
+            "N",
+            "d",
+            "m",
+            "h",
+            "r",
+            "G",
+            "num_occupied_bins",
+            "occupied_fraction_over_G",
+            "theta_actual",
+            "phase_target_met",
+            "effective_work_ratio",
+            "avg_occupancy",
+            "bin_count_max_occ",
+            "bin_count_mean_occ",
+            "bin_count_p99_occ",
+            "atomic_skew_occ_counts",
+            "t_gpu_fused_bin_moments_s",
+            "t_compact_occupied_s",
+            "t_binned_cufinufft_on_centers_s",
+            "t_exact_dense_point_dual_nufft_s",
+            "t_rhs_D_multiply_s",
+        ]
+        n_tr_total = int(ft_info["num_transforms_v"]) + int(ft_info["num_transforms_rhs"])
+        diagnostics["effective_work_ratio"] = (
+            float(n_tr_total) * float(nocc_eff) / float(max(int(N), 1))
         )
-
-    diagnostics: dict[str, Any] = {
-        "N": int(N),
-        "d": int(d),
-        "h": float(h),
-        "m": int(m),
-        "M_f": int(Mf),
-        "order": order_eff,
-        "quality": quality,
-        "r": int(r_use),
-        "G": int(G),
-        "Delta": float(Delta),
-        "theta_actual": float(theta_actual),
-        "avg_occupancy": float(N) / float(max(G, 1)),
-        "compression_ratio": float(N) / float(max(G, 1)),
-        "estimated_memory_gb": float(grid_diag["estimated_dense_memory_bytes"]) / (1024.0**3),
-        "phase_target_met": phase_met,
-        "num_transforms_v": ft_info["num_transforms_v"],
-        "num_transforms_rhs": ft_info["num_transforms_rhs"],
-        "grid": grid_diag,
-        "warnings": warnings,
-        "use_sparse_bins_request": bool(use_sparse_bins),
-        "binning_dense_allocated": stats.get("binning_dense_allocated"),
-        "binning_memory_note": bin_note,
-        "use_gpu_dense_bins": bool(use_gpu_dense_bins),
-        **summarize_bin_stats_layout(stats),
-    }
-    if gpu_timing and gpu_timings:
-        diagnostics["gpu_precompute_timings_s"] = gpu_timings
-    if return_bin_stats:
-        diagnostics["bin_stats"] = stats
-    return v_tilde, b_tilde, diagnostics
+        diagnostics["return_gpu"] = bool(return_gpu and use_gpu_dense_bins)
+        if use_gpu_dense_bins and binned_breakdown_s:
+            diagnostics["binned_precompute_breakdown_s"] = dict(binned_breakdown_s)
+            diagnostics["binned_rhs_note"] = (
+                "Compaction + batched strengths NUFFT; D multiply "
+                "(``gpu_timing`` 打开时有 cuda 分段同步；omega/modes GPU 缓存复用)."
+            )
+        if gpu_timing and use_gpu_dense_bins and binned_breakdown_s:
+            diagnostics["gpu_precompute_timings_s"] = dict(binned_breakdown_s)
+        if return_bin_stats:
+            diagnostics["bin_stats"] = stats
+        return v_tilde, b_tilde, diagnostics
+    finally:
+        if fb_mutated and backend is not None:
+            setattr(backend, "allow_cpu_fallback", saved_cpu_fb)
 
 
 def build_binned_efgp_system_streaming(
@@ -1488,9 +2235,8 @@ def build_binned_efgp_system_streaming(
     r: int | None = None,
     memory_budget_bytes: int = 4 * 1024**3,
     min_avg_count: float = 8.0,
-    use_sparse_bins: bool = True,
+    use_sparse_bins: bool = False,
     r_max: int | None = None,
-    dtype: np.dtype = np.float64,
     backend: Any | None = None,
     nufft_tol: float = 1e-9,
     x_center: np.ndarray | None = None,
@@ -1498,7 +2244,7 @@ def build_binned_efgp_system_streaming(
     return_bin_stats: bool = False,
     tphx_allow_clip: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
-    """流式多块 binning，其余与 ``build_binned_efgp_system`` 相同。"""
+    """流式多块 CPU binning（正确性/debug）；timing benchmark 请用 GPU fused 路径或不计本路径。"""
     order_eff = _resolve_order(order, d)
     if quality not in THETA_MAX:
         raise ValueError(f"quality must be one of {list(THETA_MAX.keys())}; got {quality!r}")
@@ -1518,31 +2264,17 @@ def build_binned_efgp_system_streaming(
             r_max=r_max,
         )
     else:
-        r_use = max(1, int(r))
-        G = int(r_use**d)
-        Delta = 1.0 / float(r_use)
-        theta_actual = 2.0 * math.pi * float(h) * int(m) * int(d) / float(r_use)
-        bytes_pc = _bytes_per_cell(order_eff, int(d))
-        r_phase = int(math.ceil(2.0 * math.pi * float(h) * int(m) * int(d) / float(theta_target)))
-        grid_diag = {
-            "order": order_eff,
-            "quality": quality,
-            "theta_target": theta_target,
-            "theta_actual": theta_actual,
-            "r_phase": r_phase,
-            "r_auto": r_use,
-            "G": G,
-            "Delta": Delta,
-            "bytes_per_cell": bytes_pc,
-            "estimated_dense_memory_bytes": G * bytes_pc,
-            "avg_occupancy": float(N) / float(max(G, 1)),
-            "compression_ratio": float(N) / float(max(G, 1)),
-            "phase_target_met": r_use >= r_phase,
-        }
-        if r_use < r_phase:
-            grid_diag["warning_phase"] = (
-                "phase target not met; binning error may dominate"
-            )
+        G, Delta, theta_actual, grid_diag = _grid_diag_for_fixed_r(
+            int(r),
+            int(N),
+            int(d),
+            float(h),
+            int(m),
+            order_eff,
+            quality,
+            float(theta_target),
+        )
+        r_use = int(grid_diag["r_auto"])
 
     if x_center is None:
         x_center_np = np.full(int(d), 0.5, dtype=np.float64)
@@ -1558,7 +2290,6 @@ def build_binned_efgp_system_streaming(
         r_use,
         int(d),
         order_eff,
-        dtype=dtype,
         use_dense_bins=use_dense_bins,
     )
     if int(stats["n_seen"]) != int(N):
@@ -1624,6 +2355,10 @@ def build_binned_efgp_system_streaming(
         "binning_memory_note": bin_note,
         **summarize_bin_stats_layout(stats),
     }
+    nocc_eff = int(diagnostics.get("num_occupied_bins", 0))
+    n_tr_total = int(ft_info["num_transforms_v"]) + int(ft_info["num_transforms_rhs"])
+    diagnostics["effective_work_ratio"] = float(n_tr_total) * float(nocc_eff) / float(max(int(N), 1))
+    diagnostics["return_gpu"] = False
     if return_bin_stats:
         diagnostics["bin_stats"] = stats
     return v_tilde, b_tilde, diagnostics
@@ -1654,11 +2389,8 @@ def make_chunk_iterators_from_arrays(
     return x_iter(), y_iter(), n
 
 
-make_bin_stats_loaders_from_arrays = make_chunk_iterators_from_arrays
-
-
 def _run_self_tests() -> None:
-    """模块内自检（NUFFT 顺序、流式一致性、C0/C1/C2 相对误差趋势）。"""
+    """模块内自检（NUFFT 顺序、流式一致性、C0/C1/C2 相对误差趋势；可选 GPU 上 original N 点双 NUFFT 计时）。"""
     np.random.seed(42)
     d, m, h, r = 2, 2, 0.12, 14
     xc = np.full(d, 0.5)
@@ -1721,7 +2453,7 @@ def _run_self_tests() -> None:
     print("Test 3: dense streaming equals single-pass array")
     dense_a = build_bin_stats_from_arrays(X, y, r, d, "C2", use_dense_bins=True)
     xi, yi, _n = make_chunk_iterators_from_arrays(X, y, chunk_size=17)
-    dense_s = build_bin_stats_streaming(xi, yi, r, d, "C2", dtype=np.float64, use_dense_bins=True)
+    dense_s = build_bin_stats_streaming(xi, yi, r, d, "C2", use_dense_bins=True)
     assert int(dense_s["n_seen"]) == int(_n)
     np.testing.assert_allclose(dense_a["c"], dense_s["c"])
     np.testing.assert_allclose(dense_a["s"], dense_s["s"])
@@ -1775,11 +2507,91 @@ def _run_self_tests() -> None:
                 backend=bundle,
                 nufft_tol=1e-9,
             )
-            v_gpu = np.asarray(_as_numpy(v_gpu))
-            rhs_gpu = np.asarray(_as_numpy(rhs_gpu))
+            v_gpu = np.asarray(_device_to_numpy(v_gpu))
+            rhs_gpu = np.asarray(_device_to_numpy(rhs_gpu))
             np.testing.assert_allclose(v_gpu, v_cpu, rtol=1e-6, atol=1e-8)
             np.testing.assert_allclose(rhs_gpu, rhs_cpu, rtol=1e-6, atol=1e-8)
             print("  OK")
+
+            print("Test 5c: fused GPU binning vs CPU dense moments (C2)")
+            xp5 = bundle.xp
+            st_ref = build_bin_stats_from_arrays(X, y, r, d, "C2", use_dense_bins=True)
+            st_bd = build_bin_stats_from_arrays_gpu_dense(
+                X, y, r, d, "C2", xp=xp5, timings_s=None
+            )
+            _sync_cuda_stream(xp5)
+            for ak in ("c", "s", "a", "ay", "Q", "Qy"):
+                a_cpu = np.asarray(st_ref[ak])
+                a_g = np.asarray(_device_to_numpy(st_bd[ak]))
+                np.testing.assert_allclose(a_g, a_cpu, rtol=1e-5, atol=1e-5)
+
+            print("  OK")
+
+            ms_rhs_tm = 2 * int(m) + 1
+            ms_v_tm = 4 * int(m) + 1
+            eps_tm = float(1e-9)
+            xp_tm = bundle.xp
+            Xv = validate_normalized_X(np.asarray(X, dtype=np.float64), int(d))
+            y64_tm = np.asarray(y, dtype=np.float64).reshape(-1)
+            tphx_pts = tphx_from_centers(Xv, float(h), xc, allow_clip=False)
+            tphxg = xp_tm.asarray(tphx_pts, dtype=xp_tm.float64)
+            wo_tm = xp_tm.ones(int(n_pt), dtype=xp_tm.float64)
+            wy_tm = xp_tm.asarray(y64_tm, dtype=xp_tm.float64)
+            print("Test 5d: cuFINUFFT batched type-1 (3 strengths) vs looped single transforms")
+            fb_sv = bool(getattr(bundle, "allow_cpu_fallback", False))
+            bundle.allow_cpu_fallback = False
+            try:
+                xp_tm.random.seed(123)
+                w_0 = xp_tm.random.standard_normal(int(n_pt), dtype=xp_tm.float64)
+                w_1 = xp_tm.random.standard_normal(int(n_pt), dtype=xp_tm.float64)
+                w_2 = xp_tm.random.standard_normal(int(n_pt), dtype=xp_tm.float64)
+                w_stack = xp_tm.stack([w_0, w_1, w_2], axis=0)
+                _sync_cuda_stream(xp_tm)
+                out_batch = _dispatch_type1_keep_gpu_batched(
+                    bundle, tphxg, w_stack, d, ms_v_tm, eps_tm, -1
+                )
+                o0 = _dispatch_type1_keep_gpu(bundle, tphxg, w_0, d, ms_v_tm, eps_tm, -1)
+                o1 = _dispatch_type1_keep_gpu(bundle, tphxg, w_1, d, ms_v_tm, eps_tm, -1)
+                o2 = _dispatch_type1_keep_gpu(bundle, tphxg, w_2, d, ms_v_tm, eps_tm, -1)
+                _sync_cuda_stream(xp_tm)
+                out_loop = xp_tm.stack([o0, o1, o2], axis=0)
+                np.testing.assert_allclose(
+                    np.asarray(_device_to_numpy(out_batch)),
+                    np.asarray(_device_to_numpy(out_loop)),
+                    rtol=5e-5,
+                    atol=5e-6,
+                )
+            finally:
+                bundle.allow_cpu_fallback = fb_sv
+            print("  OK")
+
+            print(
+                "Test 5b: original — N-point type-1 cuNUFFT wall time "
+                "(v + rhs, 2 transforms, CUDA sync)"
+            )
+            for _warm in range(2):
+                _sync_cuda_stream(xp_tm)
+                _ = _dispatch_type1_keep_gpu(
+                    bundle, tphxg, wo_tm, d, ms_v_tm, eps_tm, -1
+                )
+                _ = _dispatch_type1_keep_gpu(
+                    bundle, tphxg, wy_tm, d, ms_rhs_tm, eps_tm, -1
+                )
+                _sync_cuda_stream(xp_tm)
+            _sync_cuda_stream(xp_tm)
+            t_ori0 = time.perf_counter()
+            _ = _dispatch_type1_keep_gpu(
+                bundle, tphxg, wo_tm, d, ms_v_tm, eps_tm, -1
+            )
+            _ = _dispatch_type1_keep_gpu(
+                bundle, tphxg, wy_tm, d, ms_rhs_tm, eps_tm, -1
+            )
+            _sync_cuda_stream(xp_tm)
+            t_original_cunufft_s = float(time.perf_counter() - t_ori0)
+            print(
+                f"  t_original_dual_cunufft_s (N={n_pt}, ms_v={ms_v_tm}, ms_rhs={ms_rhs_tm}): "
+                f"{t_original_cunufft_s:.6e} s wall"
+            )
 
     print("All self-tests finished.")
 
