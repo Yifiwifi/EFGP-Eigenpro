@@ -17,21 +17,25 @@ def save_complexity_benchmark_plots(
 ) -> list[Path]:
     """
     Save Figure1-5 complexity benchmark plots from grouped summary dataframe.
+
+    Expects per-mode aggregates including ``time_train_median``
+    (`time_train` = precompute + eigenspace + precond_build + solve) and timing medians used in figures.
+    Fig1/Fig5 use training time ``T_train``; end-to-end ``wall_s_total`` is for tables / exports.
     """
     plot_dir = Path(out_dir)
     plot_dir.mkdir(parents=True, exist_ok=True)
     saved: list[Path] = []
 
-    # Figure 1: end-to-end median wall time vs N (log-log)
+    # Figure 1: median training time T_train vs N (precompute+eigenspace+precond_build+solve; excludes predict)
     fig, ax = plt.subplots(figsize=(8, 5))
     for (mode, top_q), g in summary_df.groupby(["mode", "top_q"]):
         g = g.sort_values("N")
-        ax.plot(g["N"], g["wall_s_total_median"], marker="o", label=f"{mode}_q{int(top_q)}")
+        ax.plot(g["N"], g["time_train_median"], marker="o", label=f"{mode}_q{int(top_q)}")
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xlabel("N")
-    ax.set_ylabel("median wall_s_total")
-    ax.set_title("Figure 1: End-to-end time vs N")
+    ax.set_ylabel("median time_train")
+    ax.set_title("Figure 1: Training time T_train vs N")
     ax.grid(True, alpha=0.3)
     ax.legend()
     fig.tight_layout()
@@ -48,6 +52,7 @@ def save_complexity_benchmark_plots(
         fig, ax = plt.subplots(figsize=(8, 5))
         ax.plot(g["N"], g["time_precompute_median"], marker="o", label="precompute")
         ax.plot(g["N"], g["time_eigenspace_median"], marker="o", label="eigenspace")
+        ax.plot(g["N"], g["time_precond_build_median"], marker="o", label="precond_build")
         ax.plot(g["N"], g["time_solve_median"], marker="o", label="solve")
         ax.plot(g["N"], g["time_predict_median"], marker="o", label="predict")
         ax.set_xscale("log")
@@ -108,24 +113,24 @@ def save_complexity_benchmark_plots(
         plt.show()
     plt.close(fig)
 
-    # Figure 5: time share vs N (per mode)
+    # Figure 5: share of training time T_train vs N (excludes predict; see wall_s_total in tables)
     for (mode, top_q), g in summary_df.groupby(["mode", "top_q"]):
         g = g.sort_values("N")
-        total = g["wall_s_total_median"].replace(0, np.nan)
-        r_pre = g["time_precompute_median"] / total
-        r_eig = g["time_eigenspace_median"] / total
-        r_sol = g["time_solve_median"] / total
-        r_pred = g["time_predict_median"] / total
+        denom = g["time_train_median"].replace(0, np.nan)
+        r_pre = g["time_precompute_median"] / denom
+        r_eig = g["time_eigenspace_median"] / denom
+        r_pb = g["time_precond_build_median"] / denom
+        r_sol = g["time_solve_median"] / denom
 
         fig, ax = plt.subplots(figsize=(8, 5))
-        ax.plot(g["N"], r_pre, marker="o", label="precompute/total")
-        ax.plot(g["N"], r_eig, marker="o", label="eigenspace/total")
-        ax.plot(g["N"], r_sol, marker="o", label="solve/total")
-        ax.plot(g["N"], r_pred, marker="o", label="predict/total")
+        ax.plot(g["N"], r_pre, marker="o", label="precompute/T_train")
+        ax.plot(g["N"], r_eig, marker="o", label="eigenspace/T_train")
+        ax.plot(g["N"], r_pb, marker="o", label="precond_build/T_train")
+        ax.plot(g["N"], r_sol, marker="o", label="solve/T_train")
         ax.set_xscale("log")
         ax.set_xlabel("N")
-        ax.set_ylabel("time share")
-        ax.set_title(f"Figure 5: Stage share vs N | {mode}_q{int(top_q)}")
+        ax.set_ylabel("fraction of training time")
+        ax.set_title(f"Figure 5: Training-stage share vs N | {mode}_q{int(top_q)}")
         ax.grid(True, alpha=0.3)
         ax.legend()
         fig.tight_layout()

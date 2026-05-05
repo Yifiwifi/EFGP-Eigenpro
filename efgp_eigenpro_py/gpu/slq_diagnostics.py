@@ -428,6 +428,64 @@ def evaluate_cdf(atoms: SLQAtomPack, x_grid: Sequence[float]) -> np.ndarray:
     return out
 
 
+def _spectral_x_grid(
+    spectrum_mode: str,
+    support_lo: float,
+    support_hi: float,
+    span: float,
+    sigma_max: float,
+    density_grid_size: int,
+) -> tuple[np.ndarray, str]:
+    """
+    Build an evaluation grid for CDF / kernel density.
+
+    For SPD spectra with large dynamic range (max/min), use geometric (log-uniform)
+    spacing so the CDF and density are resolved on the small-eigenvalue side.
+    """
+    n = int(max(int(density_grid_size), 32))
+    pad = float(4.0 * max(sigma_max, 0.0))
+    mode = str(spectrum_mode).strip().lower()
+    ratio = (
+        float(support_hi) / float(support_lo)
+        if (
+            math.isfinite(support_lo)
+            and math.isfinite(support_hi)
+            and support_lo > 0.0
+            and support_hi > 0.0
+        )
+        else 1.0
+    )
+    use_log = mode == "spd" and support_lo > 0.0 and support_hi > 0.0 and ratio > 50.0
+    if use_log:
+        log_lo = math.log(max(float(support_lo), 1e-300))
+        log_hi = math.log(max(float(support_hi), float(support_lo) * 1.0000001))
+        log_range = max(log_hi - log_lo, 1e-12)
+        sigma_adj = min(pad / max(float(support_lo), 1e-300), float(support_hi))
+        margin = max(0.06 * log_range, 1e-6, 0.25 * math.log1p(max(sigma_adj, 0.0) / max(float(support_hi), 1e-300)))
+        margin = min(margin, 0.35 * log_range)
+        t = np.linspace(log_lo - margin, log_hi + margin, n)
+        x_grid = np.exp(t)
+        return x_grid.astype(np.float64, copy=False), "log"
+    lo = float(support_lo) - pad
+    hi = float(support_hi) + pad
+    if not math.isfinite(lo) or not math.isfinite(hi) or lo >= hi:
+        hi = lo + max(float(span), 1e-30)
+    x_grid = np.linspace(lo, hi, n)
+    return x_grid.astype(np.float64, copy=False), "linear"
+
+
+def _density_wrt_log_lambda(lambda_grid: np.ndarray, rho_lambda: np.ndarray) -> np.ndarray:
+    """
+    If t = log λ (natural log), then dF/dt = λ ρ(λ) for ρ w.r.t. dλ.
+    """
+    lam = np.asarray(lambda_grid, dtype=np.float64).reshape(-1)
+    r = np.asarray(rho_lambda, dtype=np.float64).reshape(-1)
+    out = np.full_like(lam, np.nan)
+    m = np.isfinite(lam) & np.isfinite(r) & (lam > 0.0)
+    out[m] = lam[m] * r[m]
+    return out
+
+
 def evaluate_gaussian_density(atoms: SLQAtomPack, x_grid: Sequence[float], sigma: float) -> np.ndarray:
     """
     Evaluate Gaussian-smoothed density from atom pack.
@@ -501,7 +559,12 @@ def analyze_slq_result(
             lambda_hat_max=float("nan"),
             top_cloud=np.asarray([], dtype=np.float64),
             bottom_cloud=np.asarray([], dtype=np.float64),
-            grid={"x": np.asarray([], dtype=np.float64), "cdf": np.asarray([], dtype=np.float64), "density": {}},
+            grid={
+                "x": np.asarray([], dtype=np.float64),
+                "cdf": np.asarray([], dtype=np.float64),
+                "density": {},
+                "x_scale": "linear",
+            },
             spectrum_mode=mode,
             assumptions="SPD/PSD non-negative spectrum" if mode == "spd" else "General Hermitian spectrum (signed).",
             warnings=["No atoms available at final prefix."],
@@ -603,8 +666,14 @@ def analyze_slq_result(
     span = max(support_hi - support_lo, 1e-30)
     sigma_max_fac = float(max(density_sigma_factors)) if len(density_sigma_factors) > 0 else 0.0
     sigma_max = max(sigma_max_fac * span, 0.0)
-    pad = 4.0 * sigma_max
-    x_grid = np.linspace(support_lo - pad, support_hi + pad, int(max(density_grid_size, 32)))
+    x_grid, x_scale = _spectral_x_grid(
+        mode,
+        support_lo,
+        support_hi,
+        span,
+        sigma_max,
+        int(density_grid_size),
+    )
     cdf_grid = evaluate_cdf(final_atoms, x_grid)
     density = {}
     for fac in density_sigma_factors:
@@ -729,7 +798,7 @@ def analyze_slq_result(
         lambda_hat_max=float(lambda_hat_max),
         top_cloud=np.asarray(top_cloud, dtype=np.float64),
         bottom_cloud=np.asarray(bottom_cloud, dtype=np.float64),
-        grid={"x": x_grid, "cdf": cdf_grid, "density": density},
+        grid={"x": x_grid, "cdf": cdf_grid, "density": density, "x_scale": x_scale},
         spectrum_mode=mode,
         assumptions="SPD/PSD non-negative spectrum" if mode == "spd" else "General Hermitian spectrum (signed).",
         warnings=warnings,
@@ -825,6 +894,7 @@ def package_slq_output(
         "x_grid": analysis.grid["x"],
         "cdf": analysis.grid["cdf"],
         "density": analysis.grid["density"],
+        "x_scale": str(analysis.grid.get("x_scale", "linear")),
         "extremal_ritz_cloud": raw_extra.get(
             "extremal_ritz_cloud",
             {"top": analysis.top_cloud, "bottom": analysis.bottom_cloud},
@@ -866,6 +936,7 @@ def build_slq_plot_payload(
 
     x = np.asarray(raw.get("x_grid", []), dtype=np.float64)
     cdf = np.asarray(raw.get("cdf", []), dtype=np.float64)
+    x_scale = str(raw.get("x_scale", "linear"))
     density = raw.get("density", {}) if isinstance(raw, dict) else {}
     dens_002 = np.asarray(density.get(0.002, density.get("0.002", [])), dtype=np.float64)
     dens_005 = np.asarray(density.get(0.005, density.get("0.005", [])), dtype=np.float64)
@@ -933,7 +1004,14 @@ def build_slq_plot_payload(
     )
 
     return {
-        "global": {"x": x, "cdf": cdf, "density_002": dens_002, "density_005": dens_005, "density_010": dens_010},
+        "global": {
+            "x": x,
+            "cdf": cdf,
+            "density_002": dens_002,
+            "density_005": dens_005,
+            "density_010": dens_010,
+            "x_scale": x_scale,
+        },
         "left_zoom": {
             "x": x_zoom,
             "density_005": dens_zoom_005,
@@ -979,6 +1057,10 @@ def save_slq_plots(
 
     x = payload["global"]["x"]
     cdf = payload["global"]["cdf"]
+    d002 = payload["global"]["density_002"]
+    d005 = payload["global"]["density_005"]
+    d010 = payload["global"]["density_010"]
+    x_scale = str(payload["global"].get("x_scale", "linear"))
     xz = payload["left_zoom"]["x"]
     dz5 = payload["left_zoom"]["density_005"]
     dz10 = payload["left_zoom"]["density_010"]
@@ -994,13 +1076,24 @@ def save_slq_plots(
     matrix_dim = int(payload.get("meta", {}).get("matrix_dim", 0))
     dim_tag = f" (n={matrix_dim:,})" if matrix_dim > 0 else ""
 
+    def _plot_global_cdf(axis: Any, *, title_suffix: str = "") -> None:
+        axis.plot(x, cdf, color="C0")
+        axis.set_title(f"Global spectral CDF{title_suffix}{dim_tag}")
+        axis.set_xlabel("eigenvalue λ")
+        axis.set_ylabel("CDF F(λ)")
+        axis.set_ylim(-0.02, 1.02)
+        axis.grid(True, alpha=0.35, linestyle=":")
+        pos = np.isfinite(x) & (x > 0.0)
+        if x_scale == "log" and np.any(pos):
+            axis.set_xscale("log")
+        elif np.count_nonzero(pos) >= 2:
+            ratio = float(np.nanmax(x[pos]) / max(np.nanmin(x[pos]), 1e-300))
+            if math.isfinite(ratio) and ratio > 80.0:
+                axis.set_xscale("log")
+
     if x.size > 0 and cdf.size == x.size:
         fig, ax = plt.subplots(figsize=(6.4, 4.2))
-        ax.plot(x, cdf)
-        ax.set_title(f"Global spectral CDF{dim_tag}")
-        ax.set_xlabel("eigenvalue")
-        ax.set_ylabel("CDF")
-        ax.set_ylim(-0.02, 1.02)
+        _plot_global_cdf(ax)
         fig.tight_layout()
         p = out / "fig1_global_cdf.png"
         fig.savefig(p, dpi=dpi)
@@ -1008,17 +1101,101 @@ def save_slq_plots(
         saved["fig1_global_cdf"] = str(p)
 
         fig, ax = plt.subplots(figsize=(6.4, 4.2))
-        ax.plot(x, cdf)
+        pos_cdf = np.isfinite(x) & np.isfinite(cdf) & (x > 0.0)
+        if np.count_nonzero(pos_cdf) >= 2:
+            lx = np.log(x[pos_cdf])
+            ax.plot(lx, cdf[pos_cdf], color="C0")
+            ax.set_title(f"Global spectral CDF vs log λ (natural log){dim_tag}")
+            ax.set_xlabel("log λ")
+            ax.set_ylabel("CDF F(λ)")
+            ax.set_ylim(-0.02, 1.02)
+            ax.grid(True, alpha=0.35, linestyle=":")
+            fig.tight_layout()
+            p = out / "fig1a_global_cdf_vs_loglambda.png"
+            fig.savefig(p, dpi=dpi)
+            plt.close(fig)
+            saved["fig1a_global_cdf_vs_loglambda"] = str(p)
+        else:
+            plt.close(fig)
+
+        fig, ax = plt.subplots(figsize=(6.4, 4.2))
+        ax.plot(x, cdf, color="C0")
         ax.set_xscale("symlog", linthresh=1.0)
         ax.set_title(f"Global spectral CDF (symlog-x){dim_tag}")
-        ax.set_xlabel("eigenvalue")
-        ax.set_ylabel("CDF")
+        ax.set_xlabel("eigenvalue λ")
+        ax.set_ylabel("CDF F(λ)")
         ax.set_ylim(-0.02, 1.02)
+        ax.grid(True, alpha=0.35, linestyle=":")
         fig.tight_layout()
         p = out / "fig1b_global_cdf_symlogx.png"
         fig.savefig(p, dpi=dpi)
         plt.close(fig)
         saved["fig1b_global_cdf_symlogx"] = str(p)
+
+        fig, ax = plt.subplots(figsize=(6.4, 4.2))
+        for arr, lab, c in (
+            (d002, "σ_fac=0.002", "C0"),
+            (d005, "σ_fac=0.005", "C1"),
+            (d010, "σ_fac=0.01", "C2"),
+        ):
+            if arr.size == x.size and np.any(np.isfinite(arr)):
+                ax.plot(x, arr, label=lab, color=c, linewidth=1.2)
+        ax.set_title(f"Gaussian-smoothed PSD ρ(λ){dim_tag}")
+        ax.set_xlabel("eigenvalue λ")
+        ax.set_ylabel("ρ(λ)")
+        pos = np.isfinite(x) & (x > 0.0)
+        if x_scale == "log" and np.any(pos):
+            ax.set_xscale("log")
+        elif np.count_nonzero(pos) >= 2:
+            ratio = float(np.nanmax(x[pos]) / max(np.nanmin(x[pos]), 1e-300))
+            if math.isfinite(ratio) and ratio > 80.0:
+                ax.set_xscale("log")
+        ymax = 0.0
+        ymin_pos = float("inf")
+        for arr in (d002, d005, d010):
+            if arr.size != x.size:
+                continue
+            m = np.isfinite(arr) & (arr > 0.0)
+            if np.any(m):
+                ymax = max(ymax, float(np.max(arr[m])))
+                ymin_pos = min(ymin_pos, float(np.min(arr[m])))
+        if math.isfinite(ymin_pos) and ymax > 0.0 and ymax / ymin_pos > 50.0:
+            ax.set_yscale("log")
+        ax.grid(True, which="both", alpha=0.25, linestyle=":")
+        _legend_if_any(ax)
+        fig.tight_layout()
+        p = out / "fig1c_global_psd_semilogx.png"
+        fig.savefig(p, dpi=dpi)
+        plt.close(fig)
+        saved["fig1c_global_psd_semilogx"] = str(p)
+
+        fig, ax = plt.subplots(figsize=(6.4, 4.2))
+        had = False
+        if d005.size == x.size:
+            rho_l = _density_wrt_log_lambda(x, d005)
+            m = np.isfinite(x) & (x > 0.0) & np.isfinite(rho_l)
+            if np.any(m):
+                ax.plot(np.log(x[m]), rho_l[m], color="C1", label="σ_fac=0.005 → λ·ρ(λ)")
+                had = True
+        if d010.size == x.size:
+            rho_l2 = _density_wrt_log_lambda(x, d010)
+            m2 = np.isfinite(x) & (x > 0.0) & np.isfinite(rho_l2)
+            if np.any(m2):
+                ax.plot(np.log(x[m2]), rho_l2[m2], color="C2", label="σ_fac=0.01 → λ·ρ(λ)")
+                had = True
+        if had:
+            ax.set_title(f"Density w.r.t. log λ (equals λ·ρ(λ) for ρ w.r.t. dλ){dim_tag}")
+            ax.set_xlabel("log λ (natural log)")
+            ax.set_ylabel("λ·ρ(λ)")
+            ax.grid(True, alpha=0.35, linestyle=":")
+            _legend_if_any(ax)
+            fig.tight_layout()
+            p = out / "fig1d_global_density_wrt_loglambda.png"
+            fig.savefig(p, dpi=dpi)
+            plt.close(fig)
+            saved["fig1d_global_density_wrt_loglambda"] = str(p)
+        else:
+            plt.close(fig)
 
     if xz.size > 0:
         fig, ax = plt.subplots(figsize=(6.4, 4.2))
@@ -1106,21 +1283,26 @@ def save_slq_plots(
 
     if x.size > 0 and cdf.size == x.size and m.size > 0:
         fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-        axes[0, 0].plot(x, cdf)
-        axes[0, 0].set_xscale("symlog", linthresh=1.0)
-        axes[0, 0].set_title(f"Global CDF (symlog-x){dim_tag}")
-        axes[0, 0].set_xlabel("eigenvalue")
-        axes[0, 0].set_ylabel("CDF")
+        _plot_global_cdf(axes[0, 0])
 
+        if d005.size == x.size and np.any(np.isfinite(d005)):
+            axes[0, 1].plot(x, d005, label="σ_fac=0.005 (global)", color="C1")
         if xz.size > 0 and dz5.size == xz.size:
-            axes[0, 1].plot(xz, dz5, label="sigma=0.005")
+            axes[0, 1].plot(xz, dz5, label="σ_fac=0.005 (left zoom)", color="C0", alpha=0.7)
         if xz.size > 0 and dz10.size == xz.size:
-            axes[0, 1].plot(xz, dz10, label="sigma=0.01")
+            axes[0, 1].plot(xz, dz10, label="σ_fac=0.01 (left zoom)", color="C2", alpha=0.7)
         if math.isfinite(lam_min):
             axes[0, 1].axvline(lam_min, linestyle="--", alpha=0.6, label="lambda_min")
-        axes[0, 1].set_title(f"Left-edge density (local grid){dim_tag}")
-        axes[0, 1].set_xlabel("eigenvalue")
-        axes[0, 1].set_ylabel("density")
+        axes[0, 1].set_title(f"PSD ρ(λ) vs λ{dim_tag}")
+        axes[0, 1].set_xlabel("eigenvalue λ")
+        axes[0, 1].set_ylabel("ρ(λ)")
+        pos_d = np.isfinite(x) & (x > 0.0)
+        if x_scale == "log" and np.any(pos_d):
+            axes[0, 1].set_xscale("log")
+        elif np.count_nonzero(pos_d) >= 2:
+            ratio_d = float(np.nanmax(x[pos_d]) / max(np.nanmin(x[pos_d]), 1e-300))
+            if math.isfinite(ratio_d) and ratio_d > 80.0:
+                axes[0, 1].set_xscale("log")
         _legend_if_any(axes[0, 1])
 
         axes[1, 0].plot(m, q001, label="q0.001")

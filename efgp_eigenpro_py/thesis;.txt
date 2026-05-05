@@ -1,0 +1,41 @@
+thesis;
+
+timeline;  
+Thesis committee now; Hongmei and Jiping
+Wrap up results. 
+Literature review 10-15 min; at least 5-10 papers, relationships
+
+Literature review and problem introduction;
+KRR foundamantal; motivation:(Francis Bach  physical, emband;) one slide
+KRR bottleneck; why bottleneck, O(N) common ways to do; Goal from O(N^2) to O(NLOGN), 
+with dimension small, 
+with translation invariant kernel(motivation, most usable, smootheness, prior with structure)(but also other kernel). decomposition spectrum;Bochner's Theorem
+eigenpro as preconditioned  descent; K used as structure, B do on;
+
+
+idea: combine two together;Eigenpro, nufft and EFGP,[2-3] and cite 10 papers;
+my algorithm. 
+real do
+(Nystrom, RFeature model, [2-3];)
+
+
+Conditioned on this,
+results now, EFGP and combine  5min; and experiment 5; simulated or sometimes real dataset.
+Canonical model;
+Francis Bach;
+
+Potential Advantage; select best Q; 
+Tuesday, 8点; 3 days slides; 7days stories;
+1, fully explanation; NUFFT as fast FFT, but why fast, fast/slow in what sense; compare with which; native and fully ; kernel translation invar;  result, and main theorem;
+2, 
+
+baseline 1, KRR
+baseline 2, EFGP
+baseline 3, Eigenpro
+why conditioning number related with CG; with the cost, explain with result.
+always do comparison.
+
+relatively real dataset. quick results; stylize; (application)
+
+7/7/7 
+

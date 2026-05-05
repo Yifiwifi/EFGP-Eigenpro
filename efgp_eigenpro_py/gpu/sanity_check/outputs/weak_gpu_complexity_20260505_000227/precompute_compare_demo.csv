@@ -1,0 +1,5 @@
+method,time_s,rhs_rel_err,note,rhs_direct_sum_s,theta_actual,G,num_occupied_bins
+original,0.2330625000031432,,EFGPSolver.precompute (CPU grid state),66.10111109999707,,,
+C0,0.062266699998872355,2.200889892257866,sparse binning: never allocated dense length-G accumulator vectors.,66.10111109999707,17.498004134427372,1225.0,1225.0
+C1,0.13799860001017805,2.568596627301582,sparse binning: never allocated dense length-G accumulator vectors.,66.10111109999707,17.498004134427372,1225.0,1225.0
+C2,0.23820429999614134,4.203537063541909,sparse binning: never allocated dense length-G accumulator vectors.,66.10111109999707,17.498004134427372,1225.0,1225.0
