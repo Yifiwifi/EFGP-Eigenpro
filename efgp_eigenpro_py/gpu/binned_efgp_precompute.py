@@ -7,8 +7,13 @@ Binned EFGP precompute (C0/C1/C2): spatial binning plus type-1 NUFFT on bin cent
 NUFFT 相位约定与仓库其余部分一致（``benchmark.py`` / ``v1_ops``）：默认 ``isign=-1``，
 离散输出与 ``exp(i * isign * tphx · mode)`` 一致。C1/C2 **一阶**修正含因子 ``isign``；
 二阶项系数不含 ``isign``（``(i·isign)^2=-1`` 已与 ``-0.5 ω^T Q ω`` 吸收）。
-非均匀坐标 ``tphx`` 须在 ``[-pi, pi]``：默认若超出 ``pi + tol`` 则报错（避免静默 clip 改相位）；
-仅当 ``allow_tphx_clip=True`` 时才裁剪（兼容极端用法）。
+非均匀坐标 ``tphx`` 须在 ``[-pi, pi]``：若 ``tphx_check_bounds=True`` 会对 ``|raw|`` 做一次 GPU reduction 并拷回宿主，
+可能强制同步（benchmark 可设 ``tphx_check_bounds=False`` 直接 clip）。
+``tphx_check_bounds=False`` 且 ``tphx_allow_clip=False`` 时仍会做 ``clip`` 以保持数值护栏，但不会为越界检测而同步；
+若需在越界时报错并保持旧语义，请设 ``tphx_check_bounds=True`` 且 ``tphx_allow_clip=False``。
+
+``bin_skew_diagnostics_level``：``full`` 会把 ``c_occ`` 拷宿主并算分位数（贵）；benchmark 默认 ``light``（仅 GPU/CPU 上的 max/mean）。
+高占用时规则格点 FFT 替代 centers NUFFT 仍在路线图中（当前未接线）。
 
 默认 ``x_center=0.5`` 对应 ``[0,1]^d``；若要与 ``gpu_precompute_v1`` 完全一致，
 可传入 ``(x_min+x_max)/2``。
@@ -797,6 +802,47 @@ def _get_pair_ij_gpu_arrays(
     return pi_g, pj_g
 
 
+def _skew_occ_count_fields_na() -> dict[str, float]:
+    nan = float("nan")
+    return {
+        "bin_count_max_occ": nan,
+        "bin_count_mean_occ": nan,
+        "bin_count_p99_occ": nan,
+        "atomic_skew_occ_counts": nan,
+    }
+
+
+def _occupied_bin_counts_skew_light(co_any: Any, xp: Any) -> dict[str, float]:
+    """``c_occ`` 在设备上：max/mean 约两次标量 reduction，不把整向量拉回 CPU；无 p99。"""
+    co = xp.asarray(co_any, dtype=xp.float64).reshape(-1)
+    if int(co.size) <= 0:
+        return _skew_occ_count_fields_na()
+    mx = float(xp.max(co))
+    mu = float(xp.mean(co))
+    skew = mx / mu if mu > 1e-30 else float("inf")
+    return {
+        "bin_count_max_occ": mx,
+        "bin_count_mean_occ": mu,
+        "bin_count_p99_occ": float("nan"),
+        "atomic_skew_occ_counts": skew,
+    }
+
+
+def _occupied_bin_counts_skew_light_numpy(co_any: Any) -> dict[str, float]:
+    co = np.asarray(co_any, dtype=np.float64).reshape(-1)
+    if co.size <= 0:
+        return _skew_occ_count_fields_na()
+    mx = float(co.max())
+    mu = float(co.mean())
+    skew = mx / mu if mu > 1e-30 else float("inf")
+    return {
+        "bin_count_max_occ": mx,
+        "bin_count_mean_occ": mu,
+        "bin_count_p99_occ": float("nan"),
+        "atomic_skew_occ_counts": skew,
+    }
+
+
 def _occupied_bin_atomic_skew_diag(c_occ: Any) -> dict[str, float]:
     """由 occupied bin 的 ``c_occ``（NumPy/CuPy）计算 skew 等指标（宿主标量）。"""
     co = np.asarray(_device_to_numpy(c_occ), dtype=np.float64).reshape(-1)
@@ -819,28 +865,76 @@ def _occupied_bin_atomic_skew_diag(c_occ: Any) -> dict[str, float]:
     }
 
 
-def _bin_count_skew_from_bin_stats(st: dict[str, Any]) -> dict[str, float]:
-    """优先用 compact ``c_occ``，否则用 dense ``c[c>0]``（宿主上算分位数）。"""
+def _bin_count_skew_from_bin_stats(
+    st: dict[str, Any],
+    *,
+    level: str = "light",
+    xp_light: Any | None = None,
+) -> dict[str, float]:
+    """
+    ``level``: ``none`` 全 NaN；``light`` compact ``c_occ`` 用设备/light numpy（无分位数拷贝）；
+    ``full``：``c_occ`` 整表 H2D 或 dense ``c>0`` 宿主分位数。
+    """
+    lvl = str(level).strip().lower()
+    if lvl == "none":
+        return _skew_occ_count_fields_na()
+    if lvl not in ("light", "full"):
+        raise ValueError("bin skew level must be 'none', 'light', or 'full'")
+
     co = st.get("c_occ")
     if co is not None:
+        if lvl == "light":
+            try:
+                import cupy as cp  # type: ignore
+
+                if isinstance(co, cp.ndarray):
+                    return _occupied_bin_counts_skew_light(co, cp)
+            except Exception:
+                pass
+            return _occupied_bin_counts_skew_light_numpy(_device_to_numpy(co))
         return _occupied_bin_atomic_skew_diag(co)
+
     c = st.get("c")
     if c is None:
+        return _skew_occ_count_fields_na()
+
+    if lvl == "light":
+        try:
+            import cupy as cp  # type: ignore
+
+            if xp_light is not None and isinstance(c, cp.ndarray):
+                cpos = xp_light.asarray(c[c > 0], dtype=xp_light.float64)
+                if int(cpos.size) <= 0:
+                    return _skew_occ_count_fields_na()
+                mx = float(xp_light.max(cpos))
+                mu = float(xp_light.mean(cpos))
+                skew = mx / mu if mu > 1e-30 else float("inf")
+                return {
+                    "bin_count_max_occ": mx,
+                    "bin_count_mean_occ": mu,
+                    "bin_count_p99_occ": float("nan"),
+                    "atomic_skew_occ_counts": skew,
+                }
+        except Exception:
+            pass
+        cnp = np.asarray(_device_to_numpy(c), dtype=np.float64).reshape(-1)
+        pos_np = cnp[cnp > 0]
+        if pos_np.size <= 0:
+            return _skew_occ_count_fields_na()
+        mx = float(pos_np.max())
+        mu = float(pos_np.mean())
+        skew = mx / mu if mu > 1e-30 else float("inf")
         return {
-            "bin_count_max_occ": 0.0,
-            "bin_count_mean_occ": 0.0,
-            "bin_count_p99_occ": 0.0,
-            "atomic_skew_occ_counts": float("nan"),
+            "bin_count_max_occ": mx,
+            "bin_count_mean_occ": mu,
+            "bin_count_p99_occ": float("nan"),
+            "atomic_skew_occ_counts": skew,
         }
+
     cnp = np.asarray(_device_to_numpy(c), dtype=np.float64).reshape(-1)
     pos = cnp[cnp > 0]
     if pos.size <= 0:
-        return {
-            "bin_count_max_occ": 0.0,
-            "bin_count_mean_occ": 0.0,
-            "bin_count_p99_occ": 0.0,
-            "atomic_skew_occ_counts": float("nan"),
-        }
+        return _skew_occ_count_fields_na()
     mx = float(pos.max())
     mu = float(pos.mean())
     p99 = float(np.percentile(pos, 99.0))
@@ -1126,23 +1220,32 @@ def tphx_from_centers_gpu(
     xp: Any,
     *,
     allow_clip: bool = False,
+    check_bounds: bool = False,
     boundary_tol: float = TPHX_BOUNDARY_TOL,
 ) -> Any:
-    """GPU analogue of ``tphx_from_centers`` (``z_centers`` CuPy array)."""
+    """GPU analogue of ``tphx_from_centers`` (``z_centers`` CuPy array).
+
+    ``check_bounds=False``（默认）：不把 ``max|raw|`` 拉回 CPU，直接进入 ``clip``
+    （与旧实现成功路径等价，但可能对明显越界的 ``h/z/x_center`` **不再主动抛错**）。
+    ``check_bounds=True``：严格检查越界并可 ``raise``（与旧默认同步语义一致）。
+    """
     cp = xp
     z_centers = cp.asarray(z_centers, dtype=cp.float64)
     xc = cp.asarray(np.asarray(x_center, dtype=np.float64).reshape(1, -1), dtype=cp.float64)
     raw = 2.0 * cp.pi * float(h) * (z_centers - xc)
     upper = float(np.nextafter(np.pi, 0.0))
-    amax = float(cp.max(cp.abs(raw)))
-    if allow_clip:
+    if check_bounds:
+        amax = float(cp.max(cp.abs(raw)))
+        if allow_clip:
+            return cp.clip(raw, -cp.pi, upper)
+        if amax > np.pi + float(boundary_tol):
+            raise ValueError(
+                "tphx outside [-pi, pi] beyond numerical tolerance; "
+                "check h, scaling, x_center, or set allow_clip=True. "
+                f"max|tphx|={amax}, tol={boundary_tol}."
+            )
         return cp.clip(raw, -cp.pi, upper)
-    if amax > np.pi + float(boundary_tol):
-        raise ValueError(
-            "tphx outside [-pi, pi] beyond numerical tolerance; "
-            "check h, scaling, x_center, or set allow_clip=True. "
-            f"max|tphx|={amax}, tol={boundary_tol}."
-        )
+
     return cp.clip(raw, -cp.pi, upper)
 
 
@@ -1220,14 +1323,16 @@ def compute_binned_fourier_sums_gpu(
     nufft_tol: float,
     isign: int = -1,
     tphx_allow_clip: bool = False,
+    tphx_check_bounds: bool = False,
     return_gpu: bool = True,
     timings_s: dict[str, float] | None = None,
 ) -> tuple[np.ndarray | Any, np.ndarray | Any, dict[str, Any]]:
     """
     Fourier sums for **GPU-compacted** bin stats (``dense=False``, ``on_gpu=True``).
 
-    When ``return_gpu=True`` (默认), ``v_tilde`` / ``rhs_tilde`` 留在 GPU。
+    When ``return_gpu=True``（默认），``v_tilde`` / ``rhs_tilde`` 留在 GPU。
     ``return_gpu=False`` 时拷回 NumPy，并在 ``timings_s`` 写入 ``t_gpu_to_cpu_copy_s``。
+    ``tphx_check_bounds=False``（默认）避免 ``max|raw|`` 触发的单次同步（见 ``tphx_from_centers_gpu``）。
     """
     if backend is None:
         raise ValueError("compute_binned_fourier_sums_gpu requires a GPU backend bundle.")
@@ -1250,7 +1355,14 @@ def compute_binned_fourier_sums_gpu(
     ms_rhs = 2 * int(m) + 1
     ms_v = 4 * int(m) + 1
 
-    tphx = tphx_from_centers_gpu(z_used, h, x_center, xp, allow_clip=tphx_allow_clip)
+    tphx = tphx_from_centers_gpu(
+        z_used,
+        h,
+        x_center,
+        xp,
+        allow_clip=tphx_allow_clip,
+        check_bounds=tphx_check_bounds,
+    )
 
     jc = 1.0j * float(isign)
     om_v_c = om_v_g.astype(xp.complex128, copy=False)
@@ -1380,57 +1492,41 @@ def _type1_coeffs_gpu(
     else:
         raise ValueError("coeffs must be 1-D or 2-D complex on device")
 
-    if backend.has_nufft and backend.nufft is not None:
-        cuf = backend.nufft
-        try:
-            if dim == 1:
-                x0 = xp.ascontiguousarray(tphx_gpu[:, 0])
-                out = cuf.nufft1d1(x0, c_call, (int(ms),), eps=eps, isign=isign)
-            elif dim == 2:
-                x0 = xp.ascontiguousarray(tphx_gpu[:, 0])
-                x1 = xp.ascontiguousarray(tphx_gpu[:, 1])
-                out = cuf.nufft2d1(x0, x1, c_call, (int(ms), int(ms)), eps=eps, isign=isign)
-            elif dim == 3:
-                x0 = xp.ascontiguousarray(tphx_gpu[:, 0])
-                x1 = xp.ascontiguousarray(tphx_gpu[:, 1])
-                x2 = xp.ascontiguousarray(tphx_gpu[:, 2])
-                out = cuf.nufft3d1(
-                    x0,
-                    x1,
-                    x2,
-                    c_call,
-                    (int(ms), int(ms), int(ms)),
-                    eps=eps,
-                    isign=isign,
-                )
-            else:
-                raise NotImplementedError("cuFINUFFT 路径仅支持 dim<=3")
-            out_arr = xp.ascontiguousarray(out)
-            if batched:
-                return out_arr.reshape(n_rows, -1)
-            return out_arr.reshape(-1)
-        except Exception as exc:
-            if getattr(backend, "allow_cpu_fallback", False):
-                warnings.warn(
-                    f"cuFINUFFT failed, falling back to CPU finufft: {exc}",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-            else:
-                raise
+    if not backend.has_nufft or backend.nufft is None:
+        raise RuntimeError(
+            "GPU-only binned precompute requires a GPU NUFFT backend; CPU fallback has been disabled."
+        )
 
-    tphx_np = np.ascontiguousarray(_device_to_numpy(tphx_gpu), dtype=np.float64)
-    if not batched:
-        c_np = np.ascontiguousarray(_device_to_numpy(c_full), dtype=np.complex128)
-        host_out = _type1_coeffs_cpu(tphx_np, c_np, dim, ms, eps, isign)
-        return xp.asarray(host_out, dtype=xp.complex128)
-
-    mats: list[np.ndarray] = []
-    for t in range(n_rows):
-        c_np = np.ascontiguousarray(_device_to_numpy(c_full[int(t)]), dtype=np.complex128)
-        mats.append(_type1_coeffs_cpu(tphx_np, c_np, dim, ms, eps, isign))
-    stacked = np.stack(mats, axis=0)
-    return xp.asarray(stacked, dtype=xp.complex128)
+    cuf = backend.nufft
+    try:
+        if dim == 1:
+            x0 = xp.ascontiguousarray(tphx_gpu[:, 0])
+            out = cuf.nufft1d1(x0, c_call, (int(ms),), eps=eps, isign=isign)
+        elif dim == 2:
+            x0 = xp.ascontiguousarray(tphx_gpu[:, 0])
+            x1 = xp.ascontiguousarray(tphx_gpu[:, 1])
+            out = cuf.nufft2d1(x0, x1, c_call, (int(ms), int(ms)), eps=eps, isign=isign)
+        elif dim == 3:
+            x0 = xp.ascontiguousarray(tphx_gpu[:, 0])
+            x1 = xp.ascontiguousarray(tphx_gpu[:, 1])
+            x2 = xp.ascontiguousarray(tphx_gpu[:, 2])
+            out = cuf.nufft3d1(
+                x0,
+                x1,
+                x2,
+                c_call,
+                (int(ms), int(ms), int(ms)),
+                eps=eps,
+                isign=isign,
+            )
+        else:
+            raise NotImplementedError("cuFINUFFT 路径仅支持 dim<=3")
+        out_arr = xp.ascontiguousarray(out)
+        if batched:
+            return out_arr.reshape(n_rows, -1)
+        return out_arr.reshape(-1)
+    except Exception as exc:
+        raise RuntimeError(f"cuFINUFFT type-1 failed in GPU-only binned precompute: {exc}") from exc
 
 
 def _dispatch_type1(
@@ -1765,6 +1861,7 @@ def _gpu_exact_dual_type1_dense_points(
     isign: int,
     tphx_allow_clip: bool,
     timings_s: dict[str, float] | None = None,
+    tphx_check_bounds: bool = False,
 ) -> tuple[Any, Any, dict[str, Any]]:
     xp = backend.xp
     X_pts = xp.asarray(X_pts, dtype=xp.float64)
@@ -1773,7 +1870,14 @@ def _gpu_exact_dual_type1_dense_points(
     ms_v = 4 * int(m) + 1
     _sync_cuda_for_timings(xp, timings_s)
     t0 = time.perf_counter()
-    tphx = tphx_from_centers_gpu(X_pts, float(h), x_center, xp, allow_clip=tphx_allow_clip)
+    tphx = tphx_from_centers_gpu(
+        X_pts,
+        float(h),
+        x_center,
+        xp,
+        allow_clip=tphx_allow_clip,
+        check_bounds=tphx_check_bounds,
+    )
     nloc = int(X_pts.shape[0])
     ones = xp.ones(nloc, dtype=xp.float64)
     v_tilde = _dispatch_type1_keep_gpu(backend, tphx, ones, dim, ms_v, nufft_tol, isign)
@@ -1807,6 +1911,8 @@ def build_binned_efgp_system(
     *,
     return_bin_stats: bool = False,
     tphx_allow_clip: bool = False,
+    tphx_check_bounds: bool = False,
+    bin_skew_diagnostics_level: str = "light",
     use_gpu_dense_bins: bool = True,
     return_gpu: bool = True,
     gpu_timing: bool = False,
@@ -1825,18 +1931,27 @@ def build_binned_efgp_system(
     ``gpu_timing=True`` 时记录 ``binned_precompute_breakdown_s`` / ``gpu_precompute_timings_s`` 并在关键点同步；
     否则多数内部步骤 **不额外同步**，便于与其它 CUDA work 重叠。
 
-    ``auto_downgrade_order``（默认启用）：**只 fused binning 一次**（按请求的 ``order``），之后 C2→C1→C0 仅
-    在 **同一套 dense GPU 缓冲** 上做子集视图 + 重新 compact，不重跑 N-pass。
-    compact 后以 ``ratio = ((#v)+(#rhs))*G_eff/N`` 判别；``ratio>1`` 时若 ``allow_exact_nufft_fallback=True`` 则切到
-    全点双 type-1。**纯 binned 评测请保持** ``allow_exact_nufft_fallback=False``（默认），否则结果与 speedup 会与 exact 混淆。
+    ``auto_downgrade_order``（默认启用）：compact 后以 ``ratio`` 度量；先按阈值尝试 **C2→C1→C0** 降阶
+    （仅改 dense 视图 + 重 compact，不重跑 fused binning），再在仍 ``ratio>1`` 时
+    （若允许）切全点 dual type-1 或报错。
 
     ``input_on_gpu=True``：``X,y`` 为 CuPy 数组，已满足 ``[0,1]^d`` 时可设 ``assume_normalized=True`` 只做轻检查。
     ``gpu_chunk_rows``：宿主模式为 H2D 块大小；``input_on_gpu`` 时为设备上行块大小（显存子区间 launch）。
 
-    ``nufft_allow_cpu_fallback``：若传入则临时覆盖 ``backend.allow_cpu_fallback``（结束后恢复），benchmark 建议 ``False``。
+    ``nufft_allow_cpu_fallback``：GPU-only 默认路径不允许 ``True``；若显式传 ``False`` 则仅临时确保
+    ``backend.allow_cpu_fallback=False``（结束后恢复）。
+
+    ``tphx_check_bounds``（默认 ``False``）：见模块说明；正确性验收可设 ``True`` 恢复越界即报错（需一次同步）。
+
+    ``bin_skew_diagnostics_level``：``light``（默认）/ ``full`` / ``none``；``full`` 才把 ``c_occ`` 全量拷 CPU 并算 p99。
     """
     order_req = _resolve_order(order, d)
     order_work = str(order_req)
+
+    if bool(nufft_allow_cpu_fallback):
+        raise ValueError(
+            "GPU-only binned precompute does not allow CPU NUFFT fallback; set nufft_allow_cpu_fallback=False."
+        )
 
     saved_cpu_fb: bool | None = None
     fb_mutated = False
@@ -1968,6 +2083,19 @@ def build_binned_efgp_system(
                 n_tot_tr = _n_tr_total_for_bin_order(str(order_work), int(d))
                 ratio = float(n_tot_tr) * float(nocc) / float(max(int(N), 1))
 
+                if auto_downgrade_order and str(order_work) == "C2" and ratio > 0.4:
+                    order_work = "C1"
+                    downgrade_notes.append(
+                        f"auto downgrade C2->C1 (ratio={ratio:.4g}); reuse dense stats view"
+                    )
+                    continue
+                if auto_downgrade_order and str(order_work) == "C1" and ratio > 0.8:
+                    order_work = "C0"
+                    downgrade_notes.append(
+                        f"auto downgrade C1->C0 (ratio={ratio:.4g}); reuse dense stats view"
+                    )
+                    continue
+
                 if ratio > 1.0:
                     if not allow_exact_nufft_fallback:
                         raise ValueError(
@@ -1991,6 +2119,7 @@ def build_binned_efgp_system(
                             isign=-1,
                             tphx_allow_clip=tphx_allow_clip,
                             timings_s=timing_payload,
+                            tphx_check_bounds=tphx_check_bounds,
                         )
                     else:
                         v_tilde, rhs_tilde, ft_info = _gpu_exact_dual_type1_dense_points(
@@ -2005,21 +2134,9 @@ def build_binned_efgp_system(
                             isign=-1,
                             tphx_allow_clip=tphx_allow_clip,
                             timings_s=timing_payload,
+                            tphx_check_bounds=tphx_check_bounds,
                         )
                     break
-
-                if auto_downgrade_order and str(order_work) == "C2" and ratio > 0.4:
-                    order_work = "C1"
-                    downgrade_notes.append(
-                        f"auto downgrade C2->C1 (ratio={ratio:.4g}); reuse dense stats view"
-                    )
-                    continue
-                if auto_downgrade_order and str(order_work) == "C1" and ratio > 0.8:
-                    order_work = "C0"
-                    downgrade_notes.append(
-                        f"auto downgrade C1->C0 (ratio={ratio:.4g}); reuse dense stats view"
-                    )
-                    continue
 
                 v_tilde, rhs_tilde, ft_info = compute_binned_fourier_sums_gpu(
                     stats,
@@ -2029,6 +2146,7 @@ def build_binned_efgp_system(
                     backend=backend,
                     nufft_tol=nufft_tol,
                     tphx_allow_clip=tphx_allow_clip,
+                    tphx_check_bounds=tphx_check_bounds,
                     return_gpu=bool(return_gpu),
                     timings_s=timing_payload,
                 )
@@ -2113,7 +2231,11 @@ def build_binned_efgp_system(
             bin_layout = summarize_bin_stats_layout(stats)
 
         try:
-            skew_sn = _bin_count_skew_from_bin_stats(stats)
+            skew_sn = _bin_count_skew_from_bin_stats(
+                stats,
+                level=str(bin_skew_diagnostics_level),
+                xp_light=(backend.xp if use_gpu_dense_bins and backend is not None else None),
+            )
         except Exception:
             skew_sn = {
                 "bin_count_max_occ": 0.0,
@@ -2153,6 +2275,8 @@ def build_binned_efgp_system(
             "skip_cpu_validation": bool(skip_cpu_validation),
             "auto_downgrade_order": bool(auto_downgrade_order),
             "allow_exact_nufft_fallback": bool(allow_exact_nufft_fallback),
+            "tphx_check_bounds": bool(tphx_check_bounds),
+            "bin_skew_diagnostics_level": str(bin_skew_diagnostics_level),
             "used_exact_dense_point_nufft": bool(used_exact_nufft),
             "nufft_cpu_fallback_overridden": fb_mutated,
             "nufft_allow_cpu_fallback_effective": (
@@ -2179,6 +2303,8 @@ def build_binned_efgp_system(
             "order_bins_final",
             "used_exact_dense_point_nufft",
             "allow_exact_nufft_fallback",
+            "tphx_check_bounds",
+            "bin_skew_diagnostics_level",
             "N",
             "d",
             "m",
