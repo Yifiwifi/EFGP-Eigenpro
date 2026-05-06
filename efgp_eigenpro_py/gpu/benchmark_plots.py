@@ -217,4 +217,74 @@ def save_complexity_benchmark_plots(
             plt.show()
         plt.close(fig)
 
+    # Figure 6: per-iteration time vs N for q=0 and q=q_max.
+    # - y-axis: time per iteration (average)
+    # - color: q (0 vs q_max)
+    # - line style: solve (solid) vs matvec (dashed)
+    need_cols = {"mode", "top_q", "N", "time_solve_median", "t_matvec_total_median", "cg_iters_median"}
+    if not summary_df.empty and need_cols.issubset(set(summary_df.columns)):
+        q_vals = pd.to_numeric(summary_df["top_q"], errors="coerce")
+        q_pos = q_vals[q_vals > 0]
+        q_max = int(q_pos.max()) if not q_pos.empty else 0
+
+        base = summary_df[(summary_df["mode"] == "gpu_v1_topq0") & (summary_df["top_q"] == 0)].copy()
+
+        hi_mode = None
+        if q_max > 0:
+            if (summary_df["mode"] == "gpu_v3_topq_eigenpro_nystrom").any():
+                hi_mode = "gpu_v3_topq_eigenpro_nystrom"
+            elif (summary_df["mode"] == "gpu_v3_topq").any():
+                hi_mode = "gpu_v3_topq"
+
+        hi = (
+            summary_df[(summary_df["mode"] == hi_mode) & (summary_df["top_q"] == q_max)].copy()
+            if hi_mode is not None
+            else summary_df.iloc[0:0].copy()
+        )
+
+        def _per_iter_curves(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+            g = df.sort_values("N").copy()
+            it = pd.to_numeric(g["cg_iters_median"], errors="coerce")
+            it = it.where(it > 0, np.nan)
+            solve_per_iter = pd.to_numeric(g["time_solve_median"], errors="coerce") / it
+            # In CG/PCG, matvec count is typically iters+1 (extra at init). We don't have n_matvec in summary,
+            # so approximate per-iteration matvec time by dividing by (iters+1).
+            matvec_per_iter = pd.to_numeric(g["t_matvec_total_median"], errors="coerce") / (it + 1.0)
+            return (
+                g["N"].to_numpy(dtype=float),
+                solve_per_iter.to_numpy(dtype=float),
+                matvec_per_iter.to_numpy(dtype=float),
+            )
+
+        if not base.empty and (q_max == 0 or not hi.empty):
+            fig, ax = plt.subplots(figsize=(8, 5))
+            c0 = "C0"
+            n0, s0, m0 = _per_iter_curves(base)
+            ax.plot(n0, s0, color=c0, linestyle="-", marker="o", label="q=0 solve/iter")
+            ax.plot(n0, m0, color=c0, linestyle="--", marker="o", label="q=0 matvec/iter")
+
+            if not hi.empty:
+                c1 = "C1"
+                n1, s1, m1 = _per_iter_curves(hi)
+                ax.plot(n1, s1, color=c1, linestyle="-", marker="s", label=f"q={q_max} solve/iter")
+                ax.plot(n1, m1, color=c1, linestyle="--", marker="s", label=f"q={q_max} matvec/iter")
+
+            ax.set_xscale("log")
+            ax.set_yscale("log")
+            ax.set_xlabel("N")
+            ax.set_ylabel("median time per iteration")
+            if hi_mode is None:
+                ax.set_title("Figure 6: per-iteration time vs N | q=0")
+            else:
+                ax.set_title(f"Figure 6: per-iteration time vs N | q=0 vs q={q_max} ({hi_mode})")
+            ax.grid(True, alpha=0.3)
+            ax.legend()
+            fig.tight_layout()
+            fig6_path = plot_dir / "fig6_per_iter_time_vs_n_loglog.png"
+            fig.savefig(fig6_path, dpi=dpi)
+            saved.append(fig6_path)
+            if show:
+                plt.show()
+            plt.close(fig)
+
     return saved
