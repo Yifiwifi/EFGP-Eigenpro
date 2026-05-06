@@ -14,6 +14,8 @@ def save_complexity_benchmark_plots(
     *,
     dpi: int = 180,
     show: bool = False,
+    precompute_methods_by_mode: dict[str, Iterable[str] | None] | None = None,
+    precompute_methods_default: Iterable[str] | None = None,
 ) -> list[Path]:
     """
     Save Figure1-5 complexity benchmark plots from grouped summary dataframe.
@@ -22,6 +24,80 @@ def save_complexity_benchmark_plots(
     (`time_train` = precompute + eigenspace + precond_build + solve) and timing medians used in figures.
     Fig1/Fig5 use training time ``T_train``; end-to-end ``wall_s_total`` is for tables / exports.
     """
+    def _norm_choice(v: Iterable[str] | None) -> list[str] | None:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            v = [v]
+        out: list[str] = []
+        for s in v:
+            ss = str(s).strip().lower()
+            if ss == "" or ss == "none":
+                continue
+            out.append(ss)
+        if not out:
+            return None
+        # dedupe, keep order
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for x in out:
+            if x not in seen:
+                uniq.append(x)
+                seen.add(x)
+        return uniq
+
+    # Caller-provided selector: filter only (allow multiple methods).
+    if "precompute_method" in summary_df.columns and not summary_df.empty and (
+        precompute_methods_by_mode is not None or precompute_methods_default is not None
+    ):
+        df = summary_df.copy()
+        df["_pcm_lc"] = df["precompute_method"].astype(str).str.strip().str.lower()
+        sel_map = precompute_methods_by_mode or {}
+        sel_default = _norm_choice(precompute_methods_default)
+
+        kept = []
+        for mode, g in df.groupby("mode", dropna=False):
+            m = str(mode)
+            choice = _norm_choice(sel_map.get(m, sel_default))
+            if choice is None:
+                kept.append(g)
+                continue
+            sub = g[g["_pcm_lc"].isin(choice)]
+            kept.append(sub if not sub.empty else g)
+        summary_df = pd.concat(kept, ignore_index=True).drop(columns=["_pcm_lc"], errors="ignore")
+
+    # Default behavior (no selector): pick one method per curve to avoid duplicated labels.
+    elif "precompute_method" in summary_df.columns and not summary_df.empty:
+        df = summary_df.copy()
+        df["_pcm_lc"] = df["precompute_method"].astype(str).str.strip().str.lower()
+        group_cols = [c for c in ("mode", "top_q", "N", "eps") if c in df.columns]
+        if not group_cols:
+            group_cols = ["mode", "top_q"]
+
+        def _pick_one(g: pd.DataFrame) -> pd.DataFrame:
+            mode = str(g["mode"].iloc[0])
+            if mode == "gpu_v1_topq0":
+                gg = g[g["_pcm_lc"] == "original"]
+                if not gg.empty:
+                    return gg.iloc[[0]]
+            if mode == "gpu_v3_topq_eigenpro_nystrom":
+                gg = g[g["_pcm_lc"] == "c1"]
+                if not gg.empty:
+                    return gg.iloc[[0]]
+                gg = g[g["_pcm_lc"] == "original"]
+                if not gg.empty:
+                    return gg.iloc[[0]]
+
+            gg = g[g["_pcm_lc"] == "original"]
+            if not gg.empty:
+                return gg.iloc[[0]]
+            return g.iloc[[0]]
+
+        picked = []
+        for _, g in df.groupby(group_cols, dropna=False):
+            picked.append(_pick_one(g))
+        summary_df = pd.concat(picked, ignore_index=True).drop(columns=["_pcm_lc"], errors="ignore")
+
     plot_dir = Path(out_dir)
     plot_dir.mkdir(parents=True, exist_ok=True)
     saved: list[Path] = []
