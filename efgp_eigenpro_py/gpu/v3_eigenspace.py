@@ -562,6 +562,7 @@ def _estimate_eigenpro_nystrom(
     compact_coordinate = method_name in ("coordinate_nystrom", "coord_nystrom") or str(
         mcfg.get("precond_kind", "")
     ).lower() in ("coordinate_nystrom", "coord_nystrom")
+    coord_gamma = float(mcfg.get("coord_nystrom_gamma", 1.0))
     weights_gpu = xp.asarray(data_ctx.weights_gpu_flat, dtype=xp.float64).reshape(-1)
     if int(weights_gpu.size) != int(size):
         raise ValueError(
@@ -638,10 +639,16 @@ def _estimate_eigenpro_nystrom(
             mu = float(theta_q[-1])
         t_eig = float(time.perf_counter() - t0)
         s_gpu = xp.ascontiguousarray(xp.asarray(s_idx_np, dtype=xp.int64))
+        try:
+            lambda1_coord = float(theta_q[0]) if int(theta_q.size) > 0 else float("nan")
+        except Exception:
+            lambda1_coord = float("nan")
         diag = {
             "method": _diag_method_name(cfg),
             "eig_method": "coordinate_nystrom",
             "precond_kind": "coordinate_nystrom",
+            "coord_nystrom_gamma": coord_gamma,
+            "lambda1_coord_nystrom": lambda1_coord,
             "n_iter": 0,
             "block_size": int(s),
             "residual_fro": float("nan"),

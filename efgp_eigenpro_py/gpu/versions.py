@@ -306,6 +306,7 @@ def run_v3_full_gpu_eigenspace(
     q = int(eig_cfg.q_max)
     precond_kind = str(eig_diag.get("precond_kind", "full_eigenpro")).lower()
     if precond_kind == "coordinate_nystrom":
+        coord_gamma = float(eig_diag.get("coord_nystrom_gamma", 1.0))
         precond_data: GPUPreconditionerData | CoordinateNystromPreconditionerData = (
             build_coordinate_nystrom_preconditioner_data(
                 backend,
@@ -313,6 +314,7 @@ def run_v3_full_gpu_eigenspace(
                 eig_diag["V_gpu"],
                 eig_diag["theta_gpu"],
                 float(eig_diag["mu"]),
+                gamma=coord_gamma,
             )
         )
     else:
@@ -379,6 +381,8 @@ def run_v3_full_gpu_eigenspace(
             "eig_residual_cols_rel": eig_diag.get("residual_cols_rel"),
             "surrogate_tag": str(eig_diag.get("surrogate_tag", "")),
             "eig_nystrom_kernel_s": float(eig_diag.get("eig_nystrom_kernel_s", float("nan"))),
+            "coord_nystrom_gamma": float(eig_diag.get("coord_nystrom_gamma", float("nan"))),
+            "lambda1_coord_nystrom": float(eig_diag.get("lambda1_coord_nystrom", float("nan"))),
             "t_matvec_avg": float(stats["t_matvec_avg"]),
             "t_matvec_total": float(stats["t_matvec_total"]),
             "n_matvec": int(stats["n_matvec"]),

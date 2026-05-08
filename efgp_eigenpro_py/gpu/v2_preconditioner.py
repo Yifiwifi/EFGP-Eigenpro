@@ -32,6 +32,7 @@ class CoordinateNystromPreconditionerData:
     VH_gpu: Any
     alpha_gpu: Any
     alpha_col_gpu: Any
+    gamma: float = 1.0
 
 
 @dataclass
@@ -70,6 +71,7 @@ def build_coordinate_nystrom_preconditioner_data(
     theta: Any,
     mu: float,
     *,
+    gamma: float = 1.0,
     theta_floor: Optional[float] = None,
     theta_floor_ratio: float = 1e-12,
 ) -> CoordinateNystromPreconditionerData:
@@ -90,12 +92,16 @@ def build_coordinate_nystrom_preconditioner_data(
     floor = max(floor, float(theta_floor_ratio) * max(theta_max, 0.0))
     theta_safe = xp.maximum(theta_gpu, floor)
     alpha = xp.ascontiguousarray(1.0 - (float(mu) / theta_safe))
+    gg = float(gamma)
+    if not (0.0 < gg <= 1.0):
+        raise ValueError(f"gamma must satisfy 0 < gamma <= 1, got {gamma!r}")
     return CoordinateNystromPreconditionerData(
         S_gpu=S_gpu,
         V_gpu=V_gpu,
         VH_gpu=xp.ascontiguousarray(V_gpu.conj().T),
         alpha_gpu=alpha,
         alpha_col_gpu=alpha.reshape(-1, 1),
+        gamma=gg,
     )
 
 
@@ -391,6 +397,7 @@ def apply_preconditioner_coordinate_nystrom(
     VH = precond_data.VH_gpu
     alpha = precond_data.alpha_gpu
     alpha_col = precond_data.alpha_col_gpu
+    gamma = float(getattr(precond_data, "gamma", 1.0))
     v = xp.asarray(v_gpu, dtype=V.dtype)
 
     if V.ndim != 2:
@@ -418,6 +425,8 @@ def apply_preconditioner_coordinate_nystrom(
     coeff = VH @ z_s
     coeff = alpha * coeff if coeff.ndim == 1 else alpha_col * coeff
     corr_s = V @ coeff
+    if gamma != 1.0:
+        corr_s = gamma * corr_s
     if out_buf.ndim == 1:
         out_buf[S] -= corr_s
     else:
