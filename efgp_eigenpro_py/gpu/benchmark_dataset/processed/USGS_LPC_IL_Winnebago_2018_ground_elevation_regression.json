@@ -33,7 +33,7 @@
     ],
     "classification_keep_note": "LAS class 2 is ground in standard classified lidar; pass empty string to disable filtering.",
     "max_points_per_file": null,
-    "max_total_points": 1000000
+    "max_total_points": 10000000
   },
   "split": {
     "method": "random",
@@ -43,21 +43,21 @@
   "x_transform": {
     "method": "shift_and_shared_scale",
     "x_min_train": [
-      2502000.021,
+      2502000.001,
       2024000.0
     ],
-    "shared_scale": 95999.96799999988
+    "shared_scale": 95999.99699999997
   },
   "y_transform": {
     "method": "train_standardization",
-    "mean": 813.5393061812503,
-    "std": 47.847817560190194
+    "mean": 813.5104039776259,
+    "std": 47.8627125216236
   },
   "shapes": {
     "n_loaded_before_total_subsample": 20909780,
-    "n_clean": 1000000,
-    "n_train": 800000,
-    "n_test": 200000,
+    "n_clean": 10000000,
+    "n_train": 8000000,
+    "n_test": 2000000,
     "dim": 2
   },
   "read_metadata": {

@@ -704,7 +704,7 @@ def main() -> None:
     parser.add_argument(
         "--max-total-points",
         type=int,
-        default=1_000_000,
+        default=10_000_000,
         help="Optional random subsample cap after loading all tiles. 0 means no total cap.",
     )
     args = parser.parse_args()
