@@ -22,6 +22,8 @@ class V1Outputs:
 
     beta_gpu: Any
     diagnostics: dict[str, Any]
+    backend: Optional[GPUBackendBundle] = None
+    data_ctx: Optional[GPUDataContext] = None
 
 
 def _device_array_to_numpy(arr: Any, dtype: Optional[np.dtype] = None) -> np.ndarray:

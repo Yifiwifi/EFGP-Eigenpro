@@ -6,4 +6,7 @@ finufft>=2.3,<3
 # Optional (used by benchmark memory metrics)
 psutil>=5.9,<8
 
+# Optional (used by real spatial benchmark dataset preprocessing)
+pyproj>=3.6,<4
+
 # Colab/GPU: see requirements-colab.txt

@@ -110,6 +110,8 @@ def run_v1_pure_efgp(
             "chunk_size": cfg.chunk_size,
             "debug_finite_checks": bool(cfg.debug_finite_checks),
         },
+        backend=backend,
+        data_ctx=data_ctx,
     )
 
 
@@ -228,6 +230,8 @@ def run_v2_with_preconditioner_apply(
             "chunk_size": cfg.chunk_size,
             "debug_finite_checks": bool(cfg.debug_finite_checks),
         },
+        backend=backend,
+        data_ctx=data_ctx,
     )
 
 
@@ -386,6 +390,8 @@ def run_v3_full_gpu_eigenspace(
             "chunk_size": cfg.chunk_size,
             "debug_finite_checks": bool(cfg.debug_finite_checks),
         },
+        backend=backend,
+        data_ctx=data_ctx,
     )
 
 
@@ -623,4 +629,6 @@ def run_v4_dominant_subspace_preconditioner(
             "chunk_size": cfg.chunk_size,
             "debug_finite_checks": bool(cfg.debug_finite_checks),
         },
+        backend=backend,
+        data_ctx=data_ctx,
     )
