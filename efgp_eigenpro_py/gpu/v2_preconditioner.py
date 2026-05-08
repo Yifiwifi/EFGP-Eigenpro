@@ -33,6 +33,20 @@ class CoordinateNystromPreconditionerData:
     alpha_gpu: Any
     alpha_col_gpu: Any
     gamma: float = 1.0
+    # Optional Jacobi/diagonal scaling: apply as D^{-1/2} P(D^{-1/2} v)
+    # where diag_inv_sqrt_gpu stores D^{-1/2} (shape (M,)).
+    diag_inv_sqrt_gpu: Any = None
+
+
+@dataclass
+class HybridToprCoordinatePreconditionerData:
+    """
+    Hybrid preconditioner: apply a dense top-r dominant-subspace correction,
+    then a compact coordinate Nyström correction for the remaining tail.
+    """
+
+    dense: GPUPreconditionerData
+    tail: CoordinateNystromPreconditionerData
 
 
 @dataclass
@@ -72,6 +86,7 @@ def build_coordinate_nystrom_preconditioner_data(
     mu: float,
     *,
     gamma: float = 1.0,
+    diag_inv_sqrt_gpu: Any = None,
     theta_floor: Optional[float] = None,
     theta_floor_ratio: float = 1e-12,
 ) -> CoordinateNystromPreconditionerData:
@@ -102,6 +117,7 @@ def build_coordinate_nystrom_preconditioner_data(
         alpha_gpu=alpha,
         alpha_col_gpu=alpha.reshape(-1, 1),
         gamma=gg,
+        diag_inv_sqrt_gpu=None if diag_inv_sqrt_gpu is None else xp.asarray(diag_inv_sqrt_gpu),
     )
 
 
@@ -398,6 +414,7 @@ def apply_preconditioner_coordinate_nystrom(
     alpha = precond_data.alpha_gpu
     alpha_col = precond_data.alpha_col_gpu
     gamma = float(getattr(precond_data, "gamma", 1.0))
+    diag_inv_sqrt = getattr(precond_data, "diag_inv_sqrt_gpu", None)
     v = xp.asarray(v_gpu, dtype=V.dtype)
 
     if V.ndim != 2:
@@ -409,29 +426,82 @@ def apply_preconditioner_coordinate_nystrom(
     if int(S.size) != int(V.shape[0]):
         raise ValueError("S length must match V rows.")
 
-    out_buf = out
-    may_share = getattr(xp, "may_share_memory", None)
-    shares_mem = False
-    if out_buf is not None and callable(may_share):
-        try:
-            shares_mem = bool(may_share(out_buf, v))
-        except Exception:
-            shares_mem = False
-    if out_buf is None or out_buf.shape != v.shape or out_buf.dtype != V.dtype or shares_mem:
-        out_buf = xp.empty_like(v, dtype=V.dtype)
-    xp.copyto(out_buf, v)
+    def _core_apply(v_in: Any, out_in: Optional[Any]) -> Any:
+        out_buf = out_in
+        may_share = getattr(xp, "may_share_memory", None)
+        shares_mem = False
+        if out_buf is not None and callable(may_share):
+            try:
+                shares_mem = bool(may_share(out_buf, v_in))
+            except Exception:
+                shares_mem = False
+        if (
+            out_buf is None
+            or out_buf.shape != v_in.shape
+            or out_buf.dtype != V.dtype
+            or shares_mem
+        ):
+            out_buf = xp.empty_like(v_in, dtype=V.dtype)
+        xp.copyto(out_buf, v_in)
 
-    z_s = v[S] if v.ndim == 1 else v[S, :]
-    coeff = VH @ z_s
-    coeff = alpha * coeff if coeff.ndim == 1 else alpha_col * coeff
-    corr_s = V @ coeff
-    if gamma != 1.0:
-        corr_s = gamma * corr_s
-    if out_buf.ndim == 1:
-        out_buf[S] -= corr_s
-    else:
-        out_buf[S, :] -= corr_s
-    return out_buf
+        z_s = v_in[S] if v_in.ndim == 1 else v_in[S, :]
+        coeff = VH @ z_s
+        coeff = alpha * coeff if coeff.ndim == 1 else alpha_col * coeff
+        corr_s = V @ coeff
+        if gamma != 1.0:
+            corr_s = gamma * corr_s
+        if out_buf.ndim == 1:
+            out_buf[S] -= corr_s
+        else:
+            out_buf[S, :] -= corr_s
+        return out_buf
+
+    # Optional Jacobi-style scaling wrapper: D^{-1/2} P(D^{-1/2} v).
+    if diag_inv_sqrt is not None:
+        d = xp.asarray(diag_inv_sqrt)
+        if d.ndim != 1 or int(d.shape[0]) != int(v.shape[0]):
+            raise ValueError("diag_inv_sqrt_gpu must have shape (M,) matching v.")
+        d = d.astype(v.dtype, copy=False)
+        v_scaled = d * v if v.ndim == 1 else d.reshape(-1, 1) * v
+        tmp = _core_apply(v_scaled, None)
+        out_buf = out
+        may_share = getattr(xp, "may_share_memory", None)
+        shares_mem = False
+        if out_buf is not None and callable(may_share):
+            try:
+                shares_mem = bool(may_share(out_buf, tmp))
+            except Exception:
+                shares_mem = False
+        if (
+            out_buf is None
+            or out_buf.shape != tmp.shape
+            or out_buf.dtype != tmp.dtype
+            or shares_mem
+        ):
+            out_buf = xp.empty_like(tmp, dtype=tmp.dtype)
+        if tmp.ndim == 1:
+            xp.multiply(d, tmp, out=out_buf)
+        else:
+            xp.multiply(d.reshape(-1, 1), tmp, out=out_buf)
+        return out_buf
+
+    return _core_apply(v, out)
+
+
+def apply_preconditioner_hybrid_topr_coordinate(
+    backend: GPUBackendBundle,
+    precond_data: HybridToprCoordinatePreconditionerData,
+    v_gpu: Any,
+    op_ctx: Optional[GPUOperatorContext] = None,
+    out: Optional[Any] = None,
+) -> Any:
+    """
+    Hybrid apply: first dense dominant-subspace correction, then compact coordinate correction.
+    """
+    tmp = apply_preconditioner_v2(backend, precond_data.dense, v_gpu, op_ctx=op_ctx, out=None)
+    return apply_preconditioner_coordinate_nystrom(
+        backend, precond_data.tail, tmp, op_ctx=op_ctx, out=out
+    )
 
 
 def apply_preconditioner_dominant_subspace(

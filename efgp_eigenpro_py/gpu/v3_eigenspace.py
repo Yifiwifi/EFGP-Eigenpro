@@ -46,7 +46,13 @@ class EigenspaceConfig:
     #   matvec_lift    : U = A(I_S V) Theta^{-1}, then Rayleigh--Ritz
     #   krylov_ritz    : Rayleigh--Ritz in span{I_S V, A(I_S V) Theta^{-1}}
     #   subspace_polish: start from matvec_lift and run surrogate_refine_iters block power steps
+    #   adaptive_support: Level 0, return compact coordinate data after optional support refinement
+    #   diag_adaptive_support: Level 1, compact coordinate data with Jacobi/diagonal scaling
+    #   hybrid_topr    : Level 2, full-space refine only top-r directions and keep compact tail
     #   toeplitz_lift  : legacy direct cross-lift K[:,S] V Theta^{-1}
+    # Optional parameters for the new low-M modes are passed through method_cfg:
+    #   coord_nystrom_gamma, diag_inv_sqrt_gpu, hybrid_top_r,
+    #   support_refine_fn, support_refine_kwargs.
     surrogate_refine_mode: str = "auto"
     surrogate_refine_iters: int = 1
     eig_floor: float = 1e-12
@@ -751,7 +757,33 @@ def _estimate_eigenpro_nystrom(
         "subspace_polish",
         "power_polish",
         "polish",
+        "adaptive_support",
+        "compact_adaptive",
+        "support_adaptive",
+        "diag_adaptive_support",
+        "jacobi_adaptive_support",
+        "diag_support_adaptive",
+        "hybrid_topr",
+        "hybrid_top_r",
+        "topr_hybrid",
     ):
+        # For diag_adaptive_support: if caller did not supply diag_inv_sqrt_gpu, build a cheap
+        # Jacobi-style scaling from Toeplitz diagonal and basis weights:
+        #   diag(A) ~= (weights^2) * toeplitz(0) + reg_lambda.
+        if (
+            refine_mode in ("diag_adaptive_support", "jacobi_adaptive_support", "diag_support_adaptive")
+            and mcfg.get("diag_inv_sqrt_gpu", None) is None
+        ):
+            shift0 = int(mtot) - 1
+            try:
+                t0_diag = xp.real(xtxcol_gpu[(shift0,) * int(dim)])
+                diag_A = (weights_gpu * weights_gpu) * xp.asarray(t0_diag, dtype=xp.float64) + float(reg_lambda)
+                diag_A = xp.maximum(diag_A, xp.asarray(1e-30, dtype=xp.float64))
+                mcfg["diag_inv_sqrt_gpu"] = xp.asarray(1.0 / xp.sqrt(diag_A), dtype=xp.float64)
+            except Exception:
+                # Let refine_nystrom_basis raise a clear error if it truly needs this.
+                pass
+
         theta_lift = xp.maximum(xp.real(tau_lift[:q_lift]), 0.0) + reg_lambda
         eigvals_out, eigvecs_out, mu_refined, refine_extra = refine_nystrom_basis(
             xp=xp,
@@ -766,6 +798,11 @@ def _estimate_eigenpro_nystrom(
             orthogonalize=orth,
             polish_iters=int(_cfg_get(cfg, "surrogate_refine_iters", 1)),
             eig_floor=float(_cfg_get(cfg, "eig_floor", 1e-12)),
+            coord_gamma=float(mcfg.get("coord_nystrom_gamma", 1.0)),
+            diag_inv_sqrt_gpu=mcfg.get("diag_inv_sqrt_gpu", None),
+            hybrid_top_r=mcfg.get("hybrid_top_r", None),
+            support_refine_fn=mcfg.get("support_refine_fn", None),
+            support_refine_kwargs=mcfg.get("support_refine_kwargs", None),
         )
         mu = float(mu_refined) if mu_refined is not None else float(eigvals_out[-1])
         residual_fro = float(refine_extra.get("residual_fro", float("nan")))
@@ -792,7 +829,7 @@ def _estimate_eigenpro_nystrom(
             "mu": mu,
             "surrogate_scale": 1.0,
             "surrogate_block_rows_used": 0,
-            "surrogate_lift": bool(refine_mode != "inject"),
+            "surrogate_lift": bool((refine_mode != "inject") and not refine_extra.get("compact_basis", False)),
             "surrogate_refine_mode": refine_mode,
             "surrogate_refine_mode_requested": refine_mode_raw,
             "surrogate_orthogonalize": orth_raw,
@@ -811,7 +848,8 @@ def _estimate_eigenpro_nystrom(
     if refine_mode not in ("toeplitz_lift", "direct_cross_lift", "legacy_lift"):
         raise ValueError(
             "surrogate_refine_mode must be one of auto, inject, matvec_lift, "
-            "krylov_ritz, subspace_polish, or toeplitz_lift; "
+            "krylov_ritz, subspace_polish, adaptive_support, "
+            "diag_adaptive_support, hybrid_topr, or toeplitz_lift; "
             f"got {refine_mode_raw!r}."
         )
 

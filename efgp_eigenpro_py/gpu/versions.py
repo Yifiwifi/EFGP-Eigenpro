@@ -19,8 +19,10 @@ from .v1_ops import (
 from .v2_preconditioner import (
     CoordinateNystromPreconditionerData,
     GPUPreconditionerData,
+    HybridToprCoordinatePreconditionerData,
     apply_preconditioner_dominant_subspace,
     apply_preconditioner_coordinate_nystrom,
+    apply_preconditioner_hybrid_topr_coordinate,
     apply_preconditioner_v2,
     build_dominant_subspace_preconditioner,
     build_coordinate_nystrom_preconditioner_data,
@@ -305,18 +307,43 @@ def run_v3_full_gpu_eigenspace(
 
     q = int(eig_cfg.q_max)
     precond_kind = str(eig_diag.get("precond_kind", "full_eigenpro")).lower()
-    if precond_kind == "coordinate_nystrom":
+    if precond_kind in ("coordinate_nystrom", "diag_coordinate_nystrom"):
         coord_gamma = float(eig_diag.get("coord_nystrom_gamma", 1.0))
-        precond_data: GPUPreconditionerData | CoordinateNystromPreconditionerData = (
-            build_coordinate_nystrom_preconditioner_data(
-                backend,
-                eig_diag["S_gpu"],
-                eig_diag["V_gpu"],
-                eig_diag["theta_gpu"],
-                float(eig_diag["mu"]),
-                gamma=coord_gamma,
-            )
+        precond_data = build_coordinate_nystrom_preconditioner_data(
+            backend,
+            eig_diag["S_gpu"],
+            eig_diag["V_gpu"],
+            eig_diag["theta_gpu"],
+            float(eig_diag["mu"]),
+            gamma=coord_gamma,
+            diag_inv_sqrt_gpu=eig_diag.get("diag_inv_sqrt_gpu", None),
         )
+    elif precond_kind in ("hybrid_topr_coordinate", "hybrid_top_r_coordinate", "topr_hybrid_coordinate"):
+        # Dense top-r block + compact coordinate tail.
+        xp = backend.xp
+        coord_gamma = float(eig_diag.get("coord_nystrom_gamma", 1.0))
+        mu_dense = float(eig_diag.get("mu"))
+        evals_r = xp.asarray(eig_diag.get("hybrid_dense_eigvals_gpu"))
+        U_r = xp.asarray(eig_diag.get("hybrid_dense_eigvecs_gpu"))
+        if evals_r.ndim != 1 or U_r.ndim != 2 or int(U_r.shape[1]) != int(evals_r.shape[0]):
+            raise ValueError("hybrid_topr_coordinate requires hybrid_dense_eigvals_gpu and hybrid_dense_eigvecs_gpu.")
+        scale_dense = xp.ascontiguousarray(1.0 - (mu_dense / xp.asarray(evals_r)))
+        dense = GPUPreconditionerData(
+            U_gpu=xp.ascontiguousarray(U_r),
+            UH_gpu=xp.ascontiguousarray(U_r.conj().T),
+            scale_gpu=scale_dense,
+            scale_col_gpu=scale_dense.reshape(-1, 1),
+        )
+        tail = build_coordinate_nystrom_preconditioner_data(
+            backend,
+            eig_diag["hybrid_tail_S_gpu"],
+            eig_diag["hybrid_tail_V_gpu"],
+            eig_diag["hybrid_tail_theta_gpu"],
+            float(eig_diag.get("hybrid_tail_mu", eig_diag.get("mu"))),
+            gamma=coord_gamma,
+            diag_inv_sqrt_gpu=eig_diag.get("diag_inv_sqrt_gpu", None),
+        )
+        precond_data = HybridToprCoordinatePreconditionerData(dense=dense, tail=tail)
     else:
         mu = mu_for_precond_from_eig(vals_gpu, q, eig_diag)
         scale_gpu = backend.xp.asarray(1.0 - (mu / vals_gpu[:q]))
@@ -334,7 +361,11 @@ def run_v3_full_gpu_eigenspace(
         apply_A_v1(backend, data_ctx, v, float(cfg.reg_lambda), op_ctx, out=out)
 
     def _precond(v: Any, out: Any) -> None:
-        if precond_kind == "coordinate_nystrom" or all(
+        if hasattr(precond_data, "tail"):
+            apply_preconditioner_hybrid_topr_coordinate(
+                backend, precond_data, v, op_ctx=op_ctx, out=out
+            )
+        elif precond_kind in ("coordinate_nystrom", "diag_coordinate_nystrom") or all(
             hasattr(precond_data, k) for k in ("S_gpu", "V_gpu", "VH_gpu")
         ):
             apply_preconditioner_coordinate_nystrom(
