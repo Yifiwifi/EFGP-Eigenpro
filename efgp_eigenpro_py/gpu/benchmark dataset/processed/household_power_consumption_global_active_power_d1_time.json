@@ -1,8 +1,8 @@
 {
   "dataset_name": "individual_household_electric_power_consumption",
   "task_type": "1d_time_regression",
-  "source_file": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark dataset\\household_power_consumption.txt",
-  "processed_file": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark dataset\\processed\\household_power_consumption_global_active_power_d1_time.npz",
+  "source_file": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\household_power_consumption.txt",
+  "processed_file": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\household_power_consumption_global_active_power_d1_time.npz",
   "raw_columns": [
     "Date",
     "Time",

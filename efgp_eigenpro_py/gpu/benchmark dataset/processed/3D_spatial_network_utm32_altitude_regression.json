@@ -1,8 +1,8 @@
 {
   "dataset_name": "3D_spatial_network",
   "task_type": "2d_spatial_regression",
-  "source_file": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark dataset\\3D_spatial_network.txt",
-  "processed_file": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark dataset\\processed\\3D_spatial_network_utm32_altitude_regression.npz",
+  "source_file": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\3D_spatial_network.txt",
+  "processed_file": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\3D_spatial_network_utm32_altitude_regression.npz",
   "input_definition": "projected spatial coordinates (east, north), scaled with a shared scalar into [0,1]^2",
   "target_definition": "standardized altitude",
   "raw_columns": [

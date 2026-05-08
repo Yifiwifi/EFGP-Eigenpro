@@ -66,9 +66,9 @@ def choose_grid_params(
             rl2sq = kernel.variance ** 2 * (np.sqrt(np.pi) * l**2) ** dim
             eps_use = eps * np.sqrt(rl2sq)
         eps = eps_use
-        h = 1.0 / (1 + l * np.sqrt(2 * np.log(4 * dim * 3**dim / eps)))
+        h = 1.0 / (L + l * np.sqrt(2 * np.log(4 * dim * 3**dim / eps)))
         hm = np.ceil(
-            np.sqrt(np.log(dim * (4 ** (dim + 1) * dim) / eps) / 2) / np.pi / l / h
+            np.sqrt(np.log(dim * (4 ** (dim + 1)) / eps) / 2) / np.pi / l / h
         ).astype(int)
     else:
         raise NotImplementedError(f"Unknown kernel family: {kernel.fam}")

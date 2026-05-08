@@ -402,4 +402,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-#python "D:\NU\ML\efgp_eigenpro_py\gpu\benchmark dataset\preprocess_household_power_consumption.py"
+#python "D:\NU\ML\efgp_eigenpro_py\gpu\benchmark_dataset\preprocess_household_power_consumption.py"
