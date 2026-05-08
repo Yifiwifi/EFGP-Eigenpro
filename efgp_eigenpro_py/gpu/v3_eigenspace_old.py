@@ -8,7 +8,6 @@ import time
 import numpy as np
 from .backends import GPUBackendBundle
 from .cupy_eigenspace_methods import cupy_eigsh, rand_subspace_rr
-from .v3_nystrom_refine import refine_nystrom_basis
 
 
 @dataclass
@@ -40,15 +39,6 @@ class EigenspaceConfig:
     surrogate_small_eig_tol: float = 1e-6
     surrogate_small_eig_ncv: Optional[int] = None
     surrogate_small_eig_maxiter: Optional[int] = None
-    # Full-space basis refinement after the coordinate Nyström small eigensolve.
-    #   auto           : legacy behavior (toeplitz_lift if surrogate_lift=True, inject otherwise)
-    #   inject         : dense U = I_S V, no vector improvement; mainly diagnostic
-    #   matvec_lift    : U = A(I_S V) Theta^{-1}, then Rayleigh--Ritz
-    #   krylov_ritz    : Rayleigh--Ritz in span{I_S V, A(I_S V) Theta^{-1}}
-    #   subspace_polish: start from matvec_lift and run surrogate_refine_iters block power steps
-    #   toeplitz_lift  : legacy direct cross-lift K[:,S] V Theta^{-1}
-    surrogate_refine_mode: str = "auto"
-    surrogate_refine_iters: int = 1
     eig_floor: float = 1e-12
 
 
@@ -722,100 +712,6 @@ def _estimate_eigenpro_nystrom(
     orth = orth_raw.lower()
     block_rows = 0
     orth_effective = "skipped_nolift"
-    s_gpu = xp.ascontiguousarray(xp.asarray(s_idx_np, dtype=xp.int64))
-
-    refine_mode_raw = str(_cfg_get(cfg, "surrogate_refine_mode", "auto") or "auto").strip()
-    refine_mode = refine_mode_raw.lower()
-    if refine_mode == "auto":
-        refine_mode = "toeplitz_lift" if use_full_lift else "inject"
-
-    use_ritz = bool(_cfg_get(cfg, "surrogate_ritz_refine", True))
-    ritz_cols = int(_cfg_get(cfg, "surrogate_ritz_block_cols", 8))
-    residual_fro = float("nan")
-    residual_fro_rel = float("nan")
-    refine_extra: dict[str, Any] = {"refine_mode": refine_mode}
-
-    # New full-space refinement modes.  These start from the coordinate surrogate W=A[S,S]
-    # but improve vectors by one or a few full A-matvecs, avoiding the O(M*s*q) cross-lift.
-    if refine_mode in (
-        "inject",
-        "coord_inject",
-        "coordinate",
-        "none",
-        "matvec_lift",
-        "au_lift",
-        "nystrom_matvec_lift",
-        "krylov_ritz",
-        "krylov2",
-        "block_krylov",
-        "subspace_polish",
-        "power_polish",
-        "polish",
-    ):
-        theta_lift = xp.maximum(xp.real(tau_lift[:q_lift]), 0.0) + reg_lambda
-        eigvals_out, eigvecs_out, mu_refined, refine_extra = refine_nystrom_basis(
-            xp=xp,
-            apply_A_block_gpu=apply_A_block_gpu,
-            size=m,
-            s_gpu=s_gpu,
-            V_lift=v_lift[:, :q_lift],
-            theta_lift=theta_lift,
-            q_out=q_max,
-            mode=refine_mode,
-            block_cols=max(1, ritz_cols),
-            orthogonalize=orth,
-            polish_iters=int(_cfg_get(cfg, "surrogate_refine_iters", 1)),
-            eig_floor=float(_cfg_get(cfg, "eig_floor", 1e-12)),
-        )
-        mu = float(mu_refined) if mu_refined is not None else float(eigvals_out[-1])
-        residual_fro = float(refine_extra.get("residual_fro", float("nan")))
-        residual_fro_rel = float(refine_extra.get("residual_fro_rel", float("nan")))
-        orth_effective = str(refine_extra.get("refine_orthogonalize_effective", orth_effective))
-
-        t_eig = float(time.perf_counter() - t0)
-        diag: dict[str, Any] = {
-            "method": _diag_method_name(cfg),
-            "eig_method": "eigenpro_nystrom",
-            "n_iter": 0,
-            "block_size": int(s),
-            "residual_fro": residual_fro,
-            "residual_fro_rel": residual_fro_rel,
-            "residual_cols": None,
-            "residual_cols_rel": None,
-            "init_used": False,
-            "init_cols": 0,
-            "eig_nystrom_kernel_s": t_eig,
-            "time_eigenspace": t_eig,
-            "surrogate_tag": f"nystrom_s{s}_q{q_max}_oversample{so}_low{lfr:g}_{refine_mode}",
-            "surrogate_indices": s_idx_np,
-            "surrogate_mu": mu,
-            "mu": mu,
-            "surrogate_scale": 1.0,
-            "surrogate_block_rows_used": 0,
-            "surrogate_lift": bool(refine_mode != "inject"),
-            "surrogate_refine_mode": refine_mode,
-            "surrogate_refine_mode_requested": refine_mode_raw,
-            "surrogate_orthogonalize": orth_raw,
-            "surrogate_orthogonalize_effective": orth_effective,
-            "surrogate_small_eig_method": small_eig_effective,
-            "surrogate_small_eig_method_requested": sm_req,
-            **refine_extra,
-            **(
-                {"surrogate_small_eig_fallback": small_eig_fallback}
-                if small_eig_fallback is not None
-                else {}
-            ),
-        }
-        return xp.asarray(eigvals_out, dtype=xp.float64), eigvecs_out, diag
-
-    if refine_mode not in ("toeplitz_lift", "direct_cross_lift", "legacy_lift"):
-        raise ValueError(
-            "surrogate_refine_mode must be one of auto, inject, matvec_lift, "
-            "krylov_ritz, subspace_polish, or toeplitz_lift; "
-            f"got {refine_mode_raw!r}."
-        )
-
-    # Legacy direct cross-lift mode: U = K[:,S] V Theta^{-1} through Toeplitz lookup.
     if use_full_lift:
         block_rows_cfg = _cfg_get(cfg, "surrogate_block_rows", None)
         if block_rows_cfg is None:
@@ -853,8 +749,10 @@ def _estimate_eigenpro_nystrom(
     else:
         # U = I[:,S] V_q: V_q from eigh(W0) is orthonormal, so columns stay orthonormal in R^M; no op.
         u = xp.zeros((m, q_max), dtype=xp.complex128)
+        s_gpu = xp.asarray(s_idx_np, dtype=xp.int64)
         u[s_gpu, :] = v_lift[:, :q_max]
         u = xp.ascontiguousarray(u)
+
     use_ritz = bool(_cfg_get(cfg, "surrogate_ritz_refine", True))
     ritz_cols = int(_cfg_get(cfg, "surrogate_ritz_block_cols", 8))
     residual_fro = float("nan")
