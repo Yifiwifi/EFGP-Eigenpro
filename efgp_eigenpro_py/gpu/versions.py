@@ -383,6 +383,8 @@ def run_v3_full_gpu_eigenspace(
             "eig_nystrom_kernel_s": float(eig_diag.get("eig_nystrom_kernel_s", float("nan"))),
             "coord_nystrom_gamma": float(eig_diag.get("coord_nystrom_gamma", float("nan"))),
             "lambda1_coord_nystrom": float(eig_diag.get("lambda1_coord_nystrom", float("nan"))),
+            "theta_coord_topq": eig_diag.get("theta_coord_topq", []),
+            "injected_eps_coord_topq": eig_diag.get("injected_eps_coord_topq", []),
             "t_matvec_avg": float(stats["t_matvec_avg"]),
             "t_matvec_total": float(stats["t_matvec_total"]),
             "n_matvec": int(stats["n_matvec"]),

@@ -643,12 +643,38 @@ def _estimate_eigenpro_nystrom(
             lambda1_coord = float(theta_q[0]) if int(theta_q.size) > 0 else float("nan")
         except Exception:
             lambda1_coord = float("nan")
+
+        # Injected residual diagnostic on embedded vectors u_i = I_S v_i:
+        #   eps_i = |theta_i| / || A u_i - theta_i u_i ||.
+        injected_eps = []
+        theta_list = []
+        try:
+            # Pull to host for logging only; compute residual norms on device.
+            theta_host = _asnumpy(theta_q).reshape(-1)
+            for i in range(int(min(theta_host.size, q_take))):
+                th = float(theta_host[i])
+                theta_list.append(th)
+                # u_i is sparse embedding of v_i into R^m.
+                u = xp.zeros((m,), dtype=xp.complex128)
+                u[s_gpu] = xp.asarray(V_q[:, i], dtype=xp.complex128)
+                au = apply_A_block_gpu(u)  # accepts 1D or (m,1)
+                if getattr(au, "ndim", 1) == 2:
+                    au = au[:, 0]
+                r = au - (u * th)
+                rn = float(xp.linalg.norm(r))
+                denom = max(rn, 1e-30)
+                injected_eps.append(abs(th) / denom)
+        except Exception:
+            injected_eps = []
+            theta_list = []
         diag = {
             "method": _diag_method_name(cfg),
             "eig_method": "coordinate_nystrom",
             "precond_kind": "coordinate_nystrom",
             "coord_nystrom_gamma": coord_gamma,
             "lambda1_coord_nystrom": lambda1_coord,
+            "theta_coord_topq": theta_list,
+            "injected_eps_coord_topq": injected_eps,
             "n_iter": 0,
             "block_size": int(s),
             "residual_fro": float("nan"),
