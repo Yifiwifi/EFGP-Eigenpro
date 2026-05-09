@@ -8,6 +8,12 @@ import time
 import numpy as np
 from .backends import GPUBackendBundle
 from .cupy_eigenspace_methods import cupy_eigsh, rand_subspace_rr
+from .v3_eigenspace_extra_algorithms import (
+    chebyshev_filtered_subspace,
+    ensemble_coordinate_nystrom,
+    rand_range_onepass,
+    random_support_lift,
+)
 from .v3_nystrom_refine import refine_nystrom_basis
 
 
@@ -110,6 +116,34 @@ def estimate_top_eigenspace_v3(
         return _estimate_via_cupy_methods(
             backend, apply_A_block_gpu, int(size), cfg, method=method, init_Q=init_Q
         )
+    if method in ("rand_range_onepass", "rand_range", "randomized_range"):
+        return _estimate_via_extra_rand_range_onepass(
+            backend=backend,
+            apply_A_block_gpu=apply_A_block_gpu,
+            size=int(size),
+            cfg=cfg,
+        )
+    if method in ("chebyshev_filtered_subspace", "chebyshev", "cheby"):
+        return _estimate_via_extra_chebyshev_filtered_subspace(
+            backend=backend,
+            apply_A_block_gpu=apply_A_block_gpu,
+            size=int(size),
+            cfg=cfg,
+        )
+    if method in ("random_support_lift", "support_lift"):
+        return _estimate_via_extra_random_support_lift(
+            backend=backend,
+            apply_A_block_gpu=apply_A_block_gpu,
+            size=int(size),
+            cfg=cfg,
+        )
+    if method in ("ensemble_coordinate_nystrom", "ensemble_coord_nystrom"):
+        return _estimate_via_extra_ensemble_coordinate_nystrom(
+            backend=backend,
+            apply_A_block_gpu=apply_A_block_gpu,
+            size=int(size),
+            cfg=cfg,
+        )
     if method in (
         "eigenpro_nystrom",
         "nystrom",
@@ -199,6 +233,323 @@ def estimate_top_eigenspace_v3(
         "init_used": bool(init_used),
         "init_cols": int(init_cols),
     })
+
+
+def _estimate_via_extra_rand_range_onepass(
+    *,
+    backend: GPUBackendBundle,
+    apply_A_block_gpu: Callable[[Any], Any],
+    size: int,
+    cfg: EigenspaceConfig,
+) -> tuple[Any, Any, dict[str, Any]]:
+    xp = backend.xp
+    q = int(cfg.q_max)
+    mcfg: dict[str, Any] = dict(cfg.method_cfg or {})
+
+    res = rand_range_onepass(
+        xp=xp,
+        M=int(size),
+        q_out=int(q),
+        apply_A_block_gpu=apply_A_block_gpu,
+        oversample=int(mcfg.get("oversample", mcfg.get("surrogate_oversample", 16))),
+        power_iters=int(mcfg.get("power_iters", 0)),
+        seed=int(mcfg.get("seed", _cfg_get(cfg, "surrogate_seed", 0))),
+        omega_kind=str(mcfg.get("omega_kind", "gaussian")),
+        weights=mcfg.get("weights", None),
+        block_cols=int(mcfg.get("block_cols", 16)),
+        final_ritz=bool(mcfg.get("final_ritz", True)),
+        sparsity=int(mcfg.get("sparsity", 8)),
+    )
+    eigvals = xp.ascontiguousarray(xp.real(xp.asarray(res.values, dtype=xp.float64).reshape(-1))[:q])
+    eigvecs = xp.ascontiguousarray(xp.asarray(res.vectors, dtype=xp.complex128)[:, :q])
+    out_vals, out_vecs, diag = _residual_output(
+        apply_A_block_gpu,
+        xp,
+        cfg,
+        eigvals,
+        eigvecs,
+        {
+            "n_iter": int(mcfg.get("power_iters", 0)),
+            "block_size": int(q + int(mcfg.get("oversample", 16))),
+            "init_used": False,
+            "init_cols": 0,
+        },
+    )
+    mu = res.mu
+    if mu is not None and math.isfinite(float(mu)):
+        diag["surrogate_mu"] = float(mu)
+        diag["mu"] = float(mu)
+    diag.update({k: v for k, v in dict(res.info or {}).items() if k not in ("method",)})
+    diag["extra_alg"] = str((res.info or {}).get("method", "rand_range_onepass"))
+    diag.setdefault("precond_kind", "full_eigenpro")
+    return out_vals, out_vecs, diag
+
+
+def _estimate_via_extra_chebyshev_filtered_subspace(
+    *,
+    backend: GPUBackendBundle,
+    apply_A_block_gpu: Callable[[Any], Any],
+    size: int,
+    cfg: EigenspaceConfig,
+) -> tuple[Any, Any, dict[str, Any]]:
+    xp = backend.xp
+    q = int(cfg.q_max)
+    mcfg: dict[str, Any] = dict(cfg.method_cfg or {})
+    if "lambda_low" not in mcfg or "lambda_cut" not in mcfg:
+        raise ValueError(
+            "chebyshev_filtered_subspace requires method_cfg['lambda_low'] and method_cfg['lambda_cut']."
+        )
+    res = chebyshev_filtered_subspace(
+        xp=xp,
+        M=int(size),
+        q_out=int(q),
+        apply_A_block_gpu=apply_A_block_gpu,
+        lambda_low=float(mcfg["lambda_low"]),
+        lambda_cut=float(mcfg["lambda_cut"]),
+        degree=int(mcfg.get("degree", 4)),
+        oversample=int(mcfg.get("oversample", 16)),
+        seed=int(mcfg.get("seed", _cfg_get(cfg, "surrogate_seed", 0))),
+        omega_kind=str(mcfg.get("omega_kind", "gaussian")),
+        weights=mcfg.get("weights", None),
+        block_cols=int(mcfg.get("block_cols", 16)),
+        final_ritz=bool(mcfg.get("final_ritz", True)),
+    )
+    eigvals = xp.ascontiguousarray(xp.real(xp.asarray(res.values, dtype=xp.float64).reshape(-1))[:q])
+    eigvecs = xp.ascontiguousarray(xp.asarray(res.vectors, dtype=xp.complex128)[:, :q])
+    out_vals, out_vecs, diag = _residual_output(
+        apply_A_block_gpu,
+        xp,
+        cfg,
+        eigvals,
+        eigvecs,
+        {
+            "n_iter": int(mcfg.get("degree", 4)),
+            "block_size": int(q + int(mcfg.get("oversample", 16))),
+            "init_used": False,
+            "init_cols": 0,
+        },
+    )
+    mu = res.mu
+    if mu is not None and math.isfinite(float(mu)):
+        diag["surrogate_mu"] = float(mu)
+        diag["mu"] = float(mu)
+    diag.update({k: v for k, v in dict(res.info or {}).items() if k not in ("method",)})
+    diag["extra_alg"] = str((res.info or {}).get("method", "chebyshev_filtered_subspace"))
+    diag.setdefault("precond_kind", "full_eigenpro")
+    return out_vals, out_vecs, diag
+
+
+def _estimate_via_extra_random_support_lift(
+    *,
+    backend: GPUBackendBundle,
+    apply_A_block_gpu: Callable[[Any], Any],
+    size: int,
+    cfg: EigenspaceConfig,
+) -> tuple[Any, Any, dict[str, Any]]:
+    xp = backend.xp
+    q = int(cfg.q_max)
+    mcfg: dict[str, Any] = dict(cfg.method_cfg or {})
+
+    build_submatrix = mcfg.get("build_submatrix_gpu", None)
+    weights_np = mcfg.get("weights", None)
+    lowfreq_indices = mcfg.get("lowfreq_indices", None)
+
+    data_ctx = mcfg.get("data_ctx", None)
+    reg_lambda = float(mcfg.get("reg_lambda", 0.0))
+    if build_submatrix is None:
+        if data_ctx is None:
+            raise ValueError(
+                "random_support_lift requires method_cfg['build_submatrix_gpu'] or method_cfg['data_ctx']."
+            )
+        mtot = int(data_ctx.meta["mtot"])
+        dim = int(data_ctx.meta["dim"])
+        weights_gpu = xp.asarray(data_ctx.weights_gpu_flat, dtype=xp.float64).reshape(-1)
+        xtxcol_gpu = getattr(data_ctx, "xtxcol_gpu", None)
+        if xtxcol_gpu is None:
+            xtxcol_gpu = xp.ascontiguousarray(backend.fft.ifftn(data_ctx.gf_gpu))
+            try:
+                data_ctx.xtxcol_gpu = xtxcol_gpu
+            except Exception:
+                pass
+
+        def _builder(S_np: np.ndarray) -> Any:
+            S_np = np.asarray(S_np, dtype=np.int64).reshape(-1)
+            W0 = _toeplitz_submatrix_gpu(
+                xp,
+                xtxcol_gpu,
+                weights_gpu,
+                S_np,
+                mtot=mtot,
+                dim=dim,
+            )
+            if reg_lambda != 0.0:
+                W0 = W0 + (float(reg_lambda) * xp.eye(int(S_np.size), dtype=W0.dtype))
+            return W0
+
+        build_submatrix = _builder
+        if weights_np is None:
+            weights_np = getattr(data_ctx, "weights_np_flat", None)
+            if weights_np is None:
+                weights_np = _asnumpy(weights_gpu)
+                try:
+                    data_ctx.weights_np_flat = weights_np
+                except Exception:
+                    pass
+
+    s = int(mcfg.get("s", max(256, min(4096, 8 * q))))
+    q_each = int(mcfg.get("q_each", max(4, min(32, q // 2 if q >= 2 else 4))))
+    n_sketches = int(mcfg.get("n_sketches", 16))
+    r_full = int(mcfg.get("r_full", max(q, min(4 * q, q + 16))))
+
+    res = random_support_lift(
+        xp=xp,
+        M=int(size),
+        q_out=int(q),
+        build_submatrix_gpu=build_submatrix,
+        apply_A_block_gpu=apply_A_block_gpu,
+        s=int(s),
+        q_each=int(q_each),
+        n_sketches=int(n_sketches),
+        r_full=int(r_full),
+        seed=int(mcfg.get("seed", _cfg_get(cfg, "surrogate_seed", 0))),
+        weights=weights_np,
+        lowfreq_indices=lowfreq_indices,
+        lowfreq_ratio=float(mcfg.get("lowfreq_ratio", _cfg_get(cfg, "surrogate_lowfreq_ratio", 0.25))),
+        reg_lambda=float(reg_lambda),
+        block_cols=int(mcfg.get("block_cols", 16)),
+        final_ritz=bool(mcfg.get("final_ritz", True)),
+        orthogonalize=str(mcfg.get("orthogonalize", "qr")),
+        eig_floor=float(_cfg_get(cfg, "eig_floor", 1e-12)),
+    )
+
+    eigvals = xp.ascontiguousarray(xp.real(xp.asarray(res.values, dtype=xp.float64).reshape(-1))[:q])
+    eigvecs = xp.ascontiguousarray(xp.asarray(res.vectors, dtype=xp.complex128)[:, :q])
+    out_vals, out_vecs, diag = _residual_output(
+        apply_A_block_gpu,
+        xp,
+        cfg,
+        eigvals,
+        eigvecs,
+        {
+            "n_iter": 0,
+            "block_size": int(r_full),
+            "init_used": False,
+            "init_cols": 0,
+        },
+    )
+    mu = res.mu
+    if mu is not None and math.isfinite(float(mu)):
+        diag["surrogate_mu"] = float(mu)
+        diag["mu"] = float(mu)
+    diag.update({k: v for k, v in dict(res.info or {}).items() if k not in ("method",)})
+    diag["extra_alg"] = str((res.info or {}).get("method", "random_support_lift"))
+    diag.setdefault("precond_kind", "full_eigenpro")
+    return out_vals, out_vecs, diag
+
+
+def _estimate_via_extra_ensemble_coordinate_nystrom(
+    *,
+    backend: GPUBackendBundle,
+    apply_A_block_gpu: Callable[[Any], Any],
+    size: int,
+    cfg: EigenspaceConfig,
+) -> tuple[Any, Any, dict[str, Any]]:
+    xp = backend.xp
+    q = int(cfg.q_max)
+    mcfg: dict[str, Any] = dict(cfg.method_cfg or {})
+
+    build_submatrix = mcfg.get("build_submatrix_gpu", None)
+    weights_np = mcfg.get("weights", None)
+    lowfreq_indices = mcfg.get("lowfreq_indices", None)
+    data_ctx = mcfg.get("data_ctx", None)
+    reg_lambda = float(mcfg.get("reg_lambda", 0.0))
+
+    if build_submatrix is None:
+        if data_ctx is None:
+            raise ValueError(
+                "ensemble_coordinate_nystrom requires method_cfg['build_submatrix_gpu'] or method_cfg['data_ctx']."
+            )
+        mtot = int(data_ctx.meta["mtot"])
+        dim = int(data_ctx.meta["dim"])
+        weights_gpu = xp.asarray(data_ctx.weights_gpu_flat, dtype=xp.float64).reshape(-1)
+        xtxcol_gpu = getattr(data_ctx, "xtxcol_gpu", None)
+        if xtxcol_gpu is None:
+            xtxcol_gpu = xp.ascontiguousarray(backend.fft.ifftn(data_ctx.gf_gpu))
+            try:
+                data_ctx.xtxcol_gpu = xtxcol_gpu
+            except Exception:
+                pass
+
+        def _builder(S_np: np.ndarray) -> Any:
+            S_np = np.asarray(S_np, dtype=np.int64).reshape(-1)
+            W0 = _toeplitz_submatrix_gpu(
+                xp,
+                xtxcol_gpu,
+                weights_gpu,
+                S_np,
+                mtot=mtot,
+                dim=dim,
+            )
+            if reg_lambda != 0.0:
+                W0 = W0 + (float(reg_lambda) * xp.eye(int(S_np.size), dtype=W0.dtype))
+            return W0
+
+        build_submatrix = _builder
+        if weights_np is None:
+            weights_np = getattr(data_ctx, "weights_np_flat", None)
+            if weights_np is None:
+                weights_np = _asnumpy(weights_gpu)
+                try:
+                    data_ctx.weights_np_flat = weights_np
+                except Exception:
+                    pass
+
+    q_each = int(mcfg.get("q_each", max(4, min(q, 16))))
+    s = int(mcfg.get("s", max(256, min(4096, 8 * max(q_each, 1)))))
+    n_sketches = int(mcfg.get("n_sketches", 8))
+    gamma = float(mcfg.get("gamma", mcfg.get("coord_nystrom_gamma", 0.25)))
+
+    res = ensemble_coordinate_nystrom(
+        xp=xp,
+        M=int(size),
+        q_each=int(q_each),
+        build_submatrix_gpu=build_submatrix,
+        s=int(s),
+        n_sketches=int(n_sketches),
+        seed=int(mcfg.get("seed", _cfg_get(cfg, "surrogate_seed", 0))),
+        weights=weights_np,
+        lowfreq_indices=lowfreq_indices,
+        lowfreq_ratio=float(mcfg.get("lowfreq_ratio", _cfg_get(cfg, "surrogate_lowfreq_ratio", 0.25))),
+        reg_lambda=float(reg_lambda),
+        gamma=float(gamma),
+    )
+    vals = xp.ascontiguousarray(xp.real(xp.asarray(res.values, dtype=xp.float64).reshape(-1)))
+    vecs = xp.empty((int(size), 0), dtype=xp.complex128)
+    diag: dict[str, Any] = {
+        "method": _diag_method_name(cfg),
+        "eig_method": "ensemble_coordinate_nystrom",
+        "precond_kind": "ensemble_coordinate_nystrom",
+        "coord_nystrom_gamma": float(gamma),
+        "ensemble_gamma": float(res.info.get("ensemble_gamma", gamma)),
+        "ensemble_entries": list(res.info.get("ensemble_entries", []) or []),
+        "ensemble_size": int(res.info.get("ensemble_size", n_sketches)),
+        "q_each": int(res.info.get("q_each", q_each)),
+        "support_size": int(res.info.get("support_size", s)),
+        "n_iter": 0,
+        "block_size": int(s),
+        "residual_fro": float("nan"),
+        "residual_fro_rel": float("nan"),
+        "residual_cols": None,
+        "residual_cols_rel": None,
+        "init_used": False,
+        "init_cols": 0,
+        "surrogate_mu": float(res.mu) if res.mu is not None else float("nan"),
+        "mu": float(res.mu) if res.mu is not None else float("nan"),
+        "time_eigenspace": float(res.info.get("time_s", float("nan"))),
+        "full_matvec_passes": int(res.info.get("full_matvec_passes", 0)),
+        "extra_alg": str((res.info or {}).get("method", "ensemble_coordinate_nystrom")),
+    }
+    return vals, vecs, diag
 
 
 def _residual_output(

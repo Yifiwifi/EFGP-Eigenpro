@@ -39,6 +39,22 @@ class CoordinateNystromPreconditionerData:
 
 
 @dataclass
+class EnsembleCoordinateNystromPreconditionerData:
+    """
+    Ensemble compact coordinate Nyström preconditioner data.
+
+    Applies a block-Jacobi style averaged correction
+
+        P(z) = z - sum_l gamma_l I_{S_l} V_l diag(1 - mu_l / theta_l) V_l^* z[S_l]
+
+    where each correction is evaluated against the original input ``z`` (not
+    sequentially composed).
+    """
+
+    entries: list[CoordinateNystromPreconditionerData]
+
+
+@dataclass
 class HybridToprCoordinatePreconditionerData:
     """
     Hybrid preconditioner: apply a dense top-r dominant-subspace correction,
@@ -119,6 +135,32 @@ def build_coordinate_nystrom_preconditioner_data(
         gamma=gg,
         diag_inv_sqrt_gpu=None if diag_inv_sqrt_gpu is None else xp.asarray(diag_inv_sqrt_gpu),
     )
+
+
+def build_ensemble_coordinate_nystrom_preconditioner_data(
+    backend: GPUBackendBundle,
+    entries: list[dict[str, Any]],
+    *,
+    gamma: float = 1.0,
+) -> EnsembleCoordinateNystromPreconditionerData:
+    if len(entries) == 0:
+        raise ValueError("entries must be non-empty for ensemble_coordinate_nystrom.")
+    gg = float(gamma)
+    if not (0.0 < gg <= 1.0):
+        raise ValueError(f"gamma must satisfy 0 < gamma <= 1, got {gamma!r}")
+    per_entry_gamma = gg / float(len(entries))
+    built = [
+        build_coordinate_nystrom_preconditioner_data(
+            backend,
+            entry["S_gpu"],
+            entry["V_gpu"],
+            entry["theta_gpu"],
+            float(entry["mu"]),
+            gamma=per_entry_gamma,
+        )
+        for entry in entries
+    ]
+    return EnsembleCoordinateNystromPreconditionerData(entries=built)
 
 
 def build_gpu_dominant_subspace_data(
@@ -486,6 +528,67 @@ def apply_preconditioner_coordinate_nystrom(
         return out_buf
 
     return _core_apply(v, out)
+
+
+def apply_preconditioner_ensemble_coordinate_nystrom(
+    backend: GPUBackendBundle,
+    precond_data: EnsembleCoordinateNystromPreconditionerData,
+    v_gpu: Any,
+    op_ctx: Optional[GPUOperatorContext] = None,
+    out: Optional[Any] = None,
+) -> Any:
+    """
+    Ensemble compact coordinate Nyström preconditioner.
+
+    Each ensemble correction is computed from the same original input ``v`` and
+    accumulated additively, matching the intended averaged block-Jacobi update.
+    """
+
+    del op_ctx
+    xp = backend.xp
+    entries = list(precond_data.entries or [])
+    if len(entries) == 0:
+        raise ValueError("ensemble preconditioner must contain at least one entry.")
+
+    first = entries[0]
+    v = xp.asarray(v_gpu, dtype=first.V_gpu.dtype)
+    out_buf = out
+    may_share = getattr(xp, "may_share_memory", None)
+    shares_mem = False
+    if out_buf is not None and callable(may_share):
+        try:
+            shares_mem = bool(may_share(out_buf, v))
+        except Exception:
+            shares_mem = False
+    if out_buf is None or out_buf.shape != v.shape or out_buf.dtype != v.dtype or shares_mem:
+        out_buf = xp.empty_like(v, dtype=v.dtype)
+    xp.copyto(out_buf, v)
+
+    for entry in entries:
+        S = entry.S_gpu
+        V = entry.V_gpu
+        VH = entry.VH_gpu
+        alpha = entry.alpha_gpu
+        alpha_col = entry.alpha_col_gpu
+        gamma = float(getattr(entry, "gamma", 1.0))
+
+        if v.ndim == 1:
+            z_s = v[S]
+            coeff = VH @ z_s
+            coeff = alpha * coeff
+            corr_s = V @ coeff
+            if gamma != 1.0:
+                corr_s = gamma * corr_s
+            out_buf[S] -= corr_s
+        else:
+            z_s = v[S, :]
+            coeff = VH @ z_s
+            coeff = alpha_col * coeff
+            corr_s = V @ coeff
+            if gamma != 1.0:
+                corr_s = gamma * corr_s
+            out_buf[S, :] -= corr_s
+    return out_buf
 
 
 def apply_preconditioner_hybrid_topr_coordinate(

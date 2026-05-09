@@ -18,14 +18,17 @@ from .v1_ops import (
 )
 from .v2_preconditioner import (
     CoordinateNystromPreconditionerData,
+    EnsembleCoordinateNystromPreconditionerData,
     GPUPreconditionerData,
     HybridToprCoordinatePreconditionerData,
     apply_preconditioner_dominant_subspace,
     apply_preconditioner_coordinate_nystrom,
+    apply_preconditioner_ensemble_coordinate_nystrom,
     apply_preconditioner_hybrid_topr_coordinate,
     apply_preconditioner_v2,
     build_dominant_subspace_preconditioner,
     build_coordinate_nystrom_preconditioner_data,
+    build_ensemble_coordinate_nystrom_preconditioner_data,
     build_gpu_preconditioner_data,
 )
 from .iterative_solvers import pcg_solve_gpu
@@ -273,6 +276,9 @@ def run_v3_full_gpu_eigenspace(
         "ep_nystrom",
         "coordinate_nystrom",
         "coord_nystrom",
+        "ensemble_coordinate_nystrom",
+        "random_support_lift",
+        "support_lift",
     ):
         eig_cfg.method_cfg = dict(eig_cfg.method_cfg or {})
         eig_cfg.method_cfg.setdefault("data_ctx", data_ctx)
@@ -317,6 +323,12 @@ def run_v3_full_gpu_eigenspace(
             float(eig_diag["mu"]),
             gamma=coord_gamma,
             diag_inv_sqrt_gpu=eig_diag.get("diag_inv_sqrt_gpu", None),
+        )
+    elif precond_kind == "ensemble_coordinate_nystrom":
+        precond_data = build_ensemble_coordinate_nystrom_preconditioner_data(
+            backend,
+            list(eig_diag.get("ensemble_entries", []) or []),
+            gamma=float(eig_diag.get("ensemble_gamma", 1.0)),
         )
     elif precond_kind in ("hybrid_topr_coordinate", "hybrid_top_r_coordinate", "topr_hybrid_coordinate"):
         # Dense top-r block + compact coordinate tail.
@@ -363,6 +375,12 @@ def run_v3_full_gpu_eigenspace(
     def _precond(v: Any, out: Any) -> None:
         if hasattr(precond_data, "tail"):
             apply_preconditioner_hybrid_topr_coordinate(
+                backend, precond_data, v, op_ctx=op_ctx, out=out
+            )
+        elif precond_kind == "ensemble_coordinate_nystrom" or isinstance(
+            precond_data, EnsembleCoordinateNystromPreconditionerData
+        ):
+            apply_preconditioner_ensemble_coordinate_nystrom(
                 backend, precond_data, v, op_ctx=op_ctx, out=out
             )
         elif precond_kind in ("coordinate_nystrom", "diag_coordinate_nystrom") or all(
@@ -486,6 +504,7 @@ def build_v3_pcg_left_precond_matvec(
         "ep_nystrom",
         "coordinate_nystrom",
         "coord_nystrom",
+        "ensemble_coordinate_nystrom",
     ):
         eig_cfg.method_cfg = dict(eig_cfg.method_cfg or {})
         eig_cfg.method_cfg.setdefault("data_ctx", data_ctx)
@@ -507,6 +526,12 @@ def build_v3_pcg_left_precond_matvec(
             eig_diag["theta_gpu"],
             float(eig_diag["mu"]),
         )
+    elif precond_kind == "ensemble_coordinate_nystrom":
+        precond_data = build_ensemble_coordinate_nystrom_preconditioner_data(
+            backend,
+            list(eig_diag.get("ensemble_entries", []) or []),
+            gamma=float(eig_diag.get("ensemble_gamma", 1.0)),
+        )
     else:
         mu = mu_for_precond_from_eig(vals_gpu, q, eig_diag)
         scale_gpu = backend.xp.asarray(1.0 - (mu / vals_gpu[:q]))
@@ -526,7 +551,13 @@ def build_v3_pcg_left_precond_matvec(
             av_buf[0] = xp.empty((int(va.size),), dtype=xp.complex128)
         oa = xp.asarray(out, dtype=xp.complex128).reshape(-1)
         apply_A_v1(backend, data_ctx, va, float(cfg.reg_lambda), op_ctx, out=av_buf[0])
-        if precond_kind == "coordinate_nystrom" or all(
+        if precond_kind == "ensemble_coordinate_nystrom" or isinstance(
+            precond_data, EnsembleCoordinateNystromPreconditionerData
+        ):
+            apply_preconditioner_ensemble_coordinate_nystrom(
+                backend, precond_data, av_buf[0], op_ctx=op_ctx, out=oa
+            )
+        elif precond_kind == "coordinate_nystrom" or all(
             hasattr(precond_data, k) for k in ("S_gpu", "V_gpu", "VH_gpu")
         ):
             apply_preconditioner_coordinate_nystrom(
