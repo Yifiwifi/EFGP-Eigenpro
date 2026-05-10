@@ -1,0 +1,100 @@
+{
+  "project_url": "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/",
+  "dataset_stem_prefix": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression",
+  "download_dir": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018",
+  "output_dir": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed",
+  "size_list": [
+    100000,
+    300000,
+    1000000,
+    3000000,
+    10000000,
+    30000000,
+    100000000
+  ],
+  "max_files": 64,
+  "max_points_per_file": null,
+  "classification_keep": [
+    2
+  ],
+  "generated": [
+    {
+      "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_n100000",
+      "max_total_points_requested": 100000,
+      "output_npz": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_n100000.npz",
+      "output_json": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_n100000.json",
+      "n_loaded_before_total_subsample": 159483953,
+      "n_clean": 100000,
+      "n_train": 80000,
+      "n_test": 20000,
+      "dim": 2
+    },
+    {
+      "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_n300000",
+      "max_total_points_requested": 300000,
+      "output_npz": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_n300000.npz",
+      "output_json": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_n300000.json",
+      "n_loaded_before_total_subsample": 159483953,
+      "n_clean": 300000,
+      "n_train": 240000,
+      "n_test": 60000,
+      "dim": 2
+    },
+    {
+      "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_n1000000",
+      "max_total_points_requested": 1000000,
+      "output_npz": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_n1000000.npz",
+      "output_json": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_n1000000.json",
+      "n_loaded_before_total_subsample": 159483953,
+      "n_clean": 1000000,
+      "n_train": 800000,
+      "n_test": 200000,
+      "dim": 2
+    },
+    {
+      "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_n3000000",
+      "max_total_points_requested": 3000000,
+      "output_npz": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_n3000000.npz",
+      "output_json": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_n3000000.json",
+      "n_loaded_before_total_subsample": 159483953,
+      "n_clean": 3000000,
+      "n_train": 2400000,
+      "n_test": 600000,
+      "dim": 2
+    },
+    {
+      "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_n10000000",
+      "max_total_points_requested": 10000000,
+      "output_npz": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_n10000000.npz",
+      "output_json": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_n10000000.json",
+      "n_loaded_before_total_subsample": 159483953,
+      "n_clean": 10000000,
+      "n_train": 8000000,
+      "n_test": 2000000,
+      "dim": 2
+    },
+    {
+      "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_n30000000",
+      "max_total_points_requested": 30000000,
+      "output_npz": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_n30000000.npz",
+      "output_json": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_n30000000.json",
+      "n_loaded_before_total_subsample": 159483953,
+      "n_clean": 30000000,
+      "n_train": 24000000,
+      "n_test": 6000000,
+      "dim": 2
+    },
+    {
+      "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_n100000000",
+      "max_total_points_requested": 100000000,
+      "output_npz": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_n100000000.npz",
+      "output_json": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_n100000000.json",
+      "n_loaded_before_total_subsample": 159483953,
+      "n_clean": 100000000,
+      "n_train": 80000000,
+      "n_test": 20000000,
+      "dim": 2
+    }
+  ],
+  "failures": []
+}

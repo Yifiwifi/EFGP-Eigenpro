@@ -1,0 +1,565 @@
+{
+  "dataset_name": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_n10000000",
+  "task_type": "2d_lidar_elevation_regression",
+  "source_url": "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/",
+  "downloaded_urls": [
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2503_2073.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2513_2025.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2571_2093.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2517_2117.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2567_2093.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2567_2119.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2571_2035.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2509_2103.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2511_2063.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2569_2001.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2571_2033.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2571_2079.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2569_2021.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2569_2061.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2507_2037.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2507_2055.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2509_2049.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2569_2067.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2571_2031.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2571_2077.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2569_2003.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2507_2127.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2517_2119.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2521_2101.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2527_2093.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2507_2061.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2527_2071.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2507_2063.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2515_2091.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2517_2021.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2567_2121.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2571_2091.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2525_2045.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2569_2065.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2507_2039.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2523_2017.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2577_2059.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2507_2043.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2509_2117.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2525_2043.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2527_2089.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2541_2047.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2555_2115.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2543_2115.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2553_2111.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2555_2127.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2539_2049.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2547_2059.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2555_2105.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2563_2127.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2553_2035.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2537_2095.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2565_2087.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2565_2095.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2543_2069.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2553_2117.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2555_2017.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2563_2053.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2565_2097.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2533_2115.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2547_2025.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2553_2125.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2543_2065.laz",
+    "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/USGS_LPC_IL_Winnebago_2018_2553_2119.laz"
+  ],
+  "downloaded_files": [
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2503_2073.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2513_2025.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2571_2093.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2517_2117.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2567_2093.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2567_2119.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2571_2035.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2509_2103.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2511_2063.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2569_2001.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2571_2033.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2571_2079.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2569_2021.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2569_2061.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2507_2037.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2507_2055.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2509_2049.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2569_2067.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2571_2031.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2571_2077.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2569_2003.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2507_2127.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2517_2119.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2521_2101.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2527_2093.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2507_2061.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2527_2071.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2507_2063.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2515_2091.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2517_2021.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2567_2121.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2571_2091.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2525_2045.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2569_2065.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2507_2039.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2523_2017.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2577_2059.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2507_2043.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2509_2117.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2525_2043.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2527_2089.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2541_2047.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2555_2115.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2543_2115.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2553_2111.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2555_2127.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2539_2049.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2547_2059.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2555_2105.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2563_2127.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2553_2035.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2537_2095.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2565_2087.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2565_2095.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2543_2069.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2553_2117.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2555_2017.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2563_2053.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2565_2097.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2533_2115.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2547_2025.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2553_2125.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2543_2065.laz",
+    "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2553_2119.laz"
+  ],
+  "processed_file": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_n10000000.npz",
+  "input_definition": "LAS/LAZ horizontal coordinates (x, y), shifted and shared-scaled into a bounded 2D domain",
+  "target_definition": "standardized LAS/LAZ elevation z",
+  "paper_task_statement": "(x, y) -> elevation",
+  "cleaning": {
+    "finite_only": true,
+    "classification_keep": [
+      2
+    ],
+    "classification_keep_note": "LAS class 2 is ground in standard classified lidar; pass empty string to disable filtering.",
+    "max_points_per_file": null,
+    "max_total_points": 10000000
+  },
+  "split": {
+    "method": "random",
+    "test_size": 0.2,
+    "seed": 0
+  },
+  "x_transform": {
+    "method": "shift_and_shared_scale",
+    "x_min_train": [
+      2502000.053,
+      2000000.004
+    ],
+    "shared_scale": 127999.99499999988
+  },
+  "y_transform": {
+    "method": "train_standardization",
+    "mean": 817.7625305103754,
+    "std": 52.93618863479499
+  },
+  "shapes": {
+    "n_loaded_before_total_subsample": 159483953,
+    "n_clean": 10000000,
+    "n_train": 8000000,
+    "n_test": 2000000,
+    "dim": 2
+  },
+  "read_metadata": {
+    "files": [
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2503_2073.laz",
+        "n_file": 2740305,
+        "n_kept_before_sample": 2710004,
+        "n_used": 2710004
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2513_2025.laz",
+        "n_file": 2716319,
+        "n_kept_before_sample": 2693395,
+        "n_used": 2693395
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2571_2093.laz",
+        "n_file": 2939465,
+        "n_kept_before_sample": 2874658,
+        "n_used": 2874658
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2517_2117.laz",
+        "n_file": 2816440,
+        "n_kept_before_sample": 2701467,
+        "n_used": 2701467
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2567_2093.laz",
+        "n_file": 2424231,
+        "n_kept_before_sample": 2386584,
+        "n_used": 2386584
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2567_2119.laz",
+        "n_file": 2811990,
+        "n_kept_before_sample": 2481567,
+        "n_used": 2481567
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2571_2035.laz",
+        "n_file": 2895791,
+        "n_kept_before_sample": 2868910,
+        "n_used": 2868910
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2509_2103.laz",
+        "n_file": 2304004,
+        "n_kept_before_sample": 2193195,
+        "n_used": 2193195
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2511_2063.laz",
+        "n_file": 2207007,
+        "n_kept_before_sample": 1996910,
+        "n_used": 1996910
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2569_2001.laz",
+        "n_file": 2767166,
+        "n_kept_before_sample": 2746026,
+        "n_used": 2746026
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2571_2033.laz",
+        "n_file": 3000692,
+        "n_kept_before_sample": 2603219,
+        "n_used": 2603219
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2571_2079.laz",
+        "n_file": 3154930,
+        "n_kept_before_sample": 3080563,
+        "n_used": 3080563
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2569_2021.laz",
+        "n_file": 3151751,
+        "n_kept_before_sample": 2456191,
+        "n_used": 2456191
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2569_2061.laz",
+        "n_file": 2886942,
+        "n_kept_before_sample": 2674186,
+        "n_used": 2674186
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2507_2037.laz",
+        "n_file": 2267105,
+        "n_kept_before_sample": 2226634,
+        "n_used": 2226634
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2507_2055.laz",
+        "n_file": 2284775,
+        "n_kept_before_sample": 2213487,
+        "n_used": 2213487
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2509_2049.laz",
+        "n_file": 2675113,
+        "n_kept_before_sample": 2634659,
+        "n_used": 2634659
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2569_2067.laz",
+        "n_file": 2799579,
+        "n_kept_before_sample": 2661212,
+        "n_used": 2661212
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2571_2031.laz",
+        "n_file": 3063866,
+        "n_kept_before_sample": 2500781,
+        "n_used": 2500781
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2571_2077.laz",
+        "n_file": 2812727,
+        "n_kept_before_sample": 2794632,
+        "n_used": 2794632
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2569_2003.laz",
+        "n_file": 2749668,
+        "n_kept_before_sample": 2699569,
+        "n_used": 2699569
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2507_2127.laz",
+        "n_file": 2735043,
+        "n_kept_before_sample": 2542049,
+        "n_used": 2542049
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2517_2119.laz",
+        "n_file": 2810036,
+        "n_kept_before_sample": 2794219,
+        "n_used": 2794219
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2521_2101.laz",
+        "n_file": 2771215,
+        "n_kept_before_sample": 2474936,
+        "n_used": 2474936
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2527_2093.laz",
+        "n_file": 2795809,
+        "n_kept_before_sample": 2711683,
+        "n_used": 2711683
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2507_2061.laz",
+        "n_file": 2499785,
+        "n_kept_before_sample": 1980010,
+        "n_used": 1980010
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2527_2071.laz",
+        "n_file": 2805436,
+        "n_kept_before_sample": 2301736,
+        "n_used": 2301736
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2507_2063.laz",
+        "n_file": 2165380,
+        "n_kept_before_sample": 1614249,
+        "n_used": 1614249
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2515_2091.laz",
+        "n_file": 2778279,
+        "n_kept_before_sample": 2701962,
+        "n_used": 2701962
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2517_2021.laz",
+        "n_file": 2284276,
+        "n_kept_before_sample": 2272016,
+        "n_used": 2272016
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2567_2121.laz",
+        "n_file": 2792381,
+        "n_kept_before_sample": 2395615,
+        "n_used": 2395615
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2571_2091.laz",
+        "n_file": 3003869,
+        "n_kept_before_sample": 2896498,
+        "n_used": 2896498
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2525_2045.laz",
+        "n_file": 2846936,
+        "n_kept_before_sample": 2823077,
+        "n_used": 2823077
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2569_2065.laz",
+        "n_file": 2796461,
+        "n_kept_before_sample": 2672912,
+        "n_used": 2672912
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2507_2039.laz",
+        "n_file": 2218205,
+        "n_kept_before_sample": 2204260,
+        "n_used": 2204260
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2523_2017.laz",
+        "n_file": 2638675,
+        "n_kept_before_sample": 2478923,
+        "n_used": 2478923
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2577_2059.laz",
+        "n_file": 2580930,
+        "n_kept_before_sample": 2288767,
+        "n_used": 2288767
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2507_2043.laz",
+        "n_file": 2116968,
+        "n_kept_before_sample": 2076712,
+        "n_used": 2076712
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2509_2117.laz",
+        "n_file": 2723750,
+        "n_kept_before_sample": 2295259,
+        "n_used": 2295259
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2525_2043.laz",
+        "n_file": 2877903,
+        "n_kept_before_sample": 2793019,
+        "n_used": 2793019
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2527_2089.laz",
+        "n_file": 2928161,
+        "n_kept_before_sample": 2717955,
+        "n_used": 2717955
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2541_2047.laz",
+        "n_file": 2786119,
+        "n_kept_before_sample": 2726791,
+        "n_used": 2726791
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2555_2115.laz",
+        "n_file": 2645702,
+        "n_kept_before_sample": 2417830,
+        "n_used": 2417830
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2543_2115.laz",
+        "n_file": 2915757,
+        "n_kept_before_sample": 2218612,
+        "n_used": 2218612
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2553_2111.laz",
+        "n_file": 2327746,
+        "n_kept_before_sample": 2220746,
+        "n_used": 2220746
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2555_2127.laz",
+        "n_file": 2498097,
+        "n_kept_before_sample": 2381667,
+        "n_used": 2381667
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2539_2049.laz",
+        "n_file": 2823952,
+        "n_kept_before_sample": 2635604,
+        "n_used": 2635604
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2547_2059.laz",
+        "n_file": 2703999,
+        "n_kept_before_sample": 2682178,
+        "n_used": 2682178
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2555_2105.laz",
+        "n_file": 2453097,
+        "n_kept_before_sample": 2175881,
+        "n_used": 2175881
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2563_2127.laz",
+        "n_file": 2888389,
+        "n_kept_before_sample": 2777523,
+        "n_used": 2777523
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2553_2035.laz",
+        "n_file": 2753375,
+        "n_kept_before_sample": 2688614,
+        "n_used": 2688614
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2537_2095.laz",
+        "n_file": 2445801,
+        "n_kept_before_sample": 2155092,
+        "n_used": 2155092
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2565_2087.laz",
+        "n_file": 2529437,
+        "n_kept_before_sample": 2361803,
+        "n_used": 2361803
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2565_2095.laz",
+        "n_file": 2521657,
+        "n_kept_before_sample": 2512503,
+        "n_used": 2512503
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2543_2069.laz",
+        "n_file": 2850297,
+        "n_kept_before_sample": 2750427,
+        "n_used": 2750427
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2553_2117.laz",
+        "n_file": 2374602,
+        "n_kept_before_sample": 2222929,
+        "n_used": 2222929
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2555_2017.laz",
+        "n_file": 3093093,
+        "n_kept_before_sample": 2676689,
+        "n_used": 2676689
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2563_2053.laz",
+        "n_file": 2278254,
+        "n_kept_before_sample": 2055666,
+        "n_used": 2055666
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2565_2097.laz",
+        "n_file": 2550550,
+        "n_kept_before_sample": 2519775,
+        "n_used": 2519775
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2533_2115.laz",
+        "n_file": 2878929,
+        "n_kept_before_sample": 2818344,
+        "n_used": 2818344
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2547_2025.laz",
+        "n_file": 2235333,
+        "n_kept_before_sample": 2104467,
+        "n_used": 2104467
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2553_2125.laz",
+        "n_file": 2813579,
+        "n_kept_before_sample": 2311392,
+        "n_used": 2311392
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2543_2065.laz",
+        "n_file": 2822976,
+        "n_kept_before_sample": 2691533,
+        "n_used": 2691533
+      },
+      {
+        "path": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018\\USGS_LPC_IL_Winnebago_2018_2553_2119.laz",
+        "n_file": 2470997,
+        "n_kept_before_sample": 2144181,
+        "n_used": 2144181
+      }
+    ],
+    "n_files": 64,
+    "n_loaded_points": 159483953
+  }
+}

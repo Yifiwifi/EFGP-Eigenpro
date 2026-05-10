@@ -1,0 +1,50 @@
+{
+  "dataset_name": "synthetic_true_func_2d_n30000000",
+  "task_type": "2d_synthetic_regression",
+  "source_file": "generated://efgp_eigenpro_py.benchmark",
+  "processed_file": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\synthetic_true_func_2d_n30000000.npz",
+  "input_definition": "x_train and x_test are sampled in [0,1]^2 using the benchmark helpers",
+  "target_definition": "y_train = true_func_2d(x_train) + Gaussian noise, y_test = true_func_2d(x_test)",
+  "generation": {
+    "train_generator": "make_dataset",
+    "test_generator": "make_test_set",
+    "target_function": "true_func_2d",
+    "dim": 2,
+    "n_train": 30000000,
+    "n_test": 1000,
+    "noise_std": 0.02,
+    "seed_train": 20260421,
+    "seed_test": 1,
+    "train_distribution": "uniform in [0,1]^2",
+    "test_distribution": "uniform in [0,1]^2"
+  },
+  "split": {
+    "method": "pre-generated train/test sets",
+    "note": "This synthetic benchmark follows the sanity_check notebook directly instead of splitting one merged pool."
+  },
+  "x_transform": {
+    "method": "none",
+    "domain": "[0,1]^2",
+    "dim": 2
+  },
+  "y_transform": {
+    "method": "none",
+    "noise_model": "additive Gaussian noise on y_train only",
+    "noise_std": 0.02
+  },
+  "benchmark_reference": {
+    "notebook": "gpu/sanity_check/v5_mat32_weak_gpu_complexity_benchmark.ipynb",
+    "kernel_family": "matern",
+    "lengthscale": 0.1,
+    "nu": 1.5,
+    "reg_lambda": 0.1,
+    "eps": 1e-05,
+    "l2_scaled": true
+  },
+  "shapes": {
+    "n_train": 30000000,
+    "n_test": 1000,
+    "dim": 2
+  },
+  "paper_task_statement": "(x1, x2) -> true_func_2d(x) with noisy train targets"
+}
