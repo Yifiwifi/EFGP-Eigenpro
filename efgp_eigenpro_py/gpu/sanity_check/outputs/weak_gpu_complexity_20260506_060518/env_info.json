@@ -1,0 +1,59 @@
+{
+  "timestamp": "2026-05-06T06:05:18.238402",
+  "python": "3.12.13 (main, Mar  4 2026, 09:23:07) [GCC 11.4.0]",
+  "platform": "linux",
+  "device_name": "NVIDIA L4",
+  "eps": 1e-07,
+  "solve_tol": 1e-06,
+  "gpu_maxiter": 3000,
+  "nufft_mode": "auto",
+  "l2_scaled": true,
+  "dim": 2,
+  "kernel": "Mat32",
+  "nu": 1.5,
+  "lengthscale": 0.1,
+  "reg_lambda": 0.1,
+  "n_test": 1000,
+  "n_list": [
+    100000,
+    300000,
+    1000000,
+    3000000,
+    10000000
+  ],
+  "mode_specs": [
+    {
+      "mode": "gpu_v1_topq0",
+      "top_q": 0
+    },
+    {
+      "mode": "gpu_v3_topq_eigenpro_nystrom",
+      "top_q": 36
+    },
+    {
+      "mode": "gpu_v3_topq_eigenpro_nystrom",
+      "top_q": 72
+    },
+    {
+      "mode": "gpu_v3_topq_eigenpro_nystrom",
+      "top_q": 144
+    },
+    {
+      "mode": "gpu_v3_topq_eigenpro_nystrom",
+      "top_q": 180
+    }
+  ],
+  "eigenpro_nystrom": {
+    "precond_kind": "coordinate_nystrom",
+    "surrogate_size": 1600,
+    "lowfreq_ratio": 0.25,
+    "oversample": 10,
+    "ritz_refine": false,
+    "seed": 0,
+    "block_rows": 8192,
+    "ritz_block_cols": 16,
+    "lift": false
+  },
+  "cupy": "14.0.1",
+  "cufinufft": "2.5.1"
+}

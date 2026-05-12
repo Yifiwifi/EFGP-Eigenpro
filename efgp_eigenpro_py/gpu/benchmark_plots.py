@@ -8,6 +8,16 @@ import numpy as np
 import pandas as pd
 
 
+def _mode_display_name(mode: str, top_q: int | float) -> str:
+    mode = str(mode)
+    q = int(top_q)
+    if mode == "gpu_v1_topq0":
+        return "baseline EFGP"
+    if mode == "gpu_v3_topq_eigenpro_nystrom":
+        return f"ours_q{q}"
+    return f"{mode}_q{q}"
+
+
 def save_complexity_benchmark_plots(
     summary_df: pd.DataFrame,
     out_dir: str | Path,
@@ -106,7 +116,7 @@ def save_complexity_benchmark_plots(
     fig, ax = plt.subplots(figsize=(8, 5))
     for (mode, top_q), g in summary_df.groupby(["mode", "top_q"]):
         g = g.sort_values("N")
-        ax.plot(g["N"], g["time_train_median"], marker="o", label=f"{mode}_q{int(top_q)}")
+        ax.plot(g["N"], g["time_train_median"], marker="o", label=_mode_display_name(mode, top_q))
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xlabel("N")
@@ -125,6 +135,7 @@ def save_complexity_benchmark_plots(
     # Figure 2: stage time vs N by mode
     for (mode, top_q), g in summary_df.groupby(["mode", "top_q"]):
         g = g.sort_values("N")
+        display_name = _mode_display_name(mode, top_q)
         fig, ax = plt.subplots(figsize=(8, 5))
         ax.plot(g["N"], g["time_precompute_median"], marker="o", label="precompute")
         ax.plot(g["N"], g["time_eigenspace_median"], marker="o", label="eigenspace")
@@ -135,7 +146,7 @@ def save_complexity_benchmark_plots(
         ax.set_yscale("log")
         ax.set_xlabel("N")
         ax.set_ylabel("median stage time")
-        ax.set_title(f"Figure 2: Stage time vs N | {mode}_q{int(top_q)}")
+        ax.set_title(f"Figure 2: Stage time vs N | {display_name}")
         ax.grid(True, alpha=0.3)
         ax.legend()
         fig.tight_layout()
@@ -150,7 +161,7 @@ def save_complexity_benchmark_plots(
     fig, ax = plt.subplots(figsize=(8, 5))
     for (mode, top_q), g in summary_df.groupby(["mode", "top_q"]):
         g = g.sort_values("N")
-        ax.plot(g["N"], g["cg_iters_median"], marker="o", label=f"{mode}_q{int(top_q)}")
+        ax.plot(g["N"], g["cg_iters_median"], marker="o", label=_mode_display_name(mode, top_q))
     ax.set_xscale("log")
     ax.set_xlabel("N")
     ax.set_ylabel("median cg_iters")
@@ -169,11 +180,12 @@ def save_complexity_benchmark_plots(
     fig, ax = plt.subplots(figsize=(8, 5))
     for (mode, top_q), g in summary_df.groupby(["mode", "top_q"]):
         g = g.sort_values("N")
+        display_name = _mode_display_name(mode, top_q)
         solve_other = g["time_solve_median"] - g["t_matvec_total_median"] - g["t_precond_total_median"]
         solve_other = solve_other.clip(lower=0)
-        ax.plot(g["N"], g["t_matvec_total_median"], marker="o", linestyle="-", label=f"matvec {mode}_q{int(top_q)}")
-        ax.plot(g["N"], g["t_precond_total_median"], marker="s", linestyle="--", label=f"precond {mode}_q{int(top_q)}")
-        ax.plot(g["N"], solve_other, marker="^", linestyle=":", label=f"other {mode}_q{int(top_q)}")
+        ax.plot(g["N"], g["t_matvec_total_median"], marker="o", linestyle="-", label=f"matvec {display_name}")
+        ax.plot(g["N"], g["t_precond_total_median"], marker="s", linestyle="--", label=f"precond {display_name}")
+        ax.plot(g["N"], solve_other, marker="^", linestyle=":", label=f"other {display_name}")
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xlabel("N")
@@ -192,6 +204,7 @@ def save_complexity_benchmark_plots(
     # Figure 5: share of training time T_train vs N (excludes predict; see wall_s_total in tables)
     for (mode, top_q), g in summary_df.groupby(["mode", "top_q"]):
         g = g.sort_values("N")
+        display_name = _mode_display_name(mode, top_q)
         denom = g["time_train_median"].replace(0, np.nan)
         r_pre = g["time_precompute_median"] / denom
         r_eig = g["time_eigenspace_median"] / denom
@@ -206,7 +219,7 @@ def save_complexity_benchmark_plots(
         ax.set_xscale("log")
         ax.set_xlabel("N")
         ax.set_ylabel("fraction of training time")
-        ax.set_title(f"Figure 5: Training-stage share vs N | {mode}_q{int(top_q)}")
+        ax.set_title(f"Figure 5: Training-stage share vs N | {display_name}")
         ax.grid(True, alpha=0.3)
         ax.legend()
         fig.tight_layout()
@@ -260,23 +273,25 @@ def save_complexity_benchmark_plots(
             fig, ax = plt.subplots(figsize=(8, 5))
             c0 = "C0"
             n0, s0, m0 = _per_iter_curves(base)
-            ax.plot(n0, s0, color=c0, linestyle="-", marker="o", label="q=0 solve/iter")
-            ax.plot(n0, m0, color=c0, linestyle="--", marker="o", label="q=0 matvec/iter")
+            base_name = _mode_display_name("gpu_v1_topq0", 0)
+            ax.plot(n0, s0, color=c0, linestyle="-", marker="o", label=f"{base_name} solve/iter")
+            ax.plot(n0, m0, color=c0, linestyle="--", marker="o", label=f"{base_name} matvec/iter")
 
             if not hi.empty:
                 c1 = "C1"
                 n1, s1, m1 = _per_iter_curves(hi)
-                ax.plot(n1, s1, color=c1, linestyle="-", marker="s", label=f"q={q_max} solve/iter")
-                ax.plot(n1, m1, color=c1, linestyle="--", marker="s", label=f"q={q_max} matvec/iter")
+                hi_name = _mode_display_name(hi_mode, q_max)
+                ax.plot(n1, s1, color=c1, linestyle="-", marker="s", label=f"{hi_name} solve/iter")
+                ax.plot(n1, m1, color=c1, linestyle="--", marker="s", label=f"{hi_name} matvec/iter")
 
             ax.set_xscale("log")
             ax.set_yscale("log")
             ax.set_xlabel("N")
             ax.set_ylabel("median time per iteration")
             if hi_mode is None:
-                ax.set_title("Figure 6: per-iteration time vs N | q=0")
+                ax.set_title(f"Figure 6: per-iteration time vs N | {base_name}")
             else:
-                ax.set_title(f"Figure 6: per-iteration time vs N | q=0 vs q={q_max} ({hi_mode})")
+                ax.set_title(f"Figure 6: per-iteration time vs N | {base_name} vs {hi_name}")
             ax.grid(True, alpha=0.3)
             ax.legend()
             fig.tight_layout()

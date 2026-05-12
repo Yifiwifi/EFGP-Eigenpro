@@ -1,3 +1,0 @@
-case_tag,N,mode,top_q,combo_name,slq_operator,seed,size,wall_s,lambda_hat_min,lambda_hat_max,q01,q99,m_final,health,dominant_issue,out_dir
-N100000_gpu_v1_topq0_q0_combo_none_seed99174,100000,gpu_v1_topq0,0,,A,99174,35721,43.218994299997576,0.10060437871460165,5551.331658062716,0.10060437871460165,7.008558064399017,400,stable,upper_spikes,outputs\weak_gpu_complexity_20260505_173921\slq_diagnostics\N100000_gpu_v1_topq0_q0_combo_none_seed99174
-N100000_gpu_v3_topq_q64_combo_none_seed99175,100000,gpu_v3_topq,64,,M_inv_A,99175,35721,56.035464299988234,-0.26153165502816983,344.235249118002,0.09075965091564048,6.885750443598346,400,caution,upper_spikes,outputs\weak_gpu_complexity_20260505_173921\slq_diagnostics\N100000_gpu_v3_topq_q64_combo_none_seed99175
