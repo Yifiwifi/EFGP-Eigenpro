@@ -1121,6 +1121,9 @@ def run_eigenpro3_target_case(
     kernel_name, bandwidth = eigenpro_kernel_from_cfg(kernel_cfg)
     kernel_fn = make_torch_kernel(kernel_name, bandwidth)
     x_train = np.asarray(split["x_train_core"], dtype=np.float32)
+    # Keep labels as (n, 1), matching the fixed-epoch EigenPro3 baseline path.
+    # EigenPro3 stores weights as (p, output_dim), so 2D scalar targets avoid
+    # accidental output-dimension ambiguity in the package update.
     y_train = np.asarray(split["y_train_core"], dtype=np.float32).reshape(-1, 1)
     x_val = np.asarray(split["x_val_eval"], dtype=np.float32)
     y_val = np.asarray(split["y_val_eval"], dtype=np.float32).reshape(-1, 1)
