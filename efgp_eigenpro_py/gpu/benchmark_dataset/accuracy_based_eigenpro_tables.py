@@ -127,6 +127,10 @@ class AccuracyBenchmarkConfig:
     ep2_mem_gb: float = 8.0
     ep2_top_q: int | None = None
     ep2_n_subsamples: int | None = None
+    ep2_lr_scale: float = 0.01
+    ep2_stop_on_divergence: bool = True
+    ep2_divergence_abs_rmse: float = 5.0
+    ep2_divergence_target_factor: float = 50.0
     ep3_nystrom_samples: int = 512
     ep3_data_precond_level: int = 64
     ep3_loader_batch_size: int = 512
@@ -817,6 +821,14 @@ def _select_best_history(history: list[dict[str, Any]], *, budget_s: float | Non
     return min(rows, key=lambda r: float(r["val_rmse_std"]))
 
 
+def _is_ep2_divergent(val_rmse: float, target_val_rmse_std: float, cfg: AccuracyBenchmarkConfig) -> bool:
+    if not np.isfinite(float(val_rmse)):
+        return True
+    target_threshold = float(cfg.ep2_divergence_target_factor) * max(float(target_val_rmse_std), 1e-12)
+    threshold = max(float(cfg.ep2_divergence_abs_rmse), target_threshold)
+    return float(val_rmse) > threshold
+
+
 def _predict_ep2(model, x: np.ndarray, device: torch.device, batch_size: int, weight_cpu=None) -> np.ndarray:
     x_t = torch.as_tensor(x, dtype=torch.float32)
     weight = None if weight_cpu is None else weight_cpu.to(device)
@@ -878,7 +890,8 @@ def run_eigenpro2_target_case(
     bs, eta = model._compute_opt_params(None, bs_gpu, beta, new_top_eigval)
     bs = max(1, int(bs.detach().cpu().item() if torch.is_tensor(bs) else bs))
     eta_val = float(eta.detach().cpu().item() if torch.is_tensor(eta) else eta)
-    eta_t = model.tensor(eta_val / bs, dtype=torch.float)
+    eta_eff = float(cfg.ep2_lr_scale) * eta_val
+    eta_t = model.tensor(eta_eff / bs, dtype=torch.float)
     setup_time = float(time.perf_counter() - setup_start)
 
     elapsed_fit = setup_time
@@ -886,10 +899,15 @@ def run_eigenpro2_target_case(
     history: list[dict[str, Any]] = []
     best_weight = model.weight.detach().cpu().clone()
     budget_weight = model.weight.detach().cpu().clone()
+    best_row: dict[str, Any] | None = None
+    budget_row: dict[str, Any] | None = None
+    best_val = float("inf")
+    budget_val = float("inf")
     reached = False
     target_fit = float("nan")
     target_wall = float("nan")
     target_epoch = float("nan")
+    stop_reason = ""
 
     for epoch in range(1, int(cfg.max_epochs) + 1):
         epoch_start = time.perf_counter()
@@ -917,12 +935,22 @@ def run_eigenpro2_target_case(
             "elapsed_wall_s": float(elapsed_wall),
             "validation_eval_time_s": float(val_eval_time),
             "val_rmse_std": float(val_metrics["rmse_std"]),
+            "accepted_epoch": True,
+            "ep2_lr_scale": float(cfg.ep2_lr_scale),
+            "ep2_eta_raw": float(eta_val),
+            "ep2_eta_effective": float(eta_eff),
+            "ep2_batch_size": int(bs),
+            "ep2_n_subsamples": int(n_subsamples),
         }
         history.append(hist_row)
-        if _select_best_history(history) is hist_row:
+        val_rmse = float(hist_row["val_rmse_std"])
+        if val_rmse < best_val:
+            best_val = val_rmse
+            best_row = hist_row
             best_weight = model.weight.detach().cpu().clone()
-        budget_best = _select_best_history(history, budget_s=time_budget_s)
-        if budget_best is hist_row:
+        if np.isfinite(float(time_budget_s)) and float(elapsed_wall) <= float(time_budget_s) and val_rmse < budget_val:
+            budget_val = val_rmse
+            budget_row = hist_row
             budget_weight = model.weight.detach().cpu().clone()
         if (not reached) and _target_reached(history, target_val_rmse_std, cfg):
             reached = True
@@ -930,9 +958,13 @@ def run_eigenpro2_target_case(
             target_wall = float(elapsed_wall)
             target_epoch = int(epoch)
             break
+        if bool(cfg.ep2_stop_on_divergence) and _is_ep2_divergent(val_rmse, target_val_rmse_std, cfg):
+            hist_row["stopped_reason"] = "diverged"
+            stop_reason = "diverged"
+            break
 
-    best_row = _select_best_history(history)
-    budget_row = _select_best_history(history, budget_s=time_budget_s) or best_row
+    if best_row is None:
+        best_row = _select_best_history(history)
     summary = _finalize_eigenpro_summary(
         dataset_payload,
         split,
@@ -946,6 +978,8 @@ def run_eigenpro2_target_case(
         best_row=best_row,
         predict_fn=lambda x: _predict_ep2(model, x, device, int(cfg.predict_batch_size), best_weight),
     )
+    if stop_reason:
+        summary["stopped_reason"] = stop_reason
     budget = _finalize_budget_summary(
         dataset_payload,
         split,
@@ -1046,6 +1080,10 @@ def run_eigenpro3_target_case(
     history: list[dict[str, Any]] = []
     best_weights = model.weights.detach().cpu().clone()
     budget_weights = model.weights.detach().cpu().clone()
+    best_row: dict[str, Any] | None = None
+    budget_row: dict[str, Any] | None = None
+    best_val = float("inf")
+    budget_val = float("inf")
     centers_cpu = model.centers.detach().cpu().clone()
     reached = False
     target_fit = float("nan")
@@ -1083,12 +1121,17 @@ def run_eigenpro3_target_case(
             "elapsed_wall_s": float(elapsed_wall),
             "validation_eval_time_s": float(val_eval_time),
             "val_rmse_std": float(val_metrics["rmse_std"]),
+            "accepted_epoch": True,
         }
         history.append(hist_row)
-        if _select_best_history(history) is hist_row:
+        val_rmse = float(hist_row["val_rmse_std"])
+        if val_rmse < best_val:
+            best_val = val_rmse
+            best_row = hist_row
             best_weights = model.weights.detach().cpu().clone()
-        budget_best = _select_best_history(history, budget_s=time_budget_s)
-        if budget_best is hist_row:
+        if np.isfinite(float(time_budget_s)) and float(elapsed_wall) <= float(time_budget_s) and val_rmse < budget_val:
+            budget_val = val_rmse
+            budget_row = hist_row
             budget_weights = model.weights.detach().cpu().clone()
         if (not reached) and _target_reached(history, target_val_rmse_std, cfg):
             reached = True
@@ -1097,8 +1140,8 @@ def run_eigenpro3_target_case(
             target_epoch = int(epoch)
             break
 
-    best_row = _select_best_history(history)
-    budget_row = _select_best_history(history, budget_s=time_budget_s) or best_row
+    if best_row is None:
+        best_row = _select_best_history(history)
     summary = _finalize_eigenpro_summary(
         dataset_payload,
         split,
@@ -1160,6 +1203,9 @@ def _finalize_eigenpro_summary(
         raise RuntimeError(f"{method} produced no validation history.")
     y_pred = predict_fn(split["x_test_eval"])
     test_metrics = regression_metrics_std(split["y_test_eval"], y_pred, dataset_payload["y_std"])
+    stopped_reason = ""
+    if best_row is not None:
+        stopped_reason = str(best_row.get("stopped_reason", ""))
     return {
         "status": "ok",
         "error": "",
@@ -1180,6 +1226,7 @@ def _finalize_eigenpro_summary(
         "precompute_method_effective": np.nan,
         "nystrom_samples": np.nan if method == "EigenPro2" else int(cfg.ep3_nystrom_samples),
         "epochs": int(cfg.max_epochs),
+        "stopped_reason": stopped_reason,
     }
 
 
