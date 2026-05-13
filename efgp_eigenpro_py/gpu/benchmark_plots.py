@@ -12,9 +12,11 @@ def _mode_display_name(mode: str, top_q: int | float) -> str:
     mode = str(mode)
     q = int(top_q)
     if mode == "gpu_v1_topq0":
-        return "baseline EFGP"
-    if mode == "gpu_v3_topq_eigenpro_nystrom":
-        return f"ours_q{q}"
+        # Old paper draft label was "baseline EFGP"; keep it disabled because Figure 1/3 should call v1_top0 EFGP-CG.
+        return "EFGP-CG"
+    if mode in ("gpu_v3_topq", "gpu_v3_topq_eigenpro_nystrom"):
+        # Old label was f"ours_q{q}"; keep it disabled because the requested legend format is Ours-topq=xx.
+        return f"Ours-topq={q}"
     return f"{mode}_q{q}"
 
 
@@ -56,6 +58,57 @@ def save_complexity_benchmark_plots(
                 seen.add(x)
         return uniq
 
+    def _pick_fastest_rows(df: pd.DataFrame, group_cols: list[str]) -> pd.DataFrame:
+        if df.empty:
+            return df.copy()
+        if not group_cols:
+            group_cols = ["_all"]
+            df = df.assign(_all=0)
+        if "time_train_median" not in df.columns:
+            return df.groupby(group_cols, dropna=False, sort=False).head(1).drop(columns=["_all"], errors="ignore")
+
+        work = df.copy()
+        work["_select_time"] = pd.to_numeric(work["time_train_median"], errors="coerce")
+        work["_select_time"] = work["_select_time"].fillna(np.inf)
+        idx = work.groupby(group_cols, dropna=False, sort=False)["_select_time"].idxmin()
+        return work.loc[idx].drop(columns=["_select_time", "_all"], errors="ignore")
+
+    def _paper_comparison_curves(df: pd.DataFrame) -> list[tuple[str, pd.DataFrame]]:
+        """Curves for Figure 1/3: EFGP-CG baseline plus fastest Ours row per q,N."""
+        if df.empty or not {"mode", "top_q", "N"}.issubset(df.columns):
+            return []
+
+        group_cols = ["N"]
+        if "eps" in df.columns:
+            group_cols.append("eps")
+
+        curves: list[tuple[str, pd.DataFrame]] = []
+        top_q_num = pd.to_numeric(df["top_q"], errors="coerce")
+        mode_str = df["mode"].astype(str)
+
+        base = df[(mode_str == "gpu_v1_topq0") & (top_q_num == 0)].copy()
+        if not base.empty:
+            if "precompute_method" in base.columns:
+                pcm = base["precompute_method"].astype(str).str.strip().str.lower()
+                original = base[pcm == "original"]
+                if not original.empty:
+                    base = original
+            base = _pick_fastest_rows(base, group_cols).sort_values("N")
+            curves.append(("EFGP-CG", base))
+
+        ours = df[(mode_str != "gpu_v1_topq0") & (top_q_num > 0)].copy()
+        if not ours.empty:
+            ours["_top_q_num"] = pd.to_numeric(ours["top_q"], errors="coerce")
+            ours_group_cols = ["_top_q_num", *group_cols]
+            ours = _pick_fastest_rows(ours, ours_group_cols)
+            for top_q, g in ours.groupby("_top_q_num", dropna=True, sort=True):
+                if pd.isna(top_q):
+                    continue
+                g = g.drop(columns=["_top_q_num"], errors="ignore").sort_values("N")
+                curves.append((f"Ours-topq={int(top_q)}", g))
+
+        return curves
+
     # Caller-provided selector: filter only (allow multiple methods).
     if "precompute_method" in summary_df.columns and not summary_df.empty and (
         precompute_methods_by_mode is not None or precompute_methods_default is not None
@@ -76,8 +129,12 @@ def save_complexity_benchmark_plots(
             kept.append(sub if not sub.empty else g)
         summary_df = pd.concat(kept, ignore_index=True).drop(columns=["_pcm_lc"], errors="ignore")
 
+    comparison_df = summary_df.copy()
+
     # Default behavior (no selector): pick one method per curve to avoid duplicated labels.
-    elif "precompute_method" in summary_df.columns and not summary_df.empty:
+    if not (
+        precompute_methods_by_mode is not None or precompute_methods_default is not None
+    ) and "precompute_method" in summary_df.columns and not summary_df.empty:
         df = summary_df.copy()
         df["_pcm_lc"] = df["precompute_method"].astype(str).str.strip().str.lower()
         group_cols = [c for c in ("mode", "top_q", "N", "eps") if c in df.columns]
@@ -114,9 +171,14 @@ def save_complexity_benchmark_plots(
 
     # Figure 1: median training time T_train vs N (precompute+eigenspace+precond_build+solve; excludes predict)
     fig, ax = plt.subplots(figsize=(8, 5))
-    for (mode, top_q), g in summary_df.groupby(["mode", "top_q"]):
-        g = g.sort_values("N")
-        ax.plot(g["N"], g["time_train_median"], marker="o", label=_mode_display_name(mode, top_q))
+    comparison_curves = _paper_comparison_curves(comparison_df)
+    # Old behavior kept disabled: it plotted every selected (mode, top_q) curve directly.
+    # That exposed multiple method variants instead of keeping only the fastest Ours row per q,N.
+    # for (mode, top_q), g in summary_df.groupby(["mode", "top_q"]):
+    #     g = g.sort_values("N")
+    #     ax.plot(g["N"], g["time_train_median"], marker="o", label=_mode_display_name(mode, top_q))
+    for label, g in comparison_curves:
+        ax.plot(g["N"], g["time_train_median"], marker="o", label=label)
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xlabel("N")
@@ -146,7 +208,8 @@ def save_complexity_benchmark_plots(
         ax.set_yscale("log")
         ax.set_xlabel("N")
         ax.set_ylabel("median stage time")
-        ax.set_title(f"Figure 2: Stage time vs N | {display_name}")
+        # Figure 2 series is used as compact paper panels, so keep the top title disabled.
+        # ax.set_title(f"Figure 2: Stage time vs N | {display_name}")
         ax.grid(True, alpha=0.3)
         ax.legend()
         fig.tight_layout()
@@ -159,9 +222,13 @@ def save_complexity_benchmark_plots(
 
     # Figure 3: cg_iters vs N
     fig, ax = plt.subplots(figsize=(8, 5))
-    for (mode, top_q), g in summary_df.groupby(["mode", "top_q"]):
-        g = g.sort_values("N")
-        ax.plot(g["N"], g["cg_iters_median"], marker="o", label=_mode_display_name(mode, top_q))
+    # Old behavior kept disabled for the same reason as Figure 1: Figure 3 should use the identical line selection
+    # and legend names, so the CG-iteration comparison matches the training-time comparison.
+    # for (mode, top_q), g in summary_df.groupby(["mode", "top_q"]):
+    #     g = g.sort_values("N")
+    #     ax.plot(g["N"], g["cg_iters_median"], marker="o", label=_mode_display_name(mode, top_q))
+    for label, g in comparison_curves:
+        ax.plot(g["N"], g["cg_iters_median"], marker="o", label=label)
     ax.set_xscale("log")
     ax.set_xlabel("N")
     ax.set_ylabel("median cg_iters")
