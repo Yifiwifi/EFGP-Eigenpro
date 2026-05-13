@@ -138,7 +138,7 @@ class AccuracyBenchmarkConfig:
     ep3_nystrom_samples: int = 512
     ep3_data_precond_level: int = 64
     ep3_loader_batch_size: int = 512
-    ep3_lr_scale: float = 0.01
+    ep3_lr_scale: float = 1.0
     ep3_stop_on_divergence: bool = True
     ep3_divergence_abs_rmse: float = 5.0
     ep3_divergence_target_factor: float = 50.0
@@ -875,7 +875,10 @@ def _select_best_history(history: list[dict[str, Any]], *, budget_s: float | Non
         rows = [r for r in rows if float(r.get("elapsed_wall_s", np.inf)) <= float(budget_s)]
     if not rows:
         return None
-    return min(rows, key=lambda r: float(r["val_rmse_std"]))
+    finite_rows = [r for r in rows if np.isfinite(float(r.get("val_rmse_std", np.nan)))]
+    if finite_rows:
+        return min(finite_rows, key=lambda r: float(r["val_rmse_std"]))
+    return rows[-1]
 
 
 def _is_ep2_divergent(val_rmse: float, target_val_rmse_std: float, cfg: AccuracyBenchmarkConfig) -> bool:
@@ -1153,6 +1156,13 @@ def run_eigenpro3_target_case(
     ep3_lr_effective = float(cfg.ep3_lr_scale) * ep3_lr_raw
     model.lr = torch.as_tensor(ep3_lr_effective, dtype=torch.float32, device=device)
     setup_time = float(time.perf_counter() - setup_start)
+    if bool(cfg.print_epoch_progress):
+        print(
+            f"EigenPro3 setup p={int(p_eff)} device={device} "
+            f"raw_lr={ep3_lr_raw:.6g} lr_scale={float(cfg.ep3_lr_scale):.6g} "
+            f"effective_lr={ep3_lr_effective:.6g} batch_size={int(model.batch_size)} "
+            f"nystrom_samples={int(ns)} data_precond_level={int(cfg.ep3_data_precond_level)}"
+        )
 
     elapsed_fit = setup_time
     elapsed_wall = setup_time
