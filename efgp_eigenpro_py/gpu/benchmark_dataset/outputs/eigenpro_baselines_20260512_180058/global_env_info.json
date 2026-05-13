@@ -1,0 +1,59 @@
+{
+  "timestamp": "2026-05-12T18:00:58.566688",
+  "python": "3.12.3 | packaged by conda-forge | (main, Apr 15 2024, 18:20:11) [MSC v.1938 64 bit (AMD64)]",
+  "platform": "win32",
+  "torch": "2.5.1+cu124",
+  "cuda_available": true,
+  "cuda_device": "NVIDIA GeForce RTX 3050 Laptop GPU",
+  "processed_data_dir": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed",
+  "dataset_selection": [
+    "synthetic_true_func_2d_n100000",
+    "synthetic_true_func_2d_n300000",
+    "synthetic_true_func_2d_n1000000"
+  ],
+  "method_specs": [
+    {
+      "method": "EigenPro2",
+      "method_key": "ep2",
+      "enabled": true,
+      "epochs": 40,
+      "max_train": null,
+      "p_centers": null,
+      "mem_gb": 8.0,
+      "nystrom_samples": null,
+      "data_precond_level": null,
+      "loader_batch_size": null
+    },
+    {
+      "method": "EigenPro3",
+      "method_key": "ep3",
+      "enabled": true,
+      "epochs": 40,
+      "max_train": null,
+      "p_centers": 2000,
+      "mem_gb": null,
+      "nystrom_samples": 512,
+      "data_precond_level": 64,
+      "loader_batch_size": 512
+    }
+  ],
+  "kernel_specs": [
+    {
+      "name": "mat32_ls0.1",
+      "family": "matern",
+      "nu": 1.5,
+      "lengthscale": 0.1,
+      "variance": 1.0
+    },
+    {
+      "name": "gaussian_ls0.1",
+      "family": "gaussian",
+      "lengthscale": 0.1,
+      "variance": 1.0
+    }
+  ],
+  "eval_n": 10000,
+  "predict_batch_size": 2048,
+  "center_chunk": 8192,
+  "repeats": 1
+}
