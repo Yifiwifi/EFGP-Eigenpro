@@ -138,6 +138,10 @@ class AccuracyBenchmarkConfig:
     ep3_nystrom_samples: int = 512
     ep3_data_precond_level: int = 64
     ep3_loader_batch_size: int = 512
+    ep3_lr_scale: float = 0.01
+    ep3_stop_on_divergence: bool = True
+    ep3_divergence_abs_rmse: float = 5.0
+    ep3_divergence_target_factor: float = 50.0
     predict_batch_size: int = 2048
     center_chunk: int = 8192
     run_tag: str = field(default_factory=lambda: datetime.now().strftime("accuracy_baselines_%Y%m%d_%H%M%S"))
@@ -882,6 +886,14 @@ def _is_ep2_divergent(val_rmse: float, target_val_rmse_std: float, cfg: Accuracy
     return float(val_rmse) > threshold
 
 
+def _is_ep3_divergent(val_rmse: float, target_val_rmse_std: float, cfg: AccuracyBenchmarkConfig) -> bool:
+    if not np.isfinite(float(val_rmse)):
+        return True
+    target_threshold = float(cfg.ep3_divergence_target_factor) * max(float(target_val_rmse_std), 1e-12)
+    threshold = max(float(cfg.ep3_divergence_abs_rmse), target_threshold)
+    return float(val_rmse) > threshold
+
+
 def _predict_ep2(model, x: np.ndarray, device: torch.device, batch_size: int, weight_cpu=None) -> np.ndarray:
     x_t = torch.as_tensor(x, dtype=torch.float32)
     weight = None if weight_cpu is None else weight_cpu.to(device)
@@ -1137,6 +1149,9 @@ def run_eigenpro3_target_case(
         n_nystrom_samples=ns,
         data_preconditioner_level=int(cfg.ep3_data_precond_level),
     )
+    ep3_lr_raw = float(model.lr.detach().cpu().item() if torch.is_tensor(model.lr) else model.lr)
+    ep3_lr_effective = float(cfg.ep3_lr_scale) * ep3_lr_raw
+    model.lr = torch.as_tensor(ep3_lr_effective, dtype=torch.float32, device=device)
     setup_time = float(time.perf_counter() - setup_start)
 
     elapsed_fit = setup_time
@@ -1153,6 +1168,7 @@ def run_eigenpro3_target_case(
     target_fit = float("nan")
     target_wall = float("nan")
     target_epoch = float("nan")
+    stop_reason = ""
 
     for epoch in range(1, int(cfg.max_epochs) + 1):
         epoch_start = time.perf_counter()
@@ -1187,6 +1203,12 @@ def run_eigenpro3_target_case(
             "validation_eval_time_s": float(val_eval_time),
             "val_rmse_std": float(val_metrics["rmse_std"]),
             "accepted_epoch": True,
+            "ep3_lr_scale": float(cfg.ep3_lr_scale),
+            "ep3_lr_raw": float(ep3_lr_raw),
+            "ep3_lr_effective": float(ep3_lr_effective),
+            "ep3_batch_size": int(model.batch_size),
+            "ep3_nystrom_samples": int(ns),
+            "ep3_data_precond_level": int(cfg.ep3_data_precond_level),
         }
         history.append(hist_row)
         val_rmse = float(hist_row["val_rmse_std"])
@@ -1214,6 +1236,10 @@ def run_eigenpro3_target_case(
             target_wall = float(elapsed_wall)
             target_epoch = int(epoch)
             break
+        if bool(cfg.ep3_stop_on_divergence) and _is_ep3_divergent(val_rmse, target_val_rmse_std, cfg):
+            hist_row["stopped_reason"] = "diverged"
+            stop_reason = "diverged"
+            break
 
     if best_row is None:
         best_row = _select_best_history(history)
@@ -1239,6 +1265,11 @@ def run_eigenpro3_target_case(
         ),
     )
     summary["device"] = str(device)
+    summary["ep3_lr_scale"] = float(cfg.ep3_lr_scale)
+    summary["ep3_lr_raw"] = float(ep3_lr_raw)
+    summary["ep3_lr_effective"] = float(ep3_lr_effective)
+    if stop_reason:
+        summary["stopped_reason"] = stop_reason
     budget = _finalize_budget_summary(
         dataset_payload,
         split,
