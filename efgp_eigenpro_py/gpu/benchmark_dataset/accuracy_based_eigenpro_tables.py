@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import gc
+import contextlib
+import io
 import importlib
 import json
 import math
@@ -120,11 +122,12 @@ class AccuracyBenchmarkConfig:
     eigenpro3_p_centers_list: list[int] = field(
         default_factory=lambda: [10_000, 30_000, 100_000, 300_000]
     )
-    eigenpro2_enabled: bool = True
+    eigenpro2_enabled: bool = False
     eigenpro3_enabled: bool = True
     efgp_cg_enabled: bool = True
     ours_enabled: bool = True
     add_fastest_ours_row: bool = True
+    print_epoch_progress: bool = True
     ep2_mem_gb: float = 8.0
     ep2_top_q: int | None = None
     ep2_n_subsamples: int | None = None
@@ -713,6 +716,29 @@ def _make_fastest_ours_summary_row(rows_for_q: list[dict[str, Any]]) -> dict[str
     return derived
 
 
+def _maybe_print_epoch_progress(
+    cfg: AccuracyBenchmarkConfig,
+    *,
+    method: str,
+    epoch: int,
+    val_rmse: float,
+    elapsed_fit: float,
+    elapsed_wall: float,
+    target_val_rmse_std: float,
+    p: int | None = None,
+) -> None:
+    if not bool(cfg.print_epoch_progress):
+        return
+    p_text = "" if p is None else f" p={int(p)}"
+    target = (1.0 + float(cfg.target_delta)) * float(target_val_rmse_std)
+    print(
+        f"{method}{p_text} epoch {int(epoch)}/{int(cfg.max_epochs)} "
+        f"val_rmse_std={float(val_rmse):.6g} target={target:.6g} "
+        f"fit_s={float(elapsed_fit):.2f} wall_s={float(elapsed_wall):.2f}",
+        flush=True,
+    )
+
+
 def run_fixed_efgp_case(
     dataset_payload: dict[str, Any],
     split: dict[str, np.ndarray],
@@ -971,6 +997,16 @@ def run_eigenpro2_target_case(
         }
         history.append(hist_row)
         val_rmse = float(hist_row["val_rmse_std"])
+        _maybe_print_epoch_progress(
+            cfg,
+            method="EigenPro2",
+            epoch=epoch,
+            val_rmse=val_rmse,
+            elapsed_fit=elapsed_fit,
+            elapsed_wall=elapsed_wall,
+            target_val_rmse_std=target_val_rmse_std,
+            p=int(x_train.shape[0]),
+        )
         if val_rmse < best_val:
             best_val = val_rmse
             best_row = hist_row
@@ -1005,6 +1041,7 @@ def run_eigenpro2_target_case(
         best_row=best_row,
         predict_fn=lambda x: _predict_ep2(model, x, device, int(cfg.predict_batch_size), best_weight),
     )
+    summary["device"] = str(device)
     if stop_reason:
         summary["stopped_reason"] = stop_reason
     budget = _finalize_budget_summary(
@@ -1120,7 +1157,8 @@ def run_eigenpro3_target_case(
     for epoch in range(1, int(cfg.max_epochs) + 1):
         epoch_start = time.perf_counter()
         model.epoch = epoch - 1
-        model.fit_epoch([train_loader])
+        with contextlib.redirect_stdout(io.StringIO()):
+            model.fit_epoch([train_loader])
         _sync_gpu()
         epoch_fit = float(time.perf_counter() - epoch_start)
         elapsed_fit += epoch_fit
@@ -1152,6 +1190,16 @@ def run_eigenpro3_target_case(
         }
         history.append(hist_row)
         val_rmse = float(hist_row["val_rmse_std"])
+        _maybe_print_epoch_progress(
+            cfg,
+            method="EigenPro3",
+            epoch=epoch,
+            val_rmse=val_rmse,
+            elapsed_fit=elapsed_fit,
+            elapsed_wall=elapsed_wall,
+            target_val_rmse_std=target_val_rmse_std,
+            p=int(p_eff),
+        )
         if val_rmse < best_val:
             best_val = val_rmse
             best_row = hist_row
@@ -1190,6 +1238,7 @@ def run_eigenpro3_target_case(
             center_chunk=int(cfg.center_chunk),
         ),
     )
+    summary["device"] = str(device)
     budget = _finalize_budget_summary(
         dataset_payload,
         split,
