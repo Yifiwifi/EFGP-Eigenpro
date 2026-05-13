@@ -79,7 +79,7 @@ class AccuracyBenchmarkConfig:
     l2_scaled: bool = True
     gpu_nufft: str = "auto"
     precompute_methods: dict[str, str] = field(
-        default_factory=lambda: {"EFGP-CG": "original", "ours": "c1"}
+        default_factory=lambda: {"EFGP-CG": "original", "default": "c1"}
     )
     precompute_c1_min_n_total: int | None = None
     binned_quality: str = "balanced"
@@ -124,6 +124,7 @@ class AccuracyBenchmarkConfig:
     eigenpro3_enabled: bool = True
     efgp_cg_enabled: bool = True
     ours_enabled: bool = True
+    add_fastest_ours_row: bool = True
     ep2_mem_gb: float = 8.0
     ep2_top_q: int | None = None
     ep2_n_subsamples: int | None = None
@@ -591,8 +592,8 @@ def install_gpu_precompute_patch(cfg: AccuracyBenchmarkConfig) -> None:
 
 
 def _resolve_precompute_method(method_name: str, dataset_payload: dict[str, Any], cfg: AccuracyBenchmarkConfig) -> str:
-    policy_key = "ours" if str(method_name).startswith("ours") else str(method_name)
-    requested = str(cfg.precompute_methods.get(policy_key, "original")).strip().lower()
+    method = str(method_name)
+    requested = str(cfg.precompute_methods.get(method, cfg.precompute_methods.get("default", "c1"))).strip().lower()
     if requested == "c1":
         threshold = cfg.precompute_c1_min_n_total
         if threshold is not None and int(dataset_payload["n_total"]) < int(threshold):
@@ -667,7 +668,7 @@ def build_fixed_efgp_method_specs(cfg: AccuracyBenchmarkConfig) -> list[dict[str
     if bool(cfg.ours_enabled) and _eig_enabled(cfg, "nystrom_compact_coordinate"):
         specs.extend(
             {
-                "method": f"ours_q{int(q)}",
+                "method": "gpu_v3_topq_eigenpro_nystrom",
                 "method_variant": "nystrom_compact_coordinate",
                 "top_q": int(q),
             }
@@ -685,6 +686,33 @@ def build_fixed_efgp_method_specs(cfg: AccuracyBenchmarkConfig) -> list[dict[str
     return specs
 
 
+def _fixed_efgp_time_key(row: dict[str, Any]) -> float:
+    for key in ("wall_time_to_target_s", "time_train_s", "fit_time_to_target_s"):
+        value = row.get(key, np.nan)
+        try:
+            value_f = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value_f):
+            return value_f
+    return float("inf")
+
+
+def _make_fastest_ours_summary_row(rows_for_q: list[dict[str, Any]]) -> dict[str, Any] | None:
+    ok_rows = [r for r in rows_for_q if str(r.get("status", "")) == "ok" and np.isfinite(_fixed_efgp_time_key(r))]
+    if not ok_rows:
+        return None
+    selected = min(ok_rows, key=_fixed_efgp_time_key)
+    derived = dict(selected)
+    derived["method"] = "ours"
+    derived["method_variant"] = "fastest_efgp_family"
+    derived["selected_method"] = selected.get("method", "")
+    derived["selected_method_variant"] = selected.get("method_variant", "")
+    derived["selected_top_q"] = selected.get("top_q", np.nan)
+    derived["is_derived_ours"] = True
+    return derived
+
+
 def run_fixed_efgp_case(
     dataset_payload: dict[str, Any],
     split: dict[str, np.ndarray],
@@ -700,8 +728,7 @@ def run_fixed_efgp_case(
     global _BENCHMARK_PC_METHOD_ACTIVE
 
     method = str(method_name)
-    policy_key = "ours" if method.startswith("ours") else method
-    requested_precompute = str(cfg.precompute_methods.get(policy_key, "original")).lower()
+    requested_precompute = str(cfg.precompute_methods.get(method, cfg.precompute_methods.get("default", "c1"))).lower()
     effective_precompute = _resolve_precompute_method(method, dataset_payload, cfg)
     kernel = make_efgp_kernel(kernel_cfg, int(dataset_payload["dim"]))
     solver = EFGPSolver(
@@ -1310,7 +1337,9 @@ def _fixed_budget_row_from_summary(summary: dict[str, Any], time_budget_s: float
     within = float(summary.get("time_train_s", np.inf)) <= float(time_budget_s)
     return {
         "method": summary["method"],
+        "method_variant": summary.get("method_variant", np.nan),
         "p": summary.get("p", np.nan),
+        "top_q": summary.get("top_q", np.nan),
         "time_budget_source": "EFGP-CG",
         "time_budget_s": float(time_budget_s),
         "best_val_rmse_std_within_budget": float(summary["best_val_rmse_std"]) if within else np.nan,
@@ -1320,6 +1349,10 @@ def _fixed_budget_row_from_summary(summary: dict[str, Any], time_budget_s: float
         "test_r2_at_best_val": float(summary["test_r2"]) if within else np.nan,
         "test_rmse_meter_at_best_val": float(summary["test_rmse_meter"]) if within else np.nan,
         "test_mae_meter_at_best_val": float(summary["test_mae_meter"]) if within else np.nan,
+        "selected_method": summary.get("selected_method", np.nan),
+        "selected_method_variant": summary.get("selected_method_variant", np.nan),
+        "selected_top_q": summary.get("selected_top_q", np.nan),
+        "is_derived_ours": bool(summary.get("is_derived_ours", False)),
     }
 
 
@@ -1335,7 +1368,7 @@ def run_accuracy_benchmark(cfg: AccuracyBenchmarkConfig | None = None) -> dict[s
     history_path = out_dir / "raw_eval_history.csv"
 
     config_payload = asdict(cfg)
-    config_payload["precompute_policy_note"] = "EFGP-CG uses original; ours_q* requests c1 by default. Set precompute_c1_min_n_total to force small datasets back to original."
+    config_payload["precompute_policy_note"] = "Only EFGP-CG/gpu_v1_topq0 uses original by default; all other EFGP-family rows request c1. Set precompute_c1_min_n_total to force small datasets back to original."
     config_path.write_text(json.dumps(config_payload, indent=2), encoding="utf-8")
 
     summary_rows: list[dict[str, Any]] = []
@@ -1391,11 +1424,12 @@ def run_accuracy_benchmark(cfg: AccuracyBenchmarkConfig | None = None) -> dict[s
                     time_budget_s = float(target_row.get("time_train_s", target_row.get("fit_time_to_target_s", np.nan)))
                     budget_rows.append({**base, **_fixed_budget_row_from_summary(target_row, time_budget_s)})
 
+                    fixed_rows_by_q: dict[int, list[dict[str, Any]]] = {}
                     for fixed_spec in build_fixed_efgp_method_specs(cfg):
                         method_name = str(fixed_spec["method"])
                         method_variant = str(fixed_spec["method_variant"])
                         q = int(fixed_spec["top_q"])
-                        if method_name.startswith("ours") and not bool(cfg.ours_enabled):
+                        if method_variant == "nystrom_compact_coordinate" and not bool(cfg.ours_enabled):
                             continue
                         try:
                             fixed = run_fixed_efgp_case(
@@ -1414,6 +1448,7 @@ def run_accuracy_benchmark(cfg: AccuracyBenchmarkConfig | None = None) -> dict[s
                             )
                             row = {**base, **fixed, "target_val_rmse_std": target_val}
                             summary_rows.append(row)
+                            fixed_rows_by_q.setdefault(int(q), []).append(row)
                             budget_rows.append({**base, **_fixed_budget_row_from_summary(row, time_budget_s)})
                         except Exception as exc:
                             traceback.print_exc()
@@ -1432,6 +1467,16 @@ def run_accuracy_benchmark(cfg: AccuracyBenchmarkConfig | None = None) -> dict[s
                         finally:
                             pd.DataFrame(summary_rows).to_csv(time_to_target_path, index=False)
                             pd.DataFrame(budget_rows).to_csv(same_budget_path, index=False)
+
+                    if bool(cfg.add_fastest_ours_row):
+                        for q in sorted(fixed_rows_by_q):
+                            fastest_ours = _make_fastest_ours_summary_row(fixed_rows_by_q[q])
+                            if fastest_ours is None:
+                                continue
+                            summary_rows.append(fastest_ours)
+                            budget_rows.append({**base, **_fixed_budget_row_from_summary(fastest_ours, time_budget_s)})
+                        pd.DataFrame(summary_rows).to_csv(time_to_target_path, index=False)
+                        pd.DataFrame(budget_rows).to_csv(same_budget_path, index=False)
 
                     if cfg.eigenpro2_enabled:
                         try:
