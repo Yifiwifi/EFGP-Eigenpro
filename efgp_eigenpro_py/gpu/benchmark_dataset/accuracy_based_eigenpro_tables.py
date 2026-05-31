@@ -70,7 +70,7 @@ class AccuracyBenchmarkConfig:
     train_core_fraction: float = 0.9
     n_val_eval: int = 100_000
     n_test_eval: int = 100_000
-    target_delta: float = 0.02
+    target_delta: float = 0.01
     target_window: int = 3
     max_epochs: int = 40
     repeats: int = 1
