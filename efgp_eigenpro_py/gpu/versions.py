@@ -110,6 +110,11 @@ def run_v1_pure_efgp(
             "t_matvec_avg": float(cg_stats["t_matvec_avg"]),
             "t_matvec_total": float(cg_stats["t_matvec_total"]),
             "n_matvec": int(cg_stats["n_matvec"]),
+            # Explicit naming for clarity in benchmark tables: these matvecs are from CG solve.
+            "cg_n_matvec": int(cg_stats["n_matvec"]),
+            # V1 has no eigenspace / preconditioner estimation stage.
+            "eigen_n_matvec": 0,
+            "eigen_apply_A_block_calls": 0,
             "device_name": backend.device_name,
             "has_nufft": backend.has_nufft,
             "chunk_size": cfg.chunk_size,
@@ -284,6 +289,12 @@ def run_v3_full_gpu_eigenspace(
         eig_cfg.method_cfg.setdefault("data_ctx", data_ctx)
         eig_cfg.method_cfg.setdefault("reg_lambda", float(cfg.reg_lambda))
 
+    # Count matvecs used during eigenspace / preconditioner estimation separately from CG/PCG solve.
+    # Our `_apply_A_block` implementation calls `apply_A_v1` once per column, so we count scalar matvecs
+    # as the number of columns processed in each block call.
+    eigen_apply_A_block_calls = 0
+    eigen_n_matvec = 0
+
     def _apply_A_block(v_block: Any) -> Any:
         from .v1_ops import apply_A_v1
 
@@ -303,9 +314,20 @@ def run_v3_full_gpu_eigenspace(
             )
         return out_block
 
+    def _apply_A_block_counted(v_block: Any) -> Any:
+        nonlocal eigen_apply_A_block_calls, eigen_n_matvec
+        try:
+            ndim = int(getattr(v_block, "ndim", 1))
+            cols = 1 if ndim == 1 else int(getattr(v_block, "shape")[1])
+        except Exception:
+            cols = 1
+        eigen_apply_A_block_calls += 1
+        eigen_n_matvec += int(cols)
+        return _apply_A_block(v_block)
+
     vals_gpu, vecs_gpu, eig_diag = estimate_top_eigenspace_v3(
         backend=backend,
-        apply_A_block_gpu=_apply_A_block,
+        apply_A_block_gpu=_apply_A_block_counted,
         size=int(data_ctx.rhs_gpu.size),
         cfg=eig_cfg,
     )
@@ -434,9 +456,14 @@ def run_v3_full_gpu_eigenspace(
             "lambda1_coord_nystrom": float(eig_diag.get("lambda1_coord_nystrom", float("nan"))),
             "theta_coord_topq": eig_diag.get("theta_coord_topq", []),
             "injected_eps_coord_topq": eig_diag.get("injected_eps_coord_topq", []),
+            # Estimation-stage matvec accounting (eigenspace / preconditioner construction).
+            "eigen_n_matvec": int(eigen_n_matvec),
+            "eigen_apply_A_block_calls": int(eigen_apply_A_block_calls),
             "t_matvec_avg": float(stats["t_matvec_avg"]),
             "t_matvec_total": float(stats["t_matvec_total"]),
             "n_matvec": int(stats["n_matvec"]),
+            # Explicit alias for clarity: these matvecs are from CG/PCG solve.
+            "cg_n_matvec": int(stats["n_matvec"]),
             "t_precond_total": float(stats["t_precond_total"]),
             "t_precond_avg": float(stats["t_precond_avg"]),
             "n_precond": int(stats["n_precond"]),

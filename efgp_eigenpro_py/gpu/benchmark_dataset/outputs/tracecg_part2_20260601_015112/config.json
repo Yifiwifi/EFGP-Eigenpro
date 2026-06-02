@@ -1,0 +1,37 @@
+{
+  "timestamp": "2026-06-01T01:51:21.586808",
+  "out_tag": "tracecg_part2_20260601_015112",
+  "datasets": [
+    "synthetic_true_func_2d_n100000",
+    "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain100000"
+  ],
+  "kernels": [
+    {
+      "name": "mat32_ls0.1",
+      "family": "matern",
+      "nu": 1.5,
+      "lengthscale": 0.1,
+      "variance": 1.0
+    }
+  ],
+  "methods": [
+    {
+      "name": "unprecond_cg",
+      "top_q": 0
+    },
+    {
+      "name": "full_eigenpro",
+      "top_q": 45
+    },
+    {
+      "name": "coord_nystrom",
+      "top_q": 45
+    }
+  ],
+  "trace_every": 10,
+  "trace_val_eval": 5000,
+  "eps": 1e-05,
+  "reg_lambda": 0.1,
+  "solve_tol": 1e-06,
+  "solve_maxiter": 4000
+}

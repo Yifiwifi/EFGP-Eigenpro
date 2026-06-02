@@ -1,0 +1,107 @@
+{
+  "dataset_stems": [
+    "synthetic_true_func_2d_n100000",
+    "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain100000"
+  ],
+  "kernel_specs": [
+    {
+      "name": "mat32_ls0.1",
+      "family": "matern",
+      "nu": 1.5,
+      "lengthscale": 0.1,
+      "variance": 1.0
+    }
+  ],
+  "seed_base": 0,
+  "train_core_fraction": 0.9,
+  "n_val_eval": 20000,
+  "n_test_eval": 20000,
+  "target_delta": 0.02,
+  "target_window": 3,
+  "max_epochs": 8,
+  "repeats": 1,
+  "reg_lambda": 0.1,
+  "solve_tol": 1e-06,
+  "gpu_maxiter": 6000,
+  "eps_list": [
+    1e-05
+  ],
+  "l2_scaled": true,
+  "gpu_nufft": "auto",
+  "precompute_methods": {
+    "EFGP-CG": "original",
+    "default": "c1"
+  },
+  "precompute_c1_min_n_total": null,
+  "binned_quality": "balanced",
+  "binned_use_sparse_bins": false,
+  "binned_use_gpu_dense_bins": true,
+  "binned_allow_exact_nufft_fallback": false,
+  "binned_nufft_allow_cpu_fallback": false,
+  "binned_r_user": null,
+  "v3_topq_list": [
+    45,
+    90
+  ],
+  "nystrom_topq_list": [
+    45,
+    90
+  ],
+  "extra_topq_list": [
+    45
+  ],
+  "eig_method_toggles": {
+    "baseline_v1_topq0": true,
+    "baseline_v3_topq": true,
+    "nystrom_compact_coordinate": true,
+    "extra_rand_range_onepass": true
+  },
+  "v3_oversample": 16,
+  "v3_n_iter": 3,
+  "eigenpro_nystrom_precond_kind": "coordinate_nystrom",
+  "eigenpro_nystrom_refine_mode": "auto",
+  "eigenpro_nystrom_surrogate_size": 1600,
+  "eigenpro_nystrom_lowfreq_ratio": 0.5,
+  "eigenpro_nystrom_oversample": 10,
+  "eigenpro_nystrom_ritz_refine": true,
+  "eigenpro_nystrom_seed": 0,
+  "eigenpro_nystrom_block_rows": 8192,
+  "eigenpro_nystrom_ritz_block_cols": 16,
+  "eigenpro_nystrom_lift": true,
+  "eigenpro_nystrom_refine_iters": 1,
+  "eigenpro_coord_nystrom_gamma": 1.0,
+  "extra_rand_range_oversample": 16,
+  "extra_rand_range_power_iters": 0,
+  "extra_rand_range_omega_kind": "gaussian",
+  "extra_rand_range_block_cols": 16,
+  "eigenpro3_p_centers_list": [
+    10000,
+    30000,
+    100000,
+    300000
+  ],
+  "eigenpro2_enabled": false,
+  "eigenpro3_enabled": false,
+  "efgp_cg_enabled": true,
+  "ours_enabled": true,
+  "add_fastest_ours_row": true,
+  "print_epoch_progress": true,
+  "ep2_mem_gb": 8.0,
+  "ep2_top_q": null,
+  "ep2_n_subsamples": null,
+  "ep2_lr_scale": 0.01,
+  "ep2_stop_on_divergence": true,
+  "ep2_divergence_abs_rmse": 5.0,
+  "ep2_divergence_target_factor": 50.0,
+  "ep3_nystrom_samples": 512,
+  "ep3_data_precond_level": 64,
+  "ep3_loader_batch_size": 512,
+  "ep3_lr_scale": 1.0,
+  "ep3_stop_on_divergence": true,
+  "ep3_divergence_abs_rmse": 5.0,
+  "ep3_divergence_target_factor": 50.0,
+  "predict_batch_size": 2048,
+  "center_chunk": 8192,
+  "run_tag": "tracecg_ttt_td0p02_20260601_015020",
+  "precompute_policy_note": "Only EFGP-CG/gpu_v1_topq0 uses original by default; all other EFGP-family rows request c1. Set precompute_c1_min_n_total to force small datasets back to original."
+}

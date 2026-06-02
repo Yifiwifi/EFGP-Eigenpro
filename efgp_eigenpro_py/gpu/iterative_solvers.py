@@ -31,8 +31,16 @@ def cg_solve_gpu(
     work_prefix: str = "cg",
 ) -> tuple[Any, int, float] | tuple[Any, int, float, dict[str, float]]:
     xp = backend.xp
-    dtype = xp.complex128
-    b = xp.asarray(b, dtype=dtype).reshape(-1)
+    solve_dtype = getattr(op_ctx, "solve_dtype", None)
+    if solve_dtype is None:
+        solve_dtype = getattr(backend, "dtype", None)
+    b = xp.asarray(b).reshape(-1)
+    dtype = xp.dtype(b.dtype if solve_dtype is None else solve_dtype)
+    if dtype.kind in ("b", "i", "u"):
+        dtype = xp.dtype(xp.float64)
+    elif dtype == xp.dtype(xp.float16):
+        dtype = xp.dtype(xp.float32)
+    b = b.astype(dtype, copy=False)
     n = int(b.size)
 
     x = _ensure_workspace_vector(op_ctx, xp, f"{work_prefix}_x", n, dtype)
@@ -89,9 +97,8 @@ def cg_solve_gpu(
         if rel < tol:
             break
         beta = rsnew / max(rsold, 1e-30)
-        xp.multiply(p, beta, out=Ap)
-        Ap += r
-        xp.copyto(p, Ap)
+        p *= beta
+        p += r
         rsold = rsnew
 
     relres = float(backend.linalg.norm(r) / norm_b)
@@ -118,8 +125,16 @@ def pcg_solve_gpu(
     work_prefix: str = "pcg",
 ) -> tuple[Any, int, float] | tuple[Any, int, float, dict[str, float]]:
     xp = backend.xp
-    dtype = xp.complex128
-    b = xp.asarray(b, dtype=dtype).reshape(-1)
+    solve_dtype = getattr(op_ctx, "solve_dtype", None)
+    if solve_dtype is None:
+        solve_dtype = getattr(backend, "dtype", None)
+    b = xp.asarray(b).reshape(-1)
+    dtype = xp.dtype(b.dtype if solve_dtype is None else solve_dtype)
+    if dtype.kind in ("b", "i", "u"):
+        dtype = xp.dtype(xp.float64)
+    elif dtype == xp.dtype(xp.float16):
+        dtype = xp.dtype(xp.float32)
+    b = b.astype(dtype, copy=False)
     n = int(b.size)
 
     x = _ensure_workspace_vector(op_ctx, xp, f"{work_prefix}_x", n, dtype)
@@ -187,15 +202,15 @@ def pcg_solve_gpu(
         alpha = rzold / denom
         x += alpha * p
         r -= alpha * Ap
-        rel = float(backend.linalg.norm(r) / norm_b)
+        rrnew = float(xp.real(backend.linalg.vdot(r, r)))
+        rel = math.sqrt(max(rrnew, 0.0)) / norm_b 
         if rel < tol:
             break
         _precond_in(r, z)
         rznew = float(xp.real(backend.linalg.vdot(r, z)))
         beta = rznew / max(rzold, 1e-30)
-        xp.multiply(p, beta, out=Ap)
-        Ap += z
-        xp.copyto(p, Ap)
+        p *= beta
+        p += z
         rzold = rznew
 
     relres = float(backend.linalg.norm(r) / norm_b)

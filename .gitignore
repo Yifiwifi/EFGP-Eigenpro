@@ -1,8 +1,18 @@
 
 efgp_eigenpro_py/gpu/benchmark dataset/household_power_consumption.txt
-
-efgp_eigenpro_py/gpu/benchmark dataset/household_power_consumption.txt
 # benchmark processed large arrays
 efgp_eigenpro_py/gpu/benchmark_dataset/processed/*.npz
 
 efgp_eigenpro_py/gpu/benchmark_dataset/raw/USGS_LPC_IL_Winnebago_2018/*.laz
+
+# archives
+*.zip
+*.7z
+*.rar
+# python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+# notebooks
+.ipynb_checkpoints/
