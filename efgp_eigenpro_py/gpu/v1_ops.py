@@ -83,6 +83,22 @@ def _dtype_complex(xp: Any) -> Any:
     return xp.complex128
 
 
+def _ctx_complex_dtype(xp: Any, data_ctx: Optional[GPUDataContext]) -> Any:
+    """
+    Complex working dtype for the matvec, optionally lowered via
+    ``data_ctx.meta['complex_dtype']`` (e.g. for a low-fidelity float32 operator).
+    Defaults to complex128; the high-fidelity path is unaffected.
+    """
+    cd = None
+    if data_ctx is not None:
+        cd = data_ctx.meta.get("complex_dtype")
+    if cd is None:
+        return xp.complex128
+    if cd in ("complex64", "single", "c8") or cd is getattr(xp, "complex64", None):
+        return xp.complex64
+    return xp.complex128
+
+
 def _finite_checks_enabled(data_ctx: GPUDataContext) -> bool:
     return bool(data_ctx.meta.get("debug_finite_checks", False))
 
@@ -146,7 +162,7 @@ def _apply_A_hot_1d_gpu(
     if w_flat is None or gf is None:
         raise RuntimeError("gpu_precompute_v1 must run before apply_A_v1.")
     mtot = int(data_ctx.meta["mtot"])
-    dtype = _dtype_complex(xp)
+    dtype = _ctx_complex_dtype(xp, data_ctx)
 
     w_buf = _ensure_workspace_vector(op_ctx, xp, "cg_tmp", v_gpu.size, dtype)
     xp.multiply(w_flat, v_gpu, out=w_buf)
@@ -186,7 +202,7 @@ def _apply_A_hot_2d_gpu(
     if w_flat is None or gf is None:
         raise RuntimeError("gpu_precompute_v1 must run before apply_A_v1.")
     mtot = int(data_ctx.meta["mtot"])
-    dtype = _dtype_complex(xp)
+    dtype = _ctx_complex_dtype(xp, data_ctx)
 
     w_buf = _ensure_workspace_vector(op_ctx, xp, "cg_tmp", v_gpu.size, dtype)
     xp.multiply(w_flat, v_gpu, out=w_buf)
@@ -228,7 +244,7 @@ def _apply_A_nd_gpu(
     if w_flat is None or gf is None:
         raise RuntimeError("gpu_precompute_v1 must run before apply_A_v1.")
     mtot = int(data_ctx.meta["mtot"])
-    dtype = _dtype_complex(xp)
+    dtype = _ctx_complex_dtype(xp, data_ctx)
 
     w_buf = _ensure_workspace_vector(op_ctx, xp, "cg_tmp", v_gpu.size, dtype)
     xp.multiply(w_flat, v_gpu, out=w_buf)
@@ -269,7 +285,7 @@ def apply_A_v1(
     If ``out`` is given, the result is written there (same shape as ``v``).
     """
     xp = backend.xp
-    v_gpu = xp.asarray(v_gpu, dtype=_dtype_complex(xp)).reshape(-1)
+    v_gpu = xp.asarray(v_gpu, dtype=_ctx_complex_dtype(xp, data_ctx)).reshape(-1)
     dim = int(data_ctx.meta.get("dim", 0))
     if dim < 1:
         raise RuntimeError("Invalid spatial dimension in GPUDataContext meta['dim'].")
@@ -283,6 +299,183 @@ def apply_A_v1(
         xp.copyto(out, res)
         return out
     return res
+
+
+def _gpu_free_memory_bytes(xp: Any) -> Optional[int]:
+    try:
+        cuda = getattr(xp, "cuda", None)
+        if cuda is None:
+            return None
+        free_bytes, _total_bytes = cuda.runtime.memGetInfo()
+        return int(free_bytes)
+    except Exception:
+        return None
+
+
+def _choose_block_cols(
+    xp: Any,
+    gf_shape: tuple[int, ...],
+    dtype: Any,
+    requested: Any,
+    n_cols: int,
+    max_workspace_GB: Optional[float],
+) -> int:
+    if requested not in (None, "auto"):
+        return max(1, min(int(requested), int(n_cols)))
+    itemsize = int(xp.dtype(dtype).itemsize)
+    spatial = 1
+    for s in gf_shape:
+        spatial *= int(s)
+    budget = None
+    if max_workspace_GB is not None:
+        budget = float(max_workspace_GB) * (1024.0**3)
+    else:
+        free_bytes = _gpu_free_memory_bytes(xp)
+        if free_bytes is not None:
+            budget = 0.5 * float(free_bytes)
+    if budget is None or budget <= 0.0:
+        return max(1, min(8, int(n_cols)))
+    factor = 5.0
+    b = int(max(1, budget // max(spatial * itemsize * factor, 1)))
+    return max(1, min(b, int(n_cols)))
+
+
+def _ensure_workspace_pad_block(
+    op_ctx: GPUOperatorContext,
+    xp: Any,
+    shape: tuple[int, ...],
+    dtype: Any,
+) -> Any:
+    buf = getattr(op_ctx, "pad_block", None)
+    if buf is None or tuple(getattr(buf, "shape", ())) != tuple(shape) or buf.dtype != dtype:
+        buf = xp.empty(shape, dtype=dtype)
+        setattr(op_ctx, "pad_block", buf)
+    return buf
+
+
+def _apply_A_block_v1_once(
+    backend: GPUBackendBundle,
+    data_ctx: GPUDataContext,
+    V: Any,
+    reg_lambda: float,
+    op_ctx: GPUOperatorContext,
+) -> Any:
+    xp = backend.xp
+    w_flat = data_ctx.weights_gpu_flat
+    gf = data_ctx.gf_gpu
+    if w_flat is None or gf is None:
+        raise RuntimeError("gpu_precompute_v1 must run before apply_A_block_v1.")
+    mtot = int(data_ctx.meta["mtot"])
+    dim = int(data_ctx.meta["dim"])
+    dtype = _ctx_complex_dtype(xp, data_ctx)
+    V = xp.asarray(V, dtype=dtype)
+    if V.ndim == 1:
+        V = V.reshape(-1, 1)
+    if V.ndim != 2:
+        raise ValueError("V must be 1D or 2D.")
+    n, b = int(V.shape[0]), int(V.shape[1])
+    expected_n = int(mtot) ** int(dim)
+    if n != expected_n:
+        raise ValueError(f"V has incompatible row count {n}; expected {expected_n}.")
+
+    U = xp.asarray(w_flat, dtype=dtype).reshape(-1, 1) * V
+    U_nd = U.reshape((mtot,) * dim + (b,))
+    pad_shape = tuple(int(s) for s in gf.shape) + (b,)
+    pad = _ensure_workspace_pad_block(op_ctx, xp, pad_shape, xp.dtype(gf.dtype))
+    pad.fill(0)
+    pad[tuple(slice(0, mtot) for _ in range(dim)) + (slice(None),)] = U_nd
+
+    axes = tuple(range(dim))
+    af = backend.fft.fftn(pad, axes=axes)
+    gf_exp = xp.asarray(gf)[(slice(None),) * dim + (None,)]
+    gmax = data_ctx.meta.get("gf_absmax")
+    gmax = float(gmax) if gmax is not None else float(xp.max(xp.abs(gf)))
+    if math.isfinite(gmax):
+        finf = np.finfo(np.float64).max
+        safe = 0.25 * finf / max(gmax, 1e-300)
+        amax_dev = xp.max(xp.abs(af))
+        scale_dev = xp.maximum(1.0, amax_dev / safe)
+        ypad = backend.fft.ifftn((af / scale_dev) * gf_exp, axes=axes) * scale_dev
+    else:
+        with _errstate(xp, over="ignore", invalid="ignore"):
+            ypad = backend.fft.ifftn(af * gf_exp, axes=axes)
+    slicer = tuple(slice(mtot - 1, 2 * mtot - 1) for _ in range(dim)) + (slice(None),)
+    Y = ypad[slicer].reshape(n, b)
+    with _errstate(xp, invalid="ignore", over="ignore"):
+        Y = xp.asarray(w_flat, dtype=dtype).reshape(-1, 1) * Y
+    Y = Y + float(reg_lambda) * V
+    return xp.ascontiguousarray(Y)
+
+
+def apply_A_block_v1(
+    backend: GPUBackendBundle,
+    data_ctx: GPUDataContext,
+    V_gpu: Any,
+    reg_lambda: float,
+    op_ctx: GPUOperatorContext,
+    *,
+    block_cols: Any = "auto",
+    max_workspace_GB: Optional[float] = None,
+    out: Optional[Any] = None,
+) -> Any:
+    """
+    Batched GPU matvec for multiple columns.
+
+    Always returns a 2D array of shape ``(n, b)``.  A 1D input is treated as
+    ``(n, 1)``.  The implementation chooses a safe column block size and falls
+    back to smaller blocks / scalar ``apply_A_v1`` if a batched FFT allocation
+    fails.
+    """
+    xp = backend.xp
+    dtype = _ctx_complex_dtype(xp, data_ctx)
+    V = xp.asarray(V_gpu, dtype=dtype)
+    if V.ndim == 1:
+        V = V.reshape(-1, 1)
+    if V.ndim != 2:
+        raise ValueError("V_gpu must be 1D or 2D.")
+    n, btot = int(V.shape[0]), int(V.shape[1])
+    out_arr = out
+    if out_arr is None:
+        out_arr = xp.empty((n, btot), dtype=dtype)
+    else:
+        if tuple(out_arr.shape) != (n, btot):
+            raise ValueError("out must have shape (n, b).")
+    gf = data_ctx.gf_gpu
+    if gf is None:
+        raise RuntimeError("gpu_precompute_v1 must run before apply_A_block_v1.")
+    step0 = _choose_block_cols(
+        xp,
+        tuple(int(s) for s in gf.shape),
+        gf.dtype,
+        block_cols,
+        btot,
+        max_workspace_GB,
+    )
+    lo = 0
+    while lo < btot:
+        step = min(step0, btot - lo)
+        while True:
+            hi = lo + step
+            try:
+                Y = _apply_A_block_v1_once(
+                    backend, data_ctx, V[:, lo:hi], reg_lambda, op_ctx
+                )
+                out_arr[:, lo:hi] = Y
+                break
+            except Exception:
+                if step <= 1:
+                    apply_A_v1(
+                        backend,
+                        data_ctx,
+                        V[:, lo],
+                        reg_lambda,
+                        op_ctx,
+                        out=out_arr[:, lo],
+                    )
+                    break
+                step = max(1, step // 2)
+        lo += step
+    return out_arr
 
 
 def gpu_precompute_v1(
@@ -491,6 +684,7 @@ def solve_beta_plain_cg_v1(
     maxiter: int,
     *,
     return_stats: bool = False,
+    profile_components: bool = True,
 ) -> tuple[Any, int, float] | tuple[Any, int, float, dict[str, float]]:
     """
     Plain CG on GPU with reusable buffers on ``op_ctx``.
@@ -510,4 +704,5 @@ def solve_beta_plain_cg_v1(
         maxiter,
         return_stats=return_stats,
         work_prefix="cg",
+        profile_components=profile_components,
     )

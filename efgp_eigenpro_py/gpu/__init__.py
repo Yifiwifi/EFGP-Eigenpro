@@ -15,6 +15,35 @@ from .versions import (
     run_v2_with_preconditioner_apply,
     run_v3_full_gpu_eigenspace,
     run_v4_dominant_subspace_preconditioner,
+    run_v5_deflated_cg,
+    run_v5_oracle_deflated_cg,
+    run_v6_box_toeplitz_active_block,
+)
+from .box_toeplitz_active_block import BTABConfig
+from .deflation_core import (
+    DeflationData,
+    build_deflation_data,
+    deflation_memory_estimate,
+    make_deflated_matvec,
+    make_jacobi_precond,
+    project_left,
+    recover_solution,
+    run_deflated_cg,
+    run_deflated_pcg,
+    solve_G,
+)
+from .deflation_basis import (
+    CanonicalFreqBasis,
+    CoordNystromBasis,
+    DeflationBasis,
+    DenseBasis,
+    FreqTruncBasis,
+)
+from .deflation_subspace import (
+    build_deflation_subspace,
+    embed_freq,
+    make_coarse_ctx,
+    make_lowprec_ctx,
 )
 from .v2_preconditioner import (
     CoordinateNystromPreconditionerData,
@@ -30,6 +59,7 @@ from .v2_preconditioner import (
 )
 from .iterative_solvers import cg_solve_gpu, pcg_solve_gpu
 from .v1_ops import (
+    apply_A_block_v1,
     apply_A_v1,
     gpu_precompute_v1,
     predict_v1,
@@ -66,6 +96,29 @@ __all__ = [
     "run_v2_with_preconditioner_apply",
     "run_v3_full_gpu_eigenspace",
     "run_v4_dominant_subspace_preconditioner",
+    "run_v5_deflated_cg",
+    "run_v5_oracle_deflated_cg",
+    "run_v6_box_toeplitz_active_block",
+    "BTABConfig",
+    "DeflationData",
+    "build_deflation_data",
+    "deflation_memory_estimate",
+    "make_deflated_matvec",
+    "make_jacobi_precond",
+    "project_left",
+    "recover_solution",
+    "run_deflated_cg",
+    "run_deflated_pcg",
+    "solve_G",
+    "DeflationBasis",
+    "DenseBasis",
+    "CoordNystromBasis",
+    "FreqTruncBasis",
+    "CanonicalFreqBasis",
+    "build_deflation_subspace",
+    "embed_freq",
+    "make_coarse_ctx",
+    "make_lowprec_ctx",
     "CoordinateNystromPreconditionerData",
     "GPUDominantSubspacePreconditionerData",
     "GPUPreconditionerData",
@@ -77,6 +130,7 @@ __all__ = [
     "build_gpu_preconditioner_data",
     "apply_preconditioner_v2",
     "gpu_precompute_v1",
+    "apply_A_block_v1",
     "apply_A_v1",
     "predict_v1",
     "solve_beta_plain_cg_v1",

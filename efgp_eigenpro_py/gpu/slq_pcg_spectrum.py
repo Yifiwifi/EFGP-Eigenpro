@@ -22,7 +22,6 @@ from .backends import build_gpu_backend_bundle
 from .contexts import GPUOperatorContext, ensure_gpu_data_context
 from .v1_ops import apply_A_v1, gpu_precompute_v1
 from .v2_preconditioner import (
-    GPUPreconditionerData,
     apply_preconditioner_coordinate_nystrom,
     apply_preconditioner_v2,
     build_coordinate_nystrom_preconditioner_data,
@@ -32,7 +31,11 @@ from .v3_eigenspace import (
     estimate_top_eigenspace_v3,
     mu_for_precond_from_eig,
 )
-from .versions import GPURunConfig
+from .versions import (
+    GPURunConfig,
+    _dense_preconditioner_from_gpu_eigenspace,
+    _resolve_precond_storage_dtype,
+)
 
 
 def _build_surrogate_grid(fine_m: int, fine_h: float, grid_scale: Any = None, grid_m: Any = None) -> GridSpec:
@@ -171,12 +174,14 @@ def _build_v3_pcg_left_precond_matvec_local(
         )
     else:
         mu = mu_for_precond_from_eig(vals_gpu, q, eig_diag)
-        scale_gpu = backend.xp.asarray(1.0 - (mu / vals_gpu[:q]))
-        precond_data = GPUPreconditionerData(
-            U_gpu=vecs_gpu[:, :q],
-            UH_gpu=vecs_gpu[:, :q].conj().T,
-            scale_gpu=scale_gpu,
-            scale_col_gpu=scale_gpu.reshape(-1, 1),
+        precond_storage_dtype = _resolve_precond_storage_dtype(backend, cfg)
+        precond_data = _dense_preconditioner_from_gpu_eigenspace(
+            backend,
+            vecs_gpu,
+            vals_gpu,
+            q,
+            mu,
+            dtype=precond_storage_dtype or backend.xp.complex128,
         )
     n = int(data_ctx.rhs_gpu.size)
     av_buf: list[Any] = [None]
@@ -337,12 +342,13 @@ def build_v3_combo_pcg_left_precond_matvec(
         mu = float(vals_gpu[-1])
     else:
         mu = float(vals_gpu[q_max])
-    scale_gpu = xp.asarray(1.0 - (mu / vals_gpu[:q_max]))
-    precond_data = GPUPreconditionerData(
-        U_gpu=vecs_gpu[:, :q_max],
-        UH_gpu=vecs_gpu[:, :q_max].conj().T,
-        scale_gpu=scale_gpu,
-        scale_col_gpu=scale_gpu.reshape(-1, 1),
+    precond_data = _dense_preconditioner_from_gpu_eigenspace(
+        backend,
+        vecs_gpu,
+        vals_gpu,
+        q_max,
+        mu,
+        dtype=_resolve_precond_storage_dtype(backend, cfg) or xp.complex128,
     )
     n = int(data_ctx.rhs_gpu.size)
     av_buf: list[Any] = [None]

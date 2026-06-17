@@ -803,6 +803,12 @@ def run_fixed_efgp_case(
         test_metrics = _gpu_regression_metrics(out.backend, yhat_test, split["y_test_eval"], dataset_payload["y_std"])
 
         train_time = _efgp_train_time(diag)
+        # Linear system dimension for the EFGP transformed operator A (apply_A_v1):
+        # equals len(rhs_gpu) = mtot^dim (NOT N_train).
+        try:
+            M = int(getattr(out.data_ctx, "rhs_gpu").size)
+        except Exception:
+            M = np.nan
         return {
             "status": "ok",
             "error": "",
@@ -810,6 +816,7 @@ def run_fixed_efgp_case(
             "method_variant": str(method_variant),
             "p": np.nan,
             "top_q": int(top_q) if top_q > 0 else np.nan,
+            "M": M,
             "epochs_to_target": np.nan,
             "fit_time_to_target_s": float(train_time),
             "wall_time_to_target_s": float(train_time),
@@ -1407,6 +1414,9 @@ def _base_case_cols(
         "dataset": dataset_payload["name"],
         "dataset_path": dataset_payload["path"],
         "N_train": int(split["x_train_core"].shape[0]),
+        # Linear system dimension for EFGP transformed operator A is mtot^dim and depends on precompute;
+        # it is filled from runtime outputs, so default to NaN here.
+        "M": np.nan,
         "N_val_eval": int(split["x_val_eval"].shape[0]),
         "N_test_eval": int(split["x_test_eval"].shape[0]),
         "n_train_pool": int(dataset_payload["n_train"]),
@@ -1433,6 +1443,7 @@ def _fixed_budget_row_from_summary(summary: dict[str, Any], time_budget_s: float
         "method_variant": summary.get("method_variant", np.nan),
         "p": summary.get("p", np.nan),
         "top_q": summary.get("top_q", np.nan),
+        "M": summary.get("M", np.nan),
         "time_budget_source": "EFGP-CG",
         "time_budget_s": float(time_budget_s),
         "best_val_rmse_std_within_budget": float(summary["best_val_rmse_std"]) if within else np.nan,

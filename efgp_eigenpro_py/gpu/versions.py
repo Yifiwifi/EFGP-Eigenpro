@@ -38,6 +38,17 @@ from .v3_eigenspace import (
     estimate_top_eigenspace_v3,
     mu_for_precond_from_eig,
 )
+from .deflation_core import (
+    DeflationData,
+    build_deflation_data,
+    deflation_memory_estimate,
+    make_jacobi_precond,
+    run_deflated_cg,
+    run_deflated_pcg,
+)
+from .deflation_subspace import build_deflation_subspace
+from .box_toeplitz_active_block.config import BTABConfig
+from .box_toeplitz_active_block.runner import solve_box_toeplitz_active_block
 
 
 @dataclass
@@ -47,7 +58,64 @@ class GPURunConfig:
     maxiter: int = 2000
     chunk_size: Optional[int] = None
     debug_finite_checks: bool = False
+    profile_components: bool = True
     backend: BackendConfig = BackendConfig()
+
+
+def _resolve_precond_storage_dtype(backend: Any, cfg: Any) -> Optional[Any]:
+    """
+    Resolve the storage dtype for a dense eigenspace preconditioner from ``cfg``.
+
+    Looks for an explicit ``precond_storage_dtype`` / ``precond_dtype`` attribute on
+    ``cfg`` (string like ``"complex64"`` / ``"complex128"`` or a numpy/cupy dtype)
+    and returns the corresponding ``backend.xp`` dtype; returns ``None`` when nothing
+    is configured so callers can fall back to their default (``complex128``).
+    """
+    xp = backend.xp
+    raw = getattr(cfg, "precond_storage_dtype", None)
+    if raw is None:
+        raw = getattr(cfg, "precond_dtype", None)
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        key = raw.strip().lower()
+        if key in ("", "same_as_a", "default", "auto"):
+            return None
+        if key in ("complex64", "single", "c8"):
+            return xp.complex64
+        if key in ("complex128", "double", "c16"):
+            return xp.complex128
+        return xp.dtype(raw)
+    return xp.dtype(raw)
+
+
+def _dense_preconditioner_from_gpu_eigenspace(
+    backend: Any,
+    vecs_gpu: Any,
+    vals_gpu: Any,
+    q: int,
+    mu: float,
+    *,
+    dtype: Optional[Any] = None,
+) -> GPUPreconditionerData:
+    xp = backend.xp
+    q = int(q)
+    Uq = xp.asarray(vecs_gpu[:, :q])
+    if dtype is not None:
+        Uq = Uq.astype(xp.dtype(dtype), copy=False)
+    Uq = xp.asfortranarray(Uq)
+    UHq = xp.asfortranarray(Uq.conj().T)
+    scale = xp.ascontiguousarray(
+        xp.asarray(1.0 - (float(mu) / vals_gpu[:q]), dtype=Uq.dtype).reshape(-1)
+    )
+    USq = xp.asfortranarray(Uq * scale.reshape(1, -1))
+    return GPUPreconditionerData(
+        U_gpu=Uq,
+        UH_gpu=UHq,
+        scale_gpu=scale,
+        scale_col_gpu=scale.reshape(-1, 1),
+        US_gpu=USq,
+    )
 
 
 def run_v1_pure_efgp(
@@ -89,6 +157,7 @@ def run_v1_pure_efgp(
         cfg.tol,
         cfg.maxiter,
         return_stats=True,
+        profile_components=cfg.profile_components,
     )
     t3 = time.perf_counter()
     _ = predict_v1(backend, data_ctx, x, beta_gpu)
@@ -119,6 +188,7 @@ def run_v1_pure_efgp(
             "has_nufft": backend.has_nufft,
             "chunk_size": cfg.chunk_size,
             "debug_finite_checks": bool(cfg.debug_finite_checks),
+            "profile_components": bool(cfg.profile_components),
         },
         backend=backend,
         data_ctx=data_ctx,
@@ -189,6 +259,7 @@ def run_v2_with_preconditioner_apply(
 
     t2 = time.perf_counter()
     precond_data = build_gpu_preconditioner_data(backend, U_cpu, scale_cpu)
+    op_ctx.solve_dtype = precond_data.U_gpu.dtype
     t3 = time.perf_counter()
 
     def _matvec(v: Any, out: Any) -> None:
@@ -208,6 +279,7 @@ def run_v2_with_preconditioner_apply(
         cfg.tol,
         cfg.maxiter,
         return_stats=True,
+        profile_components=cfg.profile_components,
     )
     t4 = time.perf_counter()
     _ = predict_v1(backend, data_ctx, x, beta_gpu)
@@ -239,6 +311,7 @@ def run_v2_with_preconditioner_apply(
             "has_nufft": backend.has_nufft,
             "chunk_size": cfg.chunk_size,
             "debug_finite_checks": bool(cfg.debug_finite_checks),
+            "profile_components": bool(cfg.profile_components),
         },
         backend=backend,
         data_ctx=data_ctx,
@@ -294,6 +367,8 @@ def run_v3_full_gpu_eigenspace(
     # as the number of columns processed in each block call.
     eigen_apply_A_block_calls = 0
     eigen_n_matvec = 0
+    eigen_t_matvec_total = 0.0
+    _eigen_event_pairs: list[tuple[Any, Any]] = []
 
     def _apply_A_block(v_block: Any) -> Any:
         from .v1_ops import apply_A_v1
@@ -315,7 +390,7 @@ def run_v3_full_gpu_eigenspace(
         return out_block
 
     def _apply_A_block_counted(v_block: Any) -> Any:
-        nonlocal eigen_apply_A_block_calls, eigen_n_matvec
+        nonlocal eigen_apply_A_block_calls, eigen_n_matvec, eigen_t_matvec_total, _eigen_event_pairs
         try:
             ndim = int(getattr(v_block, "ndim", 1))
             cols = 1 if ndim == 1 else int(getattr(v_block, "shape")[1])
@@ -323,7 +398,23 @@ def run_v3_full_gpu_eigenspace(
             cols = 1
         eigen_apply_A_block_calls += 1
         eigen_n_matvec += int(cols)
-        return _apply_A_block(v_block)
+
+        xp = backend.xp
+        cuda = getattr(xp, "cuda", None)
+        if cuda is not None:
+            # Use CUDA events to avoid synchronizing on every matvec call.
+            start = cuda.Event()
+            end = cuda.Event()
+            start.record()
+            out = _apply_A_block(v_block)
+            end.record()
+            _eigen_event_pairs.append((start, end))
+            return out
+
+        t0_local = time.perf_counter()
+        out = _apply_A_block(v_block)
+        eigen_t_matvec_total += time.perf_counter() - t0_local
+        return out
 
     vals_gpu, vecs_gpu, eig_diag = estimate_top_eigenspace_v3(
         backend=backend,
@@ -331,6 +422,17 @@ def run_v3_full_gpu_eigenspace(
         size=int(data_ctx.rhs_gpu.size),
         cfg=eig_cfg,
     )
+    # Finalize eigen-estimation matvec timing if we used CUDA events.
+    if _eigen_event_pairs:
+        try:
+            _eigen_event_pairs[-1][1].synchronize()
+            cuda = getattr(backend.xp, "cuda", None)
+            if cuda is not None:
+                eigen_t_matvec_total = 1e-3 * float(
+                    sum(cuda.get_elapsed_time(s, e) for (s, e) in _eigen_event_pairs)
+                )
+        except Exception:
+            pass
     t2 = time.perf_counter()
 
     q = int(eig_cfg.q_max)
@@ -362,11 +464,14 @@ def run_v3_full_gpu_eigenspace(
         if evals_r.ndim != 1 or U_r.ndim != 2 or int(U_r.shape[1]) != int(evals_r.shape[0]):
             raise ValueError("hybrid_topr_coordinate requires hybrid_dense_eigvals_gpu and hybrid_dense_eigvecs_gpu.")
         scale_dense = xp.ascontiguousarray(1.0 - (mu_dense / xp.asarray(evals_r)))
+        U_dense = xp.asfortranarray(U_r)
+        US_dense = xp.asfortranarray(U_dense * scale_dense.reshape(1, -1))
         dense = GPUPreconditionerData(
-            U_gpu=xp.ascontiguousarray(U_r),
-            UH_gpu=xp.ascontiguousarray(U_r.conj().T),
+            U_gpu=U_dense,
+            UH_gpu=xp.asfortranarray(U_dense.conj().T),
             scale_gpu=scale_dense,
             scale_col_gpu=scale_dense.reshape(-1, 1),
+            US_gpu=US_dense,
         )
         tail = build_coordinate_nystrom_preconditioner_data(
             backend,
@@ -380,13 +485,15 @@ def run_v3_full_gpu_eigenspace(
         precond_data = HybridToprCoordinatePreconditionerData(dense=dense, tail=tail)
     else:
         mu = mu_for_precond_from_eig(vals_gpu, q, eig_diag)
-        scale_gpu = backend.xp.asarray(1.0 - (mu / vals_gpu[:q]))
-        precond_data = GPUPreconditionerData(
-            U_gpu=vecs_gpu[:, :q],
-            UH_gpu=vecs_gpu[:, :q].conj().T,
-            scale_gpu=scale_gpu,
-            scale_col_gpu=scale_gpu.reshape(-1, 1),
+        precond_data = _dense_preconditioner_from_gpu_eigenspace(
+            backend,
+            vecs_gpu,
+            vals_gpu,
+            q,
+            mu,
+            dtype=getattr(data_ctx.rhs_gpu, "dtype", None),
         )
+        op_ctx.solve_dtype = precond_data.U_gpu.dtype
     t3 = time.perf_counter()
 
     def _matvec(v: Any, out: Any) -> None:
@@ -423,6 +530,7 @@ def run_v3_full_gpu_eigenspace(
         cfg.tol,
         cfg.maxiter,
         return_stats=True,
+        profile_components=cfg.profile_components,
     )
     t4 = time.perf_counter()
     _ = predict_v1(backend, data_ctx, x, beta_gpu)
@@ -459,6 +567,8 @@ def run_v3_full_gpu_eigenspace(
             # Estimation-stage matvec accounting (eigenspace / preconditioner construction).
             "eigen_n_matvec": int(eigen_n_matvec),
             "eigen_apply_A_block_calls": int(eigen_apply_A_block_calls),
+            "eigen_t_matvec_total": float(eigen_t_matvec_total),
+            "eigen_t_matvec_avg": float(eigen_t_matvec_total / max(int(eigen_n_matvec), 1)),
             "t_matvec_avg": float(stats["t_matvec_avg"]),
             "t_matvec_total": float(stats["t_matvec_total"]),
             "n_matvec": int(stats["n_matvec"]),
@@ -471,7 +581,131 @@ def run_v3_full_gpu_eigenspace(
             "has_nufft": backend.has_nufft,
             "chunk_size": cfg.chunk_size,
             "debug_finite_checks": bool(cfg.debug_finite_checks),
+            "profile_components": bool(cfg.profile_components),
         },
+        backend=backend,
+        data_ctx=data_ctx,
+    )
+
+
+def run_v6_box_toeplitz_active_block(
+    solver: EFGPSolver,
+    x: np.ndarray,
+    y: np.ndarray,
+    cfg: GPURunConfig,
+    *,
+    btab_cfg: Optional[BTABConfig] = None,
+) -> V1Outputs:
+    """
+    V6: GPU FFT Toeplitz matvec + Box-Toeplitz Active Block preconditioner
+    (exact dense box or matrix-free inner-PCG box solve).
+    """
+    backend = build_gpu_backend_bundle(cfg.backend)
+    data_ctx = ensure_gpu_data_context(backend, x, y, state=None)
+    data_ctx.meta["debug_finite_checks"] = bool(cfg.debug_finite_checks)
+    op_ctx = GPUOperatorContext()
+
+    t0 = time.perf_counter()
+    data_ctx = gpu_precompute_v1(
+        backend,
+        solver.kernel,
+        solver.eps,
+        solver.nufft_tol,
+        data_ctx,
+        op_ctx,
+        l2scaled=solver.l2scaled,
+        chunk_size=cfg.chunk_size,
+    )
+    t1 = time.perf_counter()
+
+    btab_cfg = btab_cfg or BTABConfig()
+    beta_gpu, it, relres, stats, setup_diag = solve_box_toeplitz_active_block(
+        backend,
+        data_ctx,
+        float(cfg.reg_lambda),
+        data_ctx.rhs_gpu,
+        op_ctx,
+        tol=cfg.tol,
+        maxiter=cfg.maxiter,
+        btab_cfg=btab_cfg,
+        profile_components=cfg.profile_components,
+    )
+    t2 = time.perf_counter()
+    _ = predict_v1(backend, data_ctx, x, beta_gpu)
+    t3 = time.perf_counter()
+
+    diagnostics = {
+        "version": "v6_btab",
+        "status": "ok",
+        "nufft_backend": backend.nufft_name,
+        "nufft_stage": data_ctx.meta.get("nufft_stage"),
+        "cg_iters": int(it),
+        "cg_relres": float(relres),
+        "outer_iters": int(it),
+        "outer_relres": float(relres),
+        "time_precompute": float(t1 - t0),
+        "time_precond_build": float(setup_diag.get("time_precond_build", float("nan"))),
+        "time_solve": float(t2 - t1),
+        "time_predict": float(t3 - t2),
+        "time_total": float(t3 - t0),
+        "active_mode": setup_diag.get("active_mode"),
+        "active_topk": setup_diag.get("active_topk"),
+        "active_tau": setup_diag.get("active_tau"),
+        "solve_mode": setup_diag.get("solve_mode"),
+        "exact_apply_mode": setup_diag.get("exact_apply_mode"),
+        "outer_solver": setup_diag.get("outer_solver"),
+        "outer_gmres_restart": int(setup_diag.get("outer_gmres_restart", 0)),
+        "inner_tol": float(setup_diag.get("inner_tol", float("nan"))),
+        "inner_maxiter": int(setup_diag.get("inner_maxiter", 0)),
+        "inner_precond": setup_diag.get("inner_precond"),
+        "active_size": int(setup_diag.get("active_size", 0)),
+        "box_size": int(setup_diag.get("box_size", 0)),
+        "tail_size": int(setup_diag.get("tail_size", 0)),
+        "box_radii": setup_diag.get("box_radii", []),
+        "box_shape": setup_diag.get("box_shape", []),
+        "gamma": float(setup_diag.get("gamma", float("nan"))),
+        "time_active_set": float(setup_diag.get("time_active_set", float("nan"))),
+        "time_build_Ag": float(setup_diag.get("time_build_Ag", float("nan"))),
+        "time_build_box_matrix": float(setup_diag.get("time_build_box_matrix", float("nan"))),
+        "time_symmetrize_regularize": float(setup_diag.get("time_symmetrize_regularize", float("nan"))),
+        "time_cholesky": float(setup_diag.get("time_cholesky", float("nan"))),
+        "time_build_inverse": float(setup_diag.get("time_build_inverse", float("nan"))),
+        "time_build_local_fft": float(setup_diag.get("time_build_local_fft", float("nan"))),
+        "box_memory_bytes": int(setup_diag.get("box_memory_bytes", 0)),
+        "chol_memory_bytes": int(setup_diag.get("chol_memory_bytes", 0)),
+        "inverse_memory_bytes": int(setup_diag.get("inverse_memory_bytes", 0)),
+        "local_fft_memory_bytes": int(setup_diag.get("local_fft_memory_bytes", 0)),
+        "precond_apply_calls": int(setup_diag.get("precond_apply_calls", 0)),
+        "inner_total_iters": int(setup_diag.get("inner_total_iters", 0)),
+        "inner_total_matvec": int(setup_diag.get("inner_total_matvec", 0)),
+        "inner_total_precond": int(setup_diag.get("inner_total_precond", 0)),
+        "inner_last_relres": float(setup_diag.get("inner_last_relres", float("nan"))),
+        "inner_max_iters": int(setup_diag.get("inner_max_iters", 0)),
+        "time_diag_total": float(setup_diag.get("time_diag_total", float("nan"))),
+        "time_box_gather_total": float(setup_diag.get("time_box_gather_total", float("nan"))),
+        "time_box_solve_total": float(setup_diag.get("time_box_solve_total", float("nan"))),
+        "time_box_scatter_total": float(setup_diag.get("time_box_scatter_total", float("nan"))),
+        "time_diag_avg": float(setup_diag.get("time_diag_avg", float("nan"))),
+        "time_box_gather_avg": float(setup_diag.get("time_box_gather_avg", float("nan"))),
+        "time_box_solve_avg": float(setup_diag.get("time_box_solve_avg", float("nan"))),
+        "time_box_scatter_avg": float(setup_diag.get("time_box_scatter_avg", float("nan"))),
+        "t_matvec_avg": float(stats["t_matvec_avg"]),
+        "t_matvec_total": float(stats["t_matvec_total"]),
+        "n_matvec": int(stats["n_matvec"]),
+        "cg_n_matvec": int(stats["n_matvec"]),
+        "t_precond_total": float(stats["t_precond_total"]),
+        "t_precond_avg": float(stats["t_precond_avg"]),
+        "n_precond": int(stats["n_precond"]),
+        "outer_status": setup_diag.get("outer_status", stats.get("status")),
+        "device_name": backend.device_name,
+        "has_nufft": backend.has_nufft,
+        "chunk_size": cfg.chunk_size,
+        "debug_finite_checks": bool(cfg.debug_finite_checks),
+        "profile_components": bool(cfg.profile_components),
+    }
+    return V1Outputs(
+        beta_gpu=beta_gpu,
+        diagnostics=diagnostics,
         backend=backend,
         data_ctx=data_ctx,
     )
@@ -561,12 +795,13 @@ def build_v3_pcg_left_precond_matvec(
         )
     else:
         mu = mu_for_precond_from_eig(vals_gpu, q, eig_diag)
-        scale_gpu = backend.xp.asarray(1.0 - (mu / vals_gpu[:q]))
-        precond_data = GPUPreconditionerData(
-            U_gpu=vecs_gpu[:, :q],
-            UH_gpu=vecs_gpu[:, :q].conj().T,
-            scale_gpu=scale_gpu,
-            scale_col_gpu=scale_gpu.reshape(-1, 1),
+        precond_data = _dense_preconditioner_from_gpu_eigenspace(
+            backend,
+            vecs_gpu,
+            vals_gpu,
+            q,
+            mu,
+            dtype=backend.xp.complex128,
         )
     n = int(data_ctx.rhs_gpu.size)
     av_buf: list[Any] = [None]
@@ -688,6 +923,7 @@ def run_v4_dominant_subspace_preconditioner(
         cfg.tol,
         cfg.maxiter,
         return_stats=True,
+        profile_components=cfg.profile_components,
     )
     t3 = time.perf_counter()
     _ = predict_v1(backend, data_ctx, x, beta_gpu)
@@ -723,7 +959,488 @@ def run_v4_dominant_subspace_preconditioner(
             "has_nufft": backend.has_nufft,
             "chunk_size": cfg.chunk_size,
             "debug_finite_checks": bool(cfg.debug_finite_checks),
+            "profile_components": bool(cfg.profile_components),
         },
+        backend=backend,
+        data_ctx=data_ctx,
+    )
+
+
+def run_v5_deflated_cg(
+    solver: EFGPSolver,
+    x: np.ndarray,
+    y: np.ndarray,
+    cfg: GPURunConfig,
+    *,
+    m: int = 64,
+    method: str = "coord_nystrom",
+    which: str = "LM",
+    eig_solver: str = "subspace_iter",
+    lowfi_tol: float = 1e-3,
+    lowfi_n_iter: int = 10,
+    oversample: int = 12,
+    hm_t: Optional[int] = None,
+    coarse_ratio: float = 0.5,
+    freq_box_mode: str = "center",
+    rank_tol: float = 1e-12,
+    jitter_ratio: float = 1e-12,
+    block_cols: int = 8,
+    z_storage_dtype: str = "same_as_A",
+    w_mode: str = "dense",
+    matvec_form: str = "structured_ZH",
+    precond: str = "none",
+    seed: int = 0,
+) -> V1Outputs:
+    """
+    V5: multi-fidelity Frank-Vuik deflated CG.
+
+    A cheap low-fidelity operator ``A_tilde`` (``method`` selects coord_nystrom /
+    freq_trunc / float32) only finds the deflation subspace ``Z``.  The deflation
+    projector ``P_D = I - A Z (Z* A Z)^{-1} Z*`` is built with the true
+    high-fidelity ``A`` (W = A Z, G = Z* A Z), then ``P_D A x_hat = P_D b`` is
+    solved by CG and the true solution is recovered.
+
+    ``precond`` selects the inner Krylov solver:
+      * ``"none"`` (default): plain deflated CG on ``P_D A`` (Phase 1).
+      * ``"jacobi"``: Phase-2 deflated *preconditioned* CG (Frank-Vuik DPCG) with a
+        diagonal SPD preconditioner ``M^{-1} = diag(A)^{-1}``.
+
+    The headline cost metric is ``hi_n_matvec = m_eff (calibration) + N_CG + 1
+    (recovery)``; low-fidelity matvecs used to build ``Z`` are reported separately.
+    """
+    from .v1_ops import apply_A_block_v1, apply_A_v1
+
+    backend = build_gpu_backend_bundle(cfg.backend)
+    data_ctx = ensure_gpu_data_context(backend, x, y, state=None)
+    data_ctx.meta["debug_finite_checks"] = bool(cfg.debug_finite_checks)
+    op_ctx = GPUOperatorContext()
+    xp = backend.xp
+    reg = float(cfg.reg_lambda)
+
+    t0 = time.perf_counter()
+    data_ctx = gpu_precompute_v1(
+        backend,
+        solver.kernel,
+        solver.eps,
+        solver.nufft_tol,
+        data_ctx,
+        op_ctx,
+        l2scaled=solver.l2scaled,
+        chunk_size=cfg.chunk_size,
+    )
+    t1 = time.perf_counter()
+
+    if int(m) <= 0:
+        raise ValueError("m must be > 0 for deflated CG.")
+
+    # ----- Stage 1: cheap low-fidelity subspace Z -----
+    Z0, subspace_diag = build_deflation_subspace(
+        backend,
+        data_ctx,
+        reg,
+        op_ctx,
+        method=method,
+        m=int(m),
+        which=which,
+        eig_solver=eig_solver,
+        tol=float(lowfi_tol),
+        n_iter=int(lowfi_n_iter),
+        oversample=int(oversample),
+        hm_t=hm_t,
+        coarse_ratio=float(coarse_ratio),
+        return_basis=True,
+        freq_box_mode=str(freq_box_mode),
+        seed=int(seed),
+    )
+    t2 = time.perf_counter()
+
+    # ----- High-fidelity matvec wrappers (counted) -----
+    hi_calls = {"vec": 0}
+
+    def _apply_A_hi(v: Any, out: Any) -> None:
+        apply_A_v1(backend, data_ctx, v, reg, op_ctx, out=out)
+        hi_calls["vec"] += 1
+
+    def _apply_A_hi_block(V_block: Any) -> Any:
+        Vv = xp.asarray(V_block, dtype=xp.complex128)
+        if Vv.ndim == 1:
+            Vv = Vv.reshape(-1, 1)
+        out_block = apply_A_block_v1(
+            backend,
+            data_ctx,
+            Vv,
+            reg,
+            op_ctx,
+            block_cols=block_cols,
+        )
+        hi_calls["vec"] += int(Vv.shape[1])
+        return out_block
+
+    # ----- Stage 2: high-fidelity calibration W = A Z, G = Z* A Z -----
+    defl_data = build_deflation_data(
+        backend,
+        _apply_A_hi_block,
+        Z0,
+        rank_tol=float(rank_tol),
+        jitter_ratio=float(jitter_ratio),
+        block_cols=int(block_cols),
+        z_storage_dtype=str(z_storage_dtype),
+        compute_diagnostics=True,
+        w_mode=str(w_mode),
+        matvec_form=str(matvec_form),
+    )
+    hi_matvec_calibration = int(defl_data.m_eff)
+    t3 = time.perf_counter()
+
+    # ----- Stage 3: deflated CG (or DPCG) + recovery -----
+    precond_kind = str(precond).lower()
+    if precond_kind in ("none", "", "off"):
+        beta_gpu, cg_it, def_relres, solve_diag = run_deflated_cg(
+            backend,
+            defl_data,
+            _apply_A_hi,
+            data_ctx.rhs_gpu,
+            op_ctx,
+            tol=cfg.tol,
+            maxiter=cfg.maxiter,
+            profile_components=cfg.profile_components,
+        )
+    elif precond_kind == "jacobi":
+        mtot = int(data_ctx.meta["mtot"])
+        dim = int(data_ctx.meta["dim"])
+        weights_gpu = xp.asarray(data_ctx.weights_gpu_flat, dtype=xp.float64).reshape(-1)
+        xtxcol_gpu = getattr(data_ctx, "xtxcol_gpu", None)
+        if xtxcol_gpu is None:
+            xtxcol_gpu = xp.ascontiguousarray(backend.fft.ifftn(data_ctx.gf_gpu))
+            data_ctx.xtxcol_gpu = xtxcol_gpu
+        t0_diag = xp.real(xtxcol_gpu[(int(mtot) - 1,) * dim])
+        diag_A = (weights_gpu * weights_gpu) * xp.asarray(t0_diag, dtype=xp.float64) + reg
+        diag_A = xp.maximum(diag_A, xp.asarray(1e-30, dtype=xp.float64))
+        precond_fn = make_jacobi_precond(backend, 1.0 / diag_A)
+        beta_gpu, cg_it, def_relres, solve_diag = run_deflated_pcg(
+            backend,
+            defl_data,
+            _apply_A_hi,
+            precond_fn,
+            data_ctx.rhs_gpu,
+            op_ctx,
+            tol=cfg.tol,
+            maxiter=cfg.maxiter,
+            profile_components=cfg.profile_components,
+        )
+    else:
+        raise ValueError(
+            f"unknown precond={precond!r}; expected 'none' or 'jacobi'."
+        )
+    t4 = time.perf_counter()
+
+    _ = predict_v1(backend, data_ctx, x, beta_gpu)
+    t5 = time.perf_counter()
+
+    n_cg = int(solve_diag.get("n_matvec", cg_it))
+    hi_n_matvec = int(hi_calls["vec"])
+    effective_formula = (
+        "m_eff + 2*cg + 2"
+        if str(getattr(defl_data, "w_mode", "dense")).lower() == "implicit"
+        else "m_eff + cg + 1"
+    )
+    mem = deflation_memory_estimate(defl_data)
+    defl_diag = dict(defl_data.diagnostics)
+
+    diagnostics: dict[str, Any] = {
+        "version": "v5_deflated_cg",
+        "status": "ok",
+        "deflation_method": str(method),
+        "precond": precond_kind,
+        "basis_kind": str(defl_diag.get("basis_kind", getattr(defl_data.basis, "kind", ""))),
+        "w_mode": str(getattr(defl_data, "w_mode", "dense")),
+        "matvec_form": str(getattr(defl_data, "matvec_form", "structured_ZH")),
+        "effective_himatvec_formula": effective_formula,
+        "which": str(which).upper(),
+        "m_requested": int(m),
+        "m_eff": int(defl_data.m_eff),
+        "rank_dropped": int(defl_data.rank_dropped),
+        "nufft_backend": backend.nufft_name,
+        "nufft_stage": data_ctx.meta.get("nufft_stage"),
+        # Convergence.
+        "cg_iters": int(cg_it),
+        "deflated_relres": float(def_relres),
+        "true_relres": float(solve_diag.get("true_relres_from_recovery", float("nan"))),
+        "cg_status": str(solve_diag.get("status", "")),
+        "max_imag_ratio": float(solve_diag.get("max_imag_ratio", float("nan"))),
+        # Matvec accounting (headline = hi_n_matvec).
+        "lowfi_n_matvec": int(subspace_diag.get("lowfi_n_matvec", 0)),
+        "lowfi_kind": subspace_diag.get("lowfi_kind"),
+        "hi_n_matvec": hi_n_matvec,
+        "hi_n_matvec_calibration": hi_matvec_calibration,
+        "hi_n_matvec_cg": int(n_cg),
+        "hi_n_matvec_actual": hi_n_matvec,
+        "hi_n_matvec_unattributed": int(hi_n_matvec - hi_matvec_calibration),
+        "hi_n_matvec_recovery": 1 if str(getattr(defl_data, "w_mode", "dense")).lower() == "dense" else 2,
+        "cg_n_matvec": int(n_cg),
+        # Deflation quality diagnostics.
+        "cond_G": float(defl_data.cond_G),
+        "jitter": float(defl_data.jitter),
+        "hermitian_error_G": float(defl_diag.get("hermitian_error_G", float("nan"))),
+        "invariance_leakage": float(defl_diag.get("invariance_leakage", float("nan"))),
+        "deflation_exactness": float(defl_diag.get("deflation_exactness", float("nan"))),
+        "orthonormality_error": float(defl_diag.get("orthonormality_error", float("nan"))),
+        "diagnostics_mode": str(defl_diag.get("diagnostics_mode", "")),
+        "b_def_ratio": float(solve_diag.get("b_def_ratio", float("nan"))),
+        # Memory estimate.
+        **mem,
+        # Timings.
+        "time_precompute": float(t1 - t0),
+        "time_subspace": float(t2 - t1),
+        "time_calibration": float(t3 - t2),
+        "time_solve": float(t4 - t3),
+        "time_predict": float(t5 - t4),
+        "time_total": float(t5 - t0),
+        # Solve-stage matvec timing.
+        "t_matvec_avg": float(solve_diag.get("t_matvec_avg", float("nan"))),
+        "t_matvec_total": float(solve_diag.get("t_matvec_total", float("nan"))),
+        "n_matvec": int(n_cg),
+        # Subspace estimation passthrough.
+        "subspace_diag": subspace_diag,
+        "device_name": backend.device_name,
+        "has_nufft": backend.has_nufft,
+        "chunk_size": cfg.chunk_size,
+        "debug_finite_checks": bool(cfg.debug_finite_checks),
+        "profile_components": bool(cfg.profile_components),
+    }
+    return V1Outputs(
+        beta_gpu=beta_gpu,
+        diagnostics=diagnostics,
+        backend=backend,
+        data_ctx=data_ctx,
+    )
+
+
+def run_v5_oracle_deflated_cg(
+    solver: EFGPSolver,
+    x: np.ndarray,
+    y: np.ndarray,
+    cfg: GPURunConfig,
+    *,
+    m: int = 64,
+    side: str = "top",
+    m_bottom: Optional[int] = None,
+    eig_solver: str = "subspace_iter",
+    eig_n_iter: int = 8,
+    oversample: int = 16,
+    rank_tol: float = 1e-12,
+    jitter_ratio: float = 1e-12,
+    block_cols: int = 8,
+    z_storage_dtype: str = "same_as_A",
+    w_mode: str = "dense",
+    matvec_form: str = "structured_ZH",
+) -> V1Outputs:
+    """
+    Oracle V5 experiment: use high-fidelity V3 Ritz vectors as ``Z`` and apply
+    Frank-Vuik deflation only, with no EigenPro eigenvalue scaling.
+
+    ``side`` selects the Ritz subspace:
+      * ``"top"``: dominant Ritz vectors, matching the usual V3 top eigenspace.
+      * ``"bottom"``: smallest Ritz vectors via eigsh ``SA``.
+      * ``"two_sided"``: concatenate top ``m`` and bottom ``m_bottom`` vectors.
+    """
+    from .v1_ops import apply_A_block_v1, apply_A_v1
+
+    backend = build_gpu_backend_bundle(cfg.backend)
+    data_ctx = ensure_gpu_data_context(backend, x, y, state=None)
+    data_ctx.meta["debug_finite_checks"] = bool(cfg.debug_finite_checks)
+    op_ctx = GPUOperatorContext()
+    xp = backend.xp
+    reg = float(cfg.reg_lambda)
+
+    t0 = time.perf_counter()
+    data_ctx = gpu_precompute_v1(
+        backend,
+        solver.kernel,
+        solver.eps,
+        solver.nufft_tol,
+        data_ctx,
+        op_ctx,
+        l2scaled=solver.l2scaled,
+        chunk_size=cfg.chunk_size,
+    )
+    t1 = time.perf_counter()
+
+    if int(m) <= 0:
+        raise ValueError("m must be > 0 for oracle deflation.")
+
+    hi_calls = {"vec": 0}
+
+    def _apply_A_hi(v: Any, out: Any) -> None:
+        apply_A_v1(backend, data_ctx, v, reg, op_ctx, out=out)
+        hi_calls["vec"] += 1
+
+    def _apply_A_hi_block(V_block: Any) -> Any:
+        Vv = xp.asarray(V_block, dtype=xp.complex128)
+        if Vv.ndim == 1:
+            Vv = Vv.reshape(-1, 1)
+        out_block = apply_A_block_v1(
+            backend,
+            data_ctx,
+            Vv,
+            reg,
+            op_ctx,
+            block_cols=block_cols,
+        )
+        hi_calls["vec"] += int(Vv.shape[1])
+        return out_block
+
+    def _estimate_ritz(q: int, which_code: str, solver_name: str) -> tuple[Any, Any, dict[str, Any]]:
+        q = int(q)
+        method_name = str(solver_name).lower()
+        if which_code == "SA" and method_name in ("subspace_iter", "subspace"):
+            method_name = "cupy_eigsh"
+        eig_cfg = EigenspaceConfig(
+            q_max=q,
+            block_size=int(q + max(1, oversample)),
+            n_iter=int(max(1, eig_n_iter)),
+            method=method_name,
+            eig_method=method_name,
+        )
+        # cupyx eigsh reads cfg.which directly.
+        setattr(eig_cfg, "which", which_code)
+        vals, vecs, diag = estimate_top_eigenspace_v3(
+            backend=backend,
+            apply_A_block_gpu=_apply_A_hi_block,
+            size=int(data_ctx.rhs_gpu.size),
+            cfg=eig_cfg,
+        )
+        diag = dict(diag)
+        diag["which"] = which_code
+        diag["eig_solver"] = method_name
+        return vals, vecs, diag
+
+    side_key = str(side).lower()
+    if side_key in ("top", "lm", "largest"):
+        vals, Z0, eig_diag = _estimate_ritz(int(m), "LA", eig_solver)
+        oracle_side = "top"
+    elif side_key in ("bottom", "sm", "smallest"):
+        vals, Z0, eig_diag = _estimate_ritz(int(m), "SA", "cupy_eigsh")
+        oracle_side = "bottom"
+    elif side_key in ("two_sided", "twosided", "both"):
+        mb = int(m_bottom if m_bottom is not None else max(1, int(m) // 2))
+        mt = int(m)
+        vals_t, Zt, diag_t = _estimate_ritz(mt, "LA", eig_solver)
+        vals_b, Zb, diag_b = _estimate_ritz(mb, "SA", "cupy_eigsh")
+        vals = xp.concatenate([xp.asarray(vals_t).reshape(-1), xp.asarray(vals_b).reshape(-1)])
+        Z0 = xp.ascontiguousarray(xp.concatenate([Zt, Zb], axis=1))
+        eig_diag = {
+            "top": diag_t,
+            "bottom": diag_b,
+            "top_m": mt,
+            "bottom_m": mb,
+            "eig_solver": f"{diag_t.get('eig_solver')}/{diag_b.get('eig_solver')}",
+            "which": "LA+SA",
+        }
+        oracle_side = "two_sided"
+    else:
+        raise ValueError("side must be 'top', 'bottom', or 'two_sided'.")
+    t2 = time.perf_counter()
+    oracle_eigen_n_matvec = int(hi_calls["vec"])
+
+    defl_data = build_deflation_data(
+        backend,
+        _apply_A_hi_block,
+        Z0,
+        rank_tol=float(rank_tol),
+        jitter_ratio=float(jitter_ratio),
+        block_cols=int(block_cols),
+        z_storage_dtype=str(z_storage_dtype),
+        compute_diagnostics=True,
+        w_mode=str(w_mode),
+        matvec_form=str(matvec_form),
+    )
+    hi_matvec_calibration = int(defl_data.m_eff)
+    t3 = time.perf_counter()
+
+    beta_gpu, cg_it, def_relres, solve_diag = run_deflated_cg(
+        backend,
+        defl_data,
+        _apply_A_hi,
+        data_ctx.rhs_gpu,
+        op_ctx,
+        tol=cfg.tol,
+        maxiter=cfg.maxiter,
+        profile_components=cfg.profile_components,
+        work_prefix=f"oracle_{oracle_side}",
+    )
+    t4 = time.perf_counter()
+
+    _ = predict_v1(backend, data_ctx, x, beta_gpu)
+    t5 = time.perf_counter()
+
+    n_cg = int(solve_diag.get("n_matvec", cg_it))
+    hi_n_matvec = int(hi_calls["vec"])
+    mem = deflation_memory_estimate(defl_data)
+    defl_diag = dict(defl_data.diagnostics)
+    vals_real = xp.real(xp.asarray(vals).reshape(-1))
+
+    diagnostics: dict[str, Any] = {
+        "version": "v5_oracle_deflated_cg",
+        "status": "ok",
+        "deflation_method": "oracle_v3_ritz",
+        "oracle_side": oracle_side,
+        "precond": "none",
+        "basis_kind": str(defl_diag.get("basis_kind", getattr(defl_data.basis, "kind", ""))),
+        "w_mode": str(getattr(defl_data, "w_mode", "dense")),
+        "matvec_form": str(getattr(defl_data, "matvec_form", "structured_ZH")),
+        "effective_himatvec_formula": "oracle_eigen + m_eff + cg + 1",
+        "which": str(eig_diag.get("which", "")),
+        "m_requested": int(m),
+        "m_bottom": int(m_bottom or 0),
+        "m_eff": int(defl_data.m_eff),
+        "rank_dropped": int(defl_data.rank_dropped),
+        "oracle_lambda_min": float(xp.min(vals_real)) if int(vals_real.size) else float("nan"),
+        "oracle_lambda_max": float(xp.max(vals_real)) if int(vals_real.size) else float("nan"),
+        "oracle_eig_diag": eig_diag,
+        "nufft_backend": backend.nufft_name,
+        "nufft_stage": data_ctx.meta.get("nufft_stage"),
+        "cg_iters": int(cg_it),
+        "deflated_relres": float(def_relres),
+        "true_relres": float(solve_diag.get("true_relres_from_recovery", float("nan"))),
+        "cg_status": str(solve_diag.get("status", "")),
+        "max_imag_ratio": float(solve_diag.get("max_imag_ratio", float("nan"))),
+        "lowfi_n_matvec": 0,
+        "lowfi_kind": "none_oracle_high_fidelity_ritz",
+        "hi_n_matvec": hi_n_matvec,
+        "hi_n_matvec_oracle_eigen": oracle_eigen_n_matvec,
+        "hi_n_matvec_calibration": hi_matvec_calibration,
+        "hi_n_matvec_cg": int(n_cg),
+        "hi_n_matvec_recovery": 1,
+        "hi_n_matvec_actual": hi_n_matvec,
+        "cg_n_matvec": int(n_cg),
+        "cond_G": float(defl_data.cond_G),
+        "jitter": float(defl_data.jitter),
+        "hermitian_error_G": float(defl_diag.get("hermitian_error_G", float("nan"))),
+        "invariance_leakage": float(defl_diag.get("invariance_leakage", float("nan"))),
+        "deflation_exactness": float(defl_diag.get("deflation_exactness", float("nan"))),
+        "orthonormality_error": float(defl_diag.get("orthonormality_error", float("nan"))),
+        "diagnostics_mode": str(defl_diag.get("diagnostics_mode", "")),
+        "b_def_ratio": float(solve_diag.get("b_def_ratio", float("nan"))),
+        **mem,
+        "time_precompute": float(t1 - t0),
+        "time_subspace": float(t2 - t1),
+        "time_calibration": float(t3 - t2),
+        "time_solve": float(t4 - t3),
+        "time_predict": float(t5 - t4),
+        "time_total": float(t5 - t0),
+        "t_matvec_avg": float(solve_diag.get("t_matvec_avg", float("nan"))),
+        "t_matvec_total": float(solve_diag.get("t_matvec_total", float("nan"))),
+        "n_matvec": int(n_cg),
+        "device_name": backend.device_name,
+        "has_nufft": backend.has_nufft,
+        "chunk_size": cfg.chunk_size,
+        "debug_finite_checks": bool(cfg.debug_finite_checks),
+        "profile_components": bool(cfg.profile_components),
+    }
+    return V1Outputs(
+        beta_gpu=beta_gpu,
+        diagnostics=diagnostics,
         backend=backend,
         data_ctx=data_ctx,
     )

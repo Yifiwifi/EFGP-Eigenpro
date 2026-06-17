@@ -7,6 +7,23 @@ from .backends import GPUBackendBundle
 from .contexts import GPUOperatorContext
 
 
+_CUPY_CUBLAS_GEMV: Any = None
+_CUPY_CUBLAS_GEMV_CHECKED = False
+
+
+def _get_cupy_cublas_gemv() -> Any:
+    global _CUPY_CUBLAS_GEMV, _CUPY_CUBLAS_GEMV_CHECKED
+    if not _CUPY_CUBLAS_GEMV_CHECKED:
+        _CUPY_CUBLAS_GEMV_CHECKED = True
+        try:
+            from cupy import cublas  # type: ignore
+
+            _CUPY_CUBLAS_GEMV = getattr(cublas, "gemv", None)
+        except Exception:
+            _CUPY_CUBLAS_GEMV = None
+    return _CUPY_CUBLAS_GEMV
+
+
 @dataclass
 class GPUPreconditionerData:
     """
@@ -17,6 +34,7 @@ class GPUPreconditionerData:
     UH_gpu: Any
     scale_gpu: Any
     scale_col_gpu: Any
+    US_gpu: Any = None
 
 
 @dataclass
@@ -81,17 +99,81 @@ def build_gpu_preconditioner_data(
     backend: GPUBackendBundle,
     U_cpu: Any,
     scale_cpu: Any,
+    *,
+    dtype: Optional[Any] = None,
 ) -> GPUPreconditionerData:
     xp = backend.xp
-    U = xp.ascontiguousarray(xp.asarray(U_cpu))
-    UH = xp.ascontiguousarray(U.conj().T)
-    scale = xp.ascontiguousarray(xp.asarray(scale_cpu).reshape(-1))
+    U = xp.asarray(U_cpu)
+    if dtype is not None:
+        U = U.astype(xp.dtype(dtype), copy=False)
+    U = xp.asfortranarray(U)
+    UH = xp.asfortranarray(U.conj().T)
+    scale = xp.ascontiguousarray(xp.asarray(scale_cpu, dtype=U.dtype).reshape(-1))
+    US = xp.asfortranarray(U * scale.reshape(1, -1))
     return GPUPreconditionerData(
         U_gpu=U,
         UH_gpu=UH,
         scale_gpu=scale,
         scale_col_gpu=scale.reshape(-1, 1),
+        US_gpu=US,
     )
+
+
+def apply_preconditioner_v2_fast(
+    backend: GPUBackendBundle,
+    precond_data: GPUPreconditionerData,
+    v_gpu: Any,
+    proj: Any,
+    tmp: Any,
+    out: Any,
+    *,
+    U_gpu: Any = None,
+    UH_gpu: Any = None,
+    scale_gpu: Any = None,
+    scale_col_gpu: Any = None,
+    US_gpu: Any = None,
+) -> Any:
+    """
+    Fast dense EigenPro apply with validation/workspace handled by the caller.
+    """
+
+    xp = backend.xp
+    U = precond_data.U_gpu if U_gpu is None else U_gpu
+    UH = precond_data.UH_gpu if UH_gpu is None else UH_gpu
+    scale = precond_data.scale_gpu if scale_gpu is None else scale_gpu
+    scale_col = precond_data.scale_col_gpu if scale_col_gpu is None else scale_col_gpu
+    if US_gpu is False:
+        US = None
+    else:
+        US = getattr(precond_data, "US_gpu", None) if US_gpu is None else US_gpu
+
+    gemv = _get_cupy_cublas_gemv()
+    if (
+        gemv is not None
+        and US is not None
+        and v_gpu.ndim == proj.ndim == out.ndim == 1
+        and U.dtype == UH.dtype == US.dtype == v_gpu.dtype == proj.dtype == out.dtype
+        and U.dtype.char in "fdFD"
+    ):
+        try:
+            gemv("N", 1.0, UH, v_gpu, 0.0, proj)
+            xp.copyto(out, v_gpu)
+            gemv("N", -1.0, US, proj, 1.0, out)
+            return out
+        except Exception:
+            pass
+
+    xp.dot(UH, v_gpu, out=proj)
+    if US is not None:
+        xp.dot(US, proj, out=tmp)
+    else:
+        if proj.ndim == 2:
+            xp.multiply(scale_col, proj, out=proj)
+        else:
+            xp.multiply(scale, proj, out=proj)
+        xp.dot(U, proj, out=tmp)
+    xp.subtract(v_gpu, tmp, out=out)
+    return out
 
 
 def build_coordinate_nystrom_preconditioner_data(
@@ -390,14 +472,12 @@ def apply_preconditioner_v2(
             scale_col = scale.reshape(-1, 1)
         else:
             raise ValueError("Leading dimension of v must match U.shape[0].")
-    v = xp.asarray(v, dtype=U.dtype)
+    v = v.astype(U.dtype, copy=False)
 
     proj = None
-    scaled = None
     tmp = None
     if op_ctx is not None:
         proj = op_ctx.precond_proj
-        scaled = op_ctx.precond_scaled_proj
         tmp = op_ctx.precond_tmp
 
     proj_shape = (U.shape[1],) if v.ndim == 1 else (U.shape[1], v.shape[1])
@@ -405,22 +485,11 @@ def apply_preconditioner_v2(
         proj = xp.empty(proj_shape, dtype=U.dtype)
         if op_ctx is not None:
             op_ctx.precond_proj = proj
-    if scaled is None or scaled.shape != proj_shape or scaled.dtype != U.dtype:
-        scaled = xp.empty(proj_shape, dtype=U.dtype)
-        if op_ctx is not None:
-            op_ctx.precond_scaled_proj = scaled
-
-    xp.dot(UH, v, out=proj)
-    if proj.ndim == 2:
-        xp.multiply(scale_col, proj, out=scaled)
-    else:
-        xp.multiply(scale, proj, out=scaled)
 
     if tmp is None or tmp.shape != v.shape or tmp.dtype != U.dtype:
         tmp = xp.empty_like(v)
         if op_ctx is not None:
             op_ctx.precond_tmp = tmp
-    xp.dot(U, scaled, out=tmp)
 
     out_buf = out
     may_share = getattr(xp, "may_share_memory", None)
@@ -430,10 +499,24 @@ def apply_preconditioner_v2(
             shares_mem = bool(may_share(out_buf, v))
         except Exception:
             shares_mem = False
-    if out_buf is None or out_buf.shape != v.shape or out_buf.dtype != U.dtype or shares_mem:
+    if out_buf is None or out_buf.shape != v.shape or shares_mem:
         out_buf = xp.empty_like(v, dtype=U.dtype)
-    xp.subtract(v, tmp, out=out_buf)
-    return out_buf
+    US = getattr(precond_data, "US_gpu", None)
+    if US is not None and (US.shape != U.shape or US.dtype != U.dtype):
+        US = False
+    return apply_preconditioner_v2_fast(
+        backend,
+        precond_data,
+        v,
+        proj,
+        tmp,
+        out_buf,
+        U_gpu=U,
+        UH_gpu=UH,
+        scale_gpu=scale,
+        scale_col_gpu=scale_col,
+        US_gpu=US,
+    )
 
 
 def apply_preconditioner_coordinate_nystrom(
