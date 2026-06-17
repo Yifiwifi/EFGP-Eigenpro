@@ -12,10 +12,11 @@ from .backends import BackendConfig, build_gpu_backend_bundle
 from .contexts import GPUOperatorContext, ensure_gpu_data_context
 from .v1_ops import (
     V1Outputs,
-    gpu_precompute_v1,
+    gpu_precompute_v1 as gpu_precompute_v1_original,
     predict_v1,
     solve_beta_plain_cg_v1,
 )
+from .surrogate_ops import gpu_precompute_v1 as gpu_precompute_v1_accelerated
 from .v2_preconditioner import (
     CoordinateNystromPreconditionerData,
     EnsembleCoordinateNystromPreconditionerData,
@@ -89,6 +90,30 @@ def _resolve_precond_storage_dtype(backend: Any, cfg: Any) -> Optional[Any]:
     return xp.dtype(raw)
 
 
+def _run_gpu_precompute(
+    backend: Any,
+    solver: EFGPSolver,
+    cfg: GPURunConfig,
+    data_ctx: Any,
+    op_ctx: Any,
+    *,
+    use_original_precompute: bool,
+) -> Any:
+    precompute_fn = (
+        gpu_precompute_v1_original if bool(use_original_precompute) else gpu_precompute_v1_accelerated
+    )
+    return precompute_fn(
+        backend,
+        solver.kernel,
+        solver.eps,
+        solver.nufft_tol,
+        data_ctx,
+        op_ctx,
+        l2scaled=solver.l2scaled,
+        chunk_size=cfg.chunk_size,
+    )
+
+
 def _dense_preconditioner_from_gpu_eigenspace(
     backend: Any,
     vecs_gpu: Any,
@@ -135,15 +160,13 @@ def run_v1_pure_efgp(
     data_ctx.meta["debug_finite_checks"] = bool(cfg.debug_finite_checks)
     op_ctx = GPUOperatorContext()
     t0 = time.perf_counter()
-    data_ctx = gpu_precompute_v1(
+    data_ctx = _run_gpu_precompute(
         backend,
-        solver.kernel,
-        solver.eps,
-        solver.nufft_tol,
+        solver,
+        cfg,
         data_ctx,
         op_ctx,
-        l2scaled=solver.l2scaled,
-        chunk_size=cfg.chunk_size,
+        use_original_precompute=True,
     )
     t1 = time.perf_counter()
 
@@ -175,7 +198,7 @@ def run_v1_pure_efgp(
             "time_precompute": float(t1 - t0),
             "time_solve": float(t3 - t2),
             "time_predict": float(t4 - t3),
-            "time_total": float(t4 - t0),
+            "time_total": float(t3 - t0),
             "t_matvec_avg": float(cg_stats["t_matvec_avg"]),
             "t_matvec_total": float(cg_stats["t_matvec_total"]),
             "n_matvec": int(cg_stats["n_matvec"]),
@@ -219,7 +242,7 @@ def run_v2_with_preconditioner_apply(
     op_ctx = GPUOperatorContext()
 
     t0 = time.perf_counter()
-    data_ctx = gpu_precompute_v1(
+    data_ctx = gpu_precompute_v1_original(
         backend,
         solver.kernel,
         solver.eps,
@@ -334,15 +357,13 @@ def run_v3_full_gpu_eigenspace(
     op_ctx = GPUOperatorContext()
 
     t0 = time.perf_counter()
-    data_ctx = gpu_precompute_v1(
+    data_ctx = _run_gpu_precompute(
         backend,
-        solver.kernel,
-        solver.eps,
-        solver.nufft_tol,
+        solver,
+        cfg,
         data_ctx,
         op_ctx,
-        l2scaled=solver.l2scaled,
-        chunk_size=cfg.chunk_size,
+        use_original_precompute=False,
     )
     t1 = time.perf_counter()
 
@@ -552,7 +573,7 @@ def run_v3_full_gpu_eigenspace(
             "time_precond_build": float(t3 - t2),
             "time_solve": float(t4 - t3),
             "time_predict": float(t5 - t4),
-            "time_total": float(t5 - t0),
+            "time_total": float(t4 - t0),
             "eig_n_iter": int(eig_diag.get("n_iter", 0)),
             "eig_block_size": int(eig_diag.get("block_size", 0)),
             "eig_residual_fro": float(eig_diag.get("residual_fro", float("nan"))),
@@ -606,15 +627,13 @@ def run_v6_box_toeplitz_active_block(
     op_ctx = GPUOperatorContext()
 
     t0 = time.perf_counter()
-    data_ctx = gpu_precompute_v1(
+    data_ctx = _run_gpu_precompute(
         backend,
-        solver.kernel,
-        solver.eps,
-        solver.nufft_tol,
+        solver,
+        cfg,
         data_ctx,
         op_ctx,
-        l2scaled=solver.l2scaled,
-        chunk_size=cfg.chunk_size,
+        use_original_precompute=False,
     )
     t1 = time.perf_counter()
 
@@ -647,7 +666,7 @@ def run_v6_box_toeplitz_active_block(
         "time_precond_build": float(setup_diag.get("time_precond_build", float("nan"))),
         "time_solve": float(t2 - t1),
         "time_predict": float(t3 - t2),
-        "time_total": float(t3 - t0),
+        "time_total": float(t2 - t0),
         "active_mode": setup_diag.get("active_mode"),
         "active_topk": setup_diag.get("active_topk"),
         "active_tau": setup_diag.get("active_tau"),
@@ -730,7 +749,7 @@ def build_v3_pcg_left_precond_matvec(
     data_ctx = ensure_gpu_data_context(backend, x, y, state=None)
     data_ctx.meta["debug_finite_checks"] = bool(cfg.debug_finite_checks)
     op_ctx = GPUOperatorContext()
-    data_ctx = gpu_precompute_v1(
+    data_ctx = gpu_precompute_v1_original(
         backend,
         solver.kernel,
         solver.eps,
@@ -858,7 +877,7 @@ def run_v4_dominant_subspace_preconditioner(
     op_ctx = GPUOperatorContext()
 
     t0 = time.perf_counter()
-    data_ctx = gpu_precompute_v1(
+    data_ctx = gpu_precompute_v1_original(
         backend,
         solver.kernel,
         solver.eps,
@@ -1018,7 +1037,7 @@ def run_v5_deflated_cg(
     reg = float(cfg.reg_lambda)
 
     t0 = time.perf_counter()
-    data_ctx = gpu_precompute_v1(
+    data_ctx = gpu_precompute_v1_original(
         backend,
         solver.kernel,
         solver.eps,
@@ -1254,7 +1273,7 @@ def run_v5_oracle_deflated_cg(
     reg = float(cfg.reg_lambda)
 
     t0 = time.perf_counter()
-    data_ctx = gpu_precompute_v1(
+    data_ctx = gpu_precompute_v1_original(
         backend,
         solver.kernel,
         solver.eps,
