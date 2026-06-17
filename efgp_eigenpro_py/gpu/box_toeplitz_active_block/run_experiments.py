@@ -36,8 +36,20 @@ def discover_processed_datasets() -> dict[str, Path]:
 def load_processed_dataset(stem: str) -> dict[str, Any]:
     dataset_map = discover_processed_datasets()
     if stem not in dataset_map:
+        sidecar_only = sorted(
+            p.stem
+            for p in _PROCESSED_DIR.glob("*.json")
+            if p.stem not in dataset_map
+        )
+        hint = ""
+        if stem in sidecar_only:
+            hint = (
+                f"\nFound sidecar metadata for {stem!r} but no matching .npz file under {_PROCESSED_DIR}."
+                "\nThis usually means the repository/Drive cache only has the .json preview metadata."
+                "\nCopy the matching .npz into processed/ (or restore it from Drive cache) before running."
+            )
         raise FileNotFoundError(
-            f"Unknown dataset stem {stem!r}. Available: {', '.join(sorted(dataset_map))}"
+            f"Unknown dataset stem {stem!r}. Available .npz stems: {', '.join(sorted(dataset_map))}{hint}"
         )
     npz_path = dataset_map[stem]
     meta_path = npz_path.with_suffix(".json")
