@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import math
 import re
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -41,7 +43,13 @@ DEFAULT_N_TRAIN_LIST = [
     10_000_000,
     30_000_000,
     100_000_000,
+    300_000_000,
+    1000_000_000
 ]
+
+DEFAULT_STORAGE_DTYPE = np.float32
+DEFAULT_STREAM_CHUNK_ROWS = 1_000_000
+UNCOMPRESSED_NPZ_THRESHOLD_ROWS = 50_000_000
 
 
 # -----------------------------------------------------------------------------
@@ -641,32 +649,39 @@ def _allocate_sample_counts(counts: np.ndarray, target: int, *, rng: np.random.G
     return alloc
 
 
-def _read_las_laz_points(
+def _iter_row_slices(n_rows: int, *, chunk_rows: int = DEFAULT_STREAM_CHUNK_ROWS):
+    chunk_rows = max(1, int(chunk_rows))
+    for start in range(0, int(n_rows), chunk_rows):
+        yield slice(start, min(int(n_rows), start + chunk_rows))
+
+
+def _sample_split_to_memmaps(
     paths: list[Path],
     *,
     classification_keep: list[int] | None,
     max_points_per_file: int | None,
     max_total_points: int | None,
+    test_size: float,
     seed: int,
-) -> tuple[np.ndarray, np.ndarray, dict]:
-    """Read LAS/LAZ points with memory-safe global subsampling.
+    work_dir: Path,
+    storage_dtype: np.dtype = DEFAULT_STORAGE_DTYPE,
+) -> tuple[np.memmap, np.memmap, np.memmap, np.memmap, dict]:
+    """Sample LAS/LAZ points into disk-backed train/test arrays.
 
-    Older versions loaded all selected tiles and only then applied
-    ``max_total_points``.  With 64 Winnebago tiles this can exceed 160M ground
-    points, causing multi-GB temporary allocations even for a 100k target data
-    set.  This version is two-pass:
+    The previous implementation still materialized the entire sampled population
+    in RAM via ``np.concatenate`` and then created another full-copy random
+    train/test split. For 300M+ training sets this is enough to OOM even after
+    global subsampling. Here we instead:
 
-    1. Count eligible points per tile after classification filtering.
-    2. Allocate the requested global sample across tiles and read only those
-       sampled points.
-
-    Thus peak memory is proportional to the requested processed dataset size,
-    not to the total number of downloaded points.
+    1. Count eligible points per file.
+    2. Allocate exact sample counts per file.
+    3. Allocate exact train/test counts per file.
+    4. Write sampled train/test points directly into memmap-backed arrays.
     """
     laspy = _require_laspy()
     rng = np.random.default_rng(int(seed))
+    storage_dtype = np.dtype(storage_dtype)
 
-    # First pass: count eligible points only.
     count_rows: list[dict] = []
     effective_counts: list[int] = []
     for path in paths:
@@ -707,20 +722,63 @@ def _read_las_laz_points(
         target_total = min(int(max_total_points), total_available)
     else:
         target_total = total_available
+    if target_total < 4:
+        raise ValueError(f"too few points available after sampling: {target_total}")
+
+    n_test = max(1, min(target_total - 1, int(round(target_total * float(test_size)))))
+    n_train = target_total - n_test
+    if n_train <= 0 or n_test <= 0:
+        raise ValueError(
+            f"invalid split for target_total={target_total}, test_size={test_size}: "
+            f"n_train={n_train}, n_test={n_test}"
+        )
 
     sample_counts = _allocate_sample_counts(counts, target_total, rng=rng)
+    train_counts = _allocate_sample_counts(sample_counts, n_train, rng=np.random.default_rng(int(seed) + 17))
+    test_counts = sample_counts - train_counts
 
-    xs: list[np.ndarray] = []
-    ys: list[np.ndarray] = []
-    zs: list[np.ndarray] = []
+    x_train = np.lib.format.open_memmap(
+        work_dir / "x_train_raw.npy",
+        mode="w+",
+        dtype=storage_dtype,
+        shape=(n_train, 2),
+    )
+    x_test = np.lib.format.open_memmap(
+        work_dir / "x_test_raw.npy",
+        mode="w+",
+        dtype=storage_dtype,
+        shape=(n_test, 2),
+    )
+    y_train = np.lib.format.open_memmap(
+        work_dir / "y_train_raw.npy",
+        mode="w+",
+        dtype=storage_dtype,
+        shape=(n_train,),
+    )
+    y_test = np.lib.format.open_memmap(
+        work_dir / "y_test_raw.npy",
+        mode="w+",
+        dtype=storage_dtype,
+        shape=(n_test,),
+    )
+
+    train_cursor = 0
+    test_cursor = 0
     file_summaries: list[dict] = []
 
-    # Second pass: actually sample only the allocated points.
-    for path, k, base_row in zip(paths, sample_counts.tolist(), count_rows):
-        k = int(k)
-        if k <= 0:
+    for path, k_total, k_train, k_test, base_row in zip(
+        paths,
+        sample_counts.tolist(),
+        train_counts.tolist(),
+        test_counts.tolist(),
+        count_rows,
+    ):
+        k_total = int(k_total)
+        k_train = int(k_train)
+        k_test = int(k_test)
+        if k_total <= 0:
             row = dict(base_row)
-            row.update({"n_used": 0})
+            row.update({"n_used": 0, "n_train_used": 0, "n_test_used": 0})
             file_summaries.append(row)
             continue
 
@@ -735,49 +793,160 @@ def _read_las_laz_points(
         if max_points_per_file is not None and max_points_per_file > 0 and idx.size > int(max_points_per_file):
             idx = rng.choice(idx, size=int(max_points_per_file), replace=False)
 
-        if idx.size > k:
-            idx = rng.choice(idx, size=k, replace=False)
+        if idx.size > k_total:
+            idx = rng.choice(idx, size=k_total, replace=False)
         else:
-            k = int(idx.size)
+            k_total = int(idx.size)
+            k_train = min(k_train, k_total)
+            k_test = k_total - k_train
 
-        x = np.asarray(las.x[idx], dtype=np.float64)
-        y = np.asarray(las.y[idx], dtype=np.float64)
-        z = np.asarray(las.z[idx], dtype=np.float64)
-        xs.append(x)
-        ys.append(y)
-        zs.append(z)
+        local_perm = rng.permutation(k_total)
+        train_local = idx[local_perm[:k_train]]
+        test_local = idx[local_perm[k_train : k_train + k_test]]
+
+        if k_train > 0:
+            x_chunk = np.asarray(las.x[train_local], dtype=storage_dtype)
+            y_chunk = np.asarray(las.y[train_local], dtype=storage_dtype)
+            z_chunk = np.asarray(las.z[train_local], dtype=storage_dtype)
+            x_train[train_cursor : train_cursor + k_train, 0] = x_chunk
+            x_train[train_cursor : train_cursor + k_train, 1] = y_chunk
+            y_train[train_cursor : train_cursor + k_train] = z_chunk
+            train_cursor += k_train
+        if k_test > 0:
+            x_chunk = np.asarray(las.x[test_local], dtype=storage_dtype)
+            y_chunk = np.asarray(las.y[test_local], dtype=storage_dtype)
+            z_chunk = np.asarray(las.z[test_local], dtype=storage_dtype)
+            x_test[test_cursor : test_cursor + k_test, 0] = x_chunk
+            x_test[test_cursor : test_cursor + k_test, 1] = y_chunk
+            y_test[test_cursor : test_cursor + k_test] = z_chunk
+            test_cursor += k_test
+
         row = dict(base_row)
         row.update(
             {
-                "n_used": int(k),
-                "x_minmax": [float(np.min(x)), float(np.max(x))],
-                "y_minmax": [float(np.min(y)), float(np.max(y))],
-                "z_minmax": [float(np.min(z)), float(np.max(z))],
+                "n_used": int(k_total),
+                "n_train_used": int(k_train),
+                "n_test_used": int(k_test),
             }
         )
         file_summaries.append(row)
         del las
 
-    if not xs:
-        raise ValueError("no points were loaded after filtering/subsampling")
-
-    x_concat = np.concatenate(xs)
-    y_concat = np.concatenate(ys)
-    z_concat = np.concatenate(zs)
-    x_raw = np.empty((x_concat.size, 2), dtype=np.float64)
-    x_raw[:, 0] = x_concat
-    x_raw[:, 1] = y_concat
-    y_raw = z_concat.astype(np.float64, copy=False)
+    if train_cursor != n_train or test_cursor != n_test:
+        raise RuntimeError(
+            f"internal split cursor mismatch: "
+            f"train {train_cursor}/{n_train}, test {test_cursor}/{n_test}"
+        )
 
     metadata = {
         "files": file_summaries,
         "n_files": len(paths),
         "n_available_after_filter_before_total_subsample": total_available,
         "max_total_points_requested": None if max_total_points is None else int(max_total_points),
-        "n_loaded_points": int(x_raw.shape[0]),
-        "sampling_method": "two_pass_per_tile_allocation",
+        "n_loaded_points": int(target_total),
+        "sampling_method": "two_pass_per_tile_allocation_to_memmap",
+        "storage_dtype": str(storage_dtype),
+        "n_train_target": int(n_train),
+        "n_test_target": int(n_test),
     }
-    return x_raw, y_raw, metadata
+    return x_train, x_test, y_train, y_test, metadata
+
+
+def _compute_raw_bbox(
+    x_train: np.ndarray,
+    x_test: np.ndarray,
+    y_train: np.ndarray,
+    y_test: np.ndarray,
+) -> dict[str, float]:
+    x_min = float("inf")
+    x_max = float("-inf")
+    y_min = float("inf")
+    y_max = float("-inf")
+    z_min = float("inf")
+    z_max = float("-inf")
+    for x_arr, y_arr in ((x_train, y_train), (x_test, y_test)):
+        for sl in _iter_row_slices(x_arr.shape[0]):
+            x_chunk = np.asarray(x_arr[sl], dtype=np.float64)
+            y_chunk = np.asarray(y_arr[sl], dtype=np.float64)
+            if x_chunk.size == 0:
+                continue
+            x_min = min(x_min, float(np.min(x_chunk[:, 0])))
+            x_max = max(x_max, float(np.max(x_chunk[:, 0])))
+            y_min = min(y_min, float(np.min(x_chunk[:, 1])))
+            y_max = max(y_max, float(np.max(x_chunk[:, 1])))
+            z_min = min(z_min, float(np.min(y_chunk)))
+            z_max = max(z_max, float(np.max(y_chunk)))
+    return {
+        "x_min": x_min,
+        "x_max": x_max,
+        "y_min": y_min,
+        "y_max": y_max,
+        "z_min": z_min,
+        "z_max": z_max,
+    }
+
+
+def _compute_x_shift_scale(x_train: np.ndarray) -> tuple[np.ndarray, float]:
+    x_min = np.array([np.inf, np.inf], dtype=np.float64)
+    for sl in _iter_row_slices(x_train.shape[0]):
+        chunk = np.asarray(x_train[sl], dtype=np.float64)
+        if chunk.size == 0:
+            continue
+        x_min = np.minimum(x_min, np.min(chunk, axis=0))
+    scale = 0.0
+    for sl in _iter_row_slices(x_train.shape[0]):
+        chunk = np.asarray(x_train[sl], dtype=np.float64)
+        if chunk.size == 0:
+            continue
+        shifted_max = float(np.max(chunk - x_min))
+        scale = max(scale, shifted_max)
+    return x_min, float(scale)
+
+
+def _compute_mean_std(y_train: np.ndarray) -> tuple[float, float]:
+    total = 0.0
+    count = 0
+    for sl in _iter_row_slices(y_train.shape[0]):
+        chunk = np.asarray(y_train[sl], dtype=np.float64)
+        if chunk.size == 0:
+            continue
+        total += float(np.sum(chunk, dtype=np.float64))
+        count += int(chunk.size)
+    if count <= 0:
+        raise ValueError("cannot compute y statistics for empty array")
+    mean = total / float(count)
+
+    sq = 0.0
+    for sl in _iter_row_slices(y_train.shape[0]):
+        chunk = np.asarray(y_train[sl], dtype=np.float64)
+        if chunk.size == 0:
+            continue
+        diff = chunk - mean
+        sq += float(np.dot(diff, diff))
+    std = math.sqrt(max(sq / float(count), 0.0))
+    return float(mean), float(std)
+
+
+def _normalize_x_inplace(x_arr: np.ndarray, *, x_min: np.ndarray, scale: float) -> None:
+    x_min_cast = np.asarray(x_min, dtype=x_arr.dtype)
+    scale_cast = x_arr.dtype.type(scale)
+    for sl in _iter_row_slices(x_arr.shape[0]):
+        chunk = x_arr[sl]
+        if chunk.size == 0:
+            continue
+        chunk -= x_min_cast
+        chunk /= scale_cast
+
+
+def _normalize_y_inplace(y_arr: np.ndarray, *, mean: float, std: float) -> None:
+    mean_cast = y_arr.dtype.type(mean)
+    std_cast = y_arr.dtype.type(std)
+    for sl in _iter_row_slices(y_arr.shape[0]):
+        chunk = y_arr[sl]
+        if chunk.size == 0:
+            continue
+        chunk -= mean_cast
+        chunk /= std_cast
 
 
 def preprocess_lidar_elevation(
@@ -795,70 +964,65 @@ def preprocess_lidar_elevation(
     max_total_points: int | None = None,
     selection_metadata: dict | None = None,
 ) -> dict:
-    x_raw, y_raw, read_meta = _read_las_laz_points(
-        las_paths,
-        classification_keep=classification_keep,
-        max_points_per_file=max_points_per_file,
-        max_total_points=max_total_points,
-        seed=seed,
-    )
-    n_before_total_subsample = int(
-        read_meta.get("n_available_after_filter_before_total_subsample", x_raw.shape[0])
-    )
-
-    finite_mask = np.isfinite(x_raw).all(axis=1) & np.isfinite(y_raw)
-    x_raw = x_raw[finite_mask]
-    y_raw = y_raw[finite_mask]
-    n_clean = int(x_raw.shape[0])
-    if n_clean < 4:
-        raise ValueError(f"too few finite points after cleaning: {n_clean}")
-
-    raw_bbox = {
-        "x_min": float(np.min(x_raw[:, 0])),
-        "x_max": float(np.max(x_raw[:, 0])),
-        "y_min": float(np.min(x_raw[:, 1])),
-        "y_max": float(np.max(x_raw[:, 1])),
-        "z_min": float(np.min(y_raw)),
-        "z_max": float(np.max(y_raw)),
-    }
-
-    x_train_raw, x_test_raw, y_train_raw, y_test_raw, train_idx, test_idx = _train_test_split(
-        x_raw,
-        y_raw,
-        test_size=test_size,
-        seed=seed,
-    )
-
-    x_min = np.min(x_train_raw, axis=0)
-    x_train_shifted = x_train_raw - x_min
-    x_test_shifted = x_test_raw - x_min
-    scale = float(np.max(x_train_shifted))
-    if not np.isfinite(scale) or scale <= 0.0:
-        raise ValueError(f"invalid spatial scale: {scale}")
-    x_train = x_train_shifted / scale
-    x_test = x_test_shifted / scale
-
-    y_mean = float(np.mean(y_train_raw))
-    y_std = float(np.std(y_train_raw))
-    if not np.isfinite(y_std) or y_std <= 0.0:
-        raise ValueError(f"invalid target std: {y_std}")
-    y_train = (y_train_raw - y_mean) / y_std
-    y_test = (y_test_raw - y_mean) / y_std
-
     output_npz.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        output_npz,
-        x_train=np.asarray(x_train, dtype=np.float64),
-        x_test=np.asarray(x_test, dtype=np.float64),
-        y_train=np.asarray(y_train, dtype=np.float64),
-        y_test=np.asarray(y_test, dtype=np.float64),
-        x_min=np.asarray(x_min, dtype=np.float64),
-        x_scale=np.asarray([scale], dtype=np.float64),
-        y_mean=np.asarray([y_mean], dtype=np.float64),
-        y_std=np.asarray([y_std], dtype=np.float64),
-        train_idx=np.asarray(train_idx, dtype=np.int64),
-        test_idx=np.asarray(test_idx, dtype=np.int64),
-    )
+
+    with tempfile.TemporaryDirectory(prefix="usgs_lidar_tmp_", dir=str(output_npz.parent)) as tmp_dir:
+        x_train_raw = x_test_raw = y_train_raw = y_test_raw = None
+        try:
+            x_train_raw, x_test_raw, y_train_raw, y_test_raw, read_meta = _sample_split_to_memmaps(
+                las_paths,
+                classification_keep=classification_keep,
+                max_points_per_file=max_points_per_file,
+                max_total_points=max_total_points,
+                test_size=test_size,
+                seed=seed,
+                work_dir=Path(tmp_dir),
+                storage_dtype=DEFAULT_STORAGE_DTYPE,
+            )
+
+            n_before_total_subsample = int(
+                read_meta.get(
+                    "n_available_after_filter_before_total_subsample",
+                    x_train_raw.shape[0] + x_test_raw.shape[0],
+                )
+            )
+            n_clean = int(x_train_raw.shape[0] + x_test_raw.shape[0])
+            if n_clean < 4:
+                raise ValueError(f"too few finite points after cleaning: {n_clean}")
+
+            raw_bbox = _compute_raw_bbox(x_train_raw, x_test_raw, y_train_raw, y_test_raw)
+            x_min, scale = _compute_x_shift_scale(x_train_raw)
+            if not np.isfinite(scale) or scale <= 0.0:
+                raise ValueError(f"invalid spatial scale: {scale}")
+            y_mean, y_std = _compute_mean_std(y_train_raw)
+            if not np.isfinite(y_std) or y_std <= 0.0:
+                raise ValueError(f"invalid target std: {y_std}")
+
+            _normalize_x_inplace(x_train_raw, x_min=x_min, scale=scale)
+            _normalize_x_inplace(x_test_raw, x_min=x_min, scale=scale)
+            _normalize_y_inplace(y_train_raw, mean=y_mean, std=y_std)
+            _normalize_y_inplace(y_test_raw, mean=y_mean, std=y_std)
+
+            x_train_raw.flush()
+            x_test_raw.flush()
+            y_train_raw.flush()
+            y_test_raw.flush()
+
+            savez_fn = np.savez if n_clean >= UNCOMPRESSED_NPZ_THRESHOLD_ROWS else np.savez_compressed
+            savez_fn(
+                output_npz,
+                x_train=x_train_raw,
+                x_test=x_test_raw,
+                y_train=y_train_raw,
+                y_test=y_test_raw,
+                x_min=np.asarray(x_min, dtype=np.float64),
+                x_scale=np.asarray([scale], dtype=np.float64),
+                y_mean=np.asarray([y_mean], dtype=np.float64),
+                y_std=np.asarray([y_std], dtype=np.float64),
+            )
+        finally:
+            del x_train_raw, x_test_raw, y_train_raw, y_test_raw
+            gc.collect()
 
     metadata = {
         "dataset_name": dataset_name,
@@ -876,17 +1040,27 @@ def preprocess_lidar_elevation(
             "classification_keep_note": "LAS class 2 is ground in standard classified lidar; pass empty string to disable filtering.",
             "max_points_per_file": max_points_per_file,
             "max_total_points": max_total_points,
+            "storage_dtype": str(DEFAULT_STORAGE_DTYPE),
         },
-        "split": {"method": "random", "test_size": float(test_size), "seed": int(seed)},
+        "split": {
+            "method": "random_per_file_exact_allocation",
+            "test_size": float(test_size),
+            "seed": int(seed),
+            "split_indices_saved": False,
+        },
         "x_transform": {"method": "shift_and_shared_scale", "x_min_train": [float(v) for v in x_min], "shared_scale": float(scale)},
         "y_transform": {"method": "train_standardization", "mean": y_mean, "std": y_std},
         "raw_bbox": raw_bbox,
         "tile_selection_metadata": selection_metadata or {},
+        "serialization": {
+            "npz_mode": "stored" if n_clean >= UNCOMPRESSED_NPZ_THRESHOLD_ROWS else "deflated",
+            "array_dtype": str(DEFAULT_STORAGE_DTYPE),
+        },
         "shapes": {
             "n_loaded_before_total_subsample": n_before_total_subsample,
             "n_clean": n_clean,
-            "n_train": int(x_train.shape[0]),
-            "n_test": int(x_test.shape[0]),
+            "n_train": int(read_meta.get("n_train_target", 0)),
+            "n_test": int(read_meta.get("n_test_target", 0)),
             "dim": 2,
         },
         "read_metadata": read_meta,

@@ -114,6 +114,21 @@ def _run_gpu_precompute(
     )
 
 
+def _common_dimension_diagnostics(data_ctx: Any) -> dict[str, Any]:
+    meta = getattr(data_ctx, "meta", {}) or {}
+    out: dict[str, Any] = {}
+    mtot = meta.get("mtot")
+    dim = meta.get("dim")
+    if mtot is not None:
+        out["mtot"] = int(mtot)
+    if dim is not None:
+        out["dim"] = int(dim)
+    if mtot is not None and dim is not None:
+        out["efgp_matrix_dim"] = int(int(mtot) ** int(dim))
+        out["M"] = int(int(mtot) ** int(dim))
+    return out
+
+
 def _dense_preconditioner_from_gpu_eigenspace(
     backend: Any,
     vecs_gpu: Any,
@@ -209,6 +224,7 @@ def run_v1_pure_efgp(
             "eigen_apply_A_block_calls": 0,
             "device_name": backend.device_name,
             "has_nufft": backend.has_nufft,
+            **_common_dimension_diagnostics(data_ctx),
             "chunk_size": cfg.chunk_size,
             "debug_finite_checks": bool(cfg.debug_finite_checks),
             "profile_components": bool(cfg.profile_components),
@@ -332,6 +348,7 @@ def run_v2_with_preconditioner_apply(
             "n_precond": int(stats["n_precond"]),
             "device_name": backend.device_name,
             "has_nufft": backend.has_nufft,
+            **_common_dimension_diagnostics(data_ctx),
             "chunk_size": cfg.chunk_size,
             "debug_finite_checks": bool(cfg.debug_finite_checks),
             "profile_components": bool(cfg.profile_components),
@@ -600,6 +617,7 @@ def run_v3_full_gpu_eigenspace(
             "n_precond": int(stats["n_precond"]),
             "device_name": backend.device_name,
             "has_nufft": backend.has_nufft,
+            **_common_dimension_diagnostics(data_ctx),
             "chunk_size": cfg.chunk_size,
             "debug_finite_checks": bool(cfg.debug_finite_checks),
             "profile_components": bool(cfg.profile_components),
@@ -718,6 +736,7 @@ def run_v6_box_toeplitz_active_block(
         "outer_status": setup_diag.get("outer_status", stats.get("status")),
         "device_name": backend.device_name,
         "has_nufft": backend.has_nufft,
+        **_common_dimension_diagnostics(data_ctx),
         "chunk_size": cfg.chunk_size,
         "debug_finite_checks": bool(cfg.debug_finite_checks),
         "profile_components": bool(cfg.profile_components),

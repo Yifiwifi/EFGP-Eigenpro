@@ -1,0 +1,77 @@
+{
+  "project_url": "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/",
+  "dataset_stem_prefix": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression",
+  "download_dir": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\raw\\USGS_LPC_IL_Winnebago_2018",
+  "output_dir": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\_tmp_stream_test",
+  "n_train_list": [
+    1000
+  ],
+  "test_size": 0.2,
+  "max_files": 4,
+  "tile_selection_metadata": {
+    "tile_selection": "contiguous_grid_block",
+    "n_available_items": 274,
+    "n_keyed_items": 274,
+    "n_selected": 4,
+    "target_count": 4,
+    "rank_block_origin": [
+      7,
+      9
+    ],
+    "rank_block_shape": [
+      2,
+      2
+    ],
+    "tile_coord_min": [
+      2563,
+      2065
+    ],
+    "tile_coord_max": [
+      2565,
+      2067
+    ],
+    "tile_coords": [
+      [
+        2563,
+        2065
+      ],
+      [
+        2563,
+        2067
+      ],
+      [
+        2565,
+        2065
+      ],
+      [
+        2565,
+        2067
+      ]
+    ],
+    "tile_names": [
+      "USGS_LPC_IL_Winnebago_2018_2563_2065.laz",
+      "USGS_LPC_IL_Winnebago_2018_2563_2067.laz",
+      "USGS_LPC_IL_Winnebago_2018_2565_2065.laz",
+      "USGS_LPC_IL_Winnebago_2018_2565_2067.laz"
+    ]
+  },
+  "max_points_per_file": null,
+  "classification_keep": [
+    2
+  ],
+  "generated": [
+    {
+      "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain1000",
+      "n_train_target": 1000,
+      "max_total_points_used": 1250,
+      "output_npz": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\_tmp_stream_test\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain1000.npz",
+      "output_json": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\_tmp_stream_test\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain1000.json",
+      "n_loaded_before_total_subsample": 9426209,
+      "n_clean": 1250,
+      "n_train": 1000,
+      "n_test": 250,
+      "dim": 2
+    }
+  ],
+  "failures": []
+}

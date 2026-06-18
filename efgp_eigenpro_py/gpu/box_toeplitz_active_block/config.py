@@ -35,12 +35,14 @@ class BTABExperimentConfig:
             "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain100000",
         ]
     )
+    n_train_list: list[int] = field(default_factory=list)
     kernel_family: str = "matern"
     kernel_lengthscale: float = 0.1
     kernel_nu: float = 1.5
     kernel_variance: float = 1.0
     reg_lambda: float = 0.1
     eps: float = 1e-5
+    eps_list: list[float] = field(default_factory=lambda: [1e-5])
     nufft_tol: float = 1e-10
     l2_scaled: bool = True
     tol: float = 1e-6
@@ -48,6 +50,8 @@ class BTABExperimentConfig:
     chunk_size: Optional[int] = None
     profile_components: bool = True
     debug_finite_checks: bool = False
+    warmup_repeats: int = 0
+    measured_repeats: int = 1
     eigenpro_topq_list: list[int] = field(default_factory=lambda: [45, 90])
     btab_active_mode: str = "topk"
     btab_topk_list: list[int] = field(default_factory=lambda: [512, 1024, 2048])
