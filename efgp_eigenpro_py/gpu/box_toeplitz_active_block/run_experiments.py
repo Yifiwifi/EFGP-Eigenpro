@@ -90,6 +90,59 @@ def _pick_matching_stem(candidates: list[dict[str, Any]], prefix: str, n_train: 
     )
 
 
+def _n_train_from_sidecar_meta(meta: dict[str, Any]) -> int | None:
+    if not isinstance(meta, dict):
+        return None
+    for path in (
+        ("generation", "n_train"),
+        ("shapes", "n_train"),
+        ("n_train",),
+    ):
+        obj: Any = meta
+        ok = True
+        for key in path:
+            if not isinstance(obj, dict) or key not in obj:
+                ok = False
+                break
+            obj = obj[key]
+        if ok and obj is not None:
+            return int(obj)
+    return None
+
+
+def _json_sidecar_only_n_trains(family_prefix: str) -> list[int]:
+    values: list[int] = []
+    for json_path in sorted(_PROCESSED_DIR.glob("*.json")):
+        stem = json_path.stem
+        if _stem_family_prefix(stem) != family_prefix:
+            continue
+        if (_PROCESSED_DIR / f"{stem}.npz").exists():
+            continue
+        try:
+            meta = json.loads(json_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        n_train = _n_train_from_sidecar_meta(meta)
+        if n_train is not None:
+            values.append(int(n_train))
+    return sorted(set(values))
+
+
+def candidate_dataset_stems_for_restore(cfg: BTABExperimentConfig) -> list[str]:
+    """Return plausible dataset stems to restore before resolve_dataset_stems runs."""
+    if not cfg.n_train_list:
+        return [str(stem).strip() for stem in cfg.dataset_stems if str(stem).strip()]
+    family_prefixes = list(
+        dict.fromkeys(_stem_family_prefix(stem) for stem in cfg.dataset_stems if str(stem).strip())
+    )
+    candidates: list[str] = []
+    for prefix in family_prefixes:
+        for n_train in cfg.n_train_list:
+            candidates.append(f"{prefix}_ntrain{int(n_train)}")
+            candidates.append(f"{prefix}_n{int(n_train)}")
+    return list(dict.fromkeys(candidates))
+
+
 def resolve_dataset_stems(cfg: BTABExperimentConfig) -> list[str]:
     if not cfg.n_train_list:
         return list(cfg.dataset_stems)
@@ -106,9 +159,23 @@ def resolve_dataset_stems(cfg: BTABExperimentConfig) -> list[str]:
             matches = [rec for rec in family_records if int(rec["n_train"]) == int(n_train)]
             if not matches:
                 available = ", ".join(str(rec["n_train"]) for rec in sorted(family_records, key=lambda rec: int(rec["n_train"])))
+                sidecar_only = _json_sidecar_only_n_trains(prefix)
+                hint = ""
+                if int(n_train) in sidecar_only:
+                    hint = (
+                        f"\nFound .json sidecar for n_train={int(n_train)} but no matching .npz under {_PROCESSED_DIR}. "
+                        "Restore from Google Drive cache first (notebook: ensure_btab_datasets_available), "
+                        "or copy the .npz into processed/."
+                    )
+                elif sidecar_only:
+                    hint = (
+                        "\nJson-only sidecars (no .npz) for this family include n_train: "
+                        + ", ".join(str(v) for v in sidecar_only)
+                        + "."
+                    )
                 raise FileNotFoundError(
                     f"No processed dataset found for family {prefix!r} with n_train={int(n_train)}. "
-                    f"Available n_train values: {available}"
+                    f"Available local .npz n_train values: {available}{hint}"
                 )
             resolved.append(_pick_matching_stem(matches, prefix=prefix, n_train=int(n_train)))
     return list(dict.fromkeys(resolved))
