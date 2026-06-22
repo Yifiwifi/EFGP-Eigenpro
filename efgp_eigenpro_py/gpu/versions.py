@@ -49,7 +49,11 @@ from .deflation_core import (
 )
 from .deflation_subspace import build_deflation_subspace
 from .box_toeplitz_active_block.config import BTABConfig
-from .box_toeplitz_active_block.runner import solve_box_toeplitz_active_block
+from .box_toeplitz_active_block.diagnostics import run_btab_post_diagnostics
+from .box_toeplitz_active_block.runner import (
+    solve_box_eigenpro_active_block,
+    solve_box_toeplitz_active_block,
+)
 
 
 @dataclass
@@ -656,7 +660,7 @@ def run_v6_box_toeplitz_active_block(
     t1 = time.perf_counter()
 
     btab_cfg = btab_cfg or BTABConfig()
-    beta_gpu, it, relres, stats, setup_diag = solve_box_toeplitz_active_block(
+    beta_gpu, it, relres, stats, setup_diag, precond_data = solve_box_toeplitz_active_block(
         backend,
         data_ctx,
         float(cfg.reg_lambda),
@@ -666,10 +670,21 @@ def run_v6_box_toeplitz_active_block(
         maxiter=cfg.maxiter,
         btab_cfg=btab_cfg,
         profile_components=cfg.profile_components,
+        return_precond_data=True,
     )
     t2 = time.perf_counter()
     _ = predict_v1(backend, data_ctx, x, beta_gpu)
     t3 = time.perf_counter()
+    post_diag = run_btab_post_diagnostics(
+        backend,
+        data_ctx,
+        float(cfg.reg_lambda),
+        precond_data,
+        route="inverse",
+        mode=str(getattr(btab_cfg, "diagnostic_mode", "cheap")),
+        tol=float(getattr(btab_cfg, "diagnostic_tol", 1e-2)),
+        power_iter=int(getattr(btab_cfg, "diagnostic_power_iter", 30)),
+    )
 
     diagnostics = {
         "version": "v6_btab",
@@ -685,9 +700,12 @@ def run_v6_box_toeplitz_active_block(
         "time_solve": float(t2 - t1),
         "time_predict": float(t3 - t2),
         "time_total": float(t2 - t0),
+        "time_post_diagnostics": float(post_diag.get("time_post_diagnostics", 0.0)),
+        "time_total_with_diagnostics": float((t2 - t0) + post_diag.get("time_post_diagnostics", 0.0)),
         "active_mode": setup_diag.get("active_mode"),
         "active_topk": setup_diag.get("active_topk"),
         "active_tau": setup_diag.get("active_tau"),
+        "S_kind": setup_diag.get("S_kind", "expanded_box"),
         "solve_mode": setup_diag.get("solve_mode"),
         "exact_apply_mode": setup_diag.get("exact_apply_mode"),
         "outer_solver": setup_diag.get("outer_solver"),
@@ -698,6 +716,8 @@ def run_v6_box_toeplitz_active_block(
         "active_size": int(setup_diag.get("active_size", 0)),
         "box_size": int(setup_diag.get("box_size", 0)),
         "tail_size": int(setup_diag.get("tail_size", 0)),
+        "btab_active_size_raw": int(setup_diag.get("btab_active_size_raw", setup_diag.get("active_size", 0))),
+        "btab_box_size": int(setup_diag.get("btab_box_size", setup_diag.get("box_size", 0))),
         "box_radii": setup_diag.get("box_radii", []),
         "box_shape": setup_diag.get("box_shape", []),
         "gamma": float(setup_diag.get("gamma", float("nan"))),
@@ -740,6 +760,162 @@ def run_v6_box_toeplitz_active_block(
         "chunk_size": cfg.chunk_size,
         "debug_finite_checks": bool(cfg.debug_finite_checks),
         "profile_components": bool(cfg.profile_components),
+        **post_diag,
+    }
+    return V1Outputs(
+        beta_gpu=beta_gpu,
+        diagnostics=diagnostics,
+        backend=backend,
+        data_ctx=data_ctx,
+    )
+
+
+def run_v7_box_eigenpro_active_block(
+    solver: EFGPSolver,
+    x: np.ndarray,
+    y: np.ndarray,
+    cfg: GPURunConfig,
+    *,
+    btab_cfg: Optional[BTABConfig] = None,
+) -> V1Outputs:
+    """
+    V7: GPU FFT Toeplitz matvec + expanded-box EigenPro inverse block
+    preconditioner.  The block set is B=active.box_idx, not the raw active_idx.
+    """
+    backend = build_gpu_backend_bundle(cfg.backend)
+    data_ctx = ensure_gpu_data_context(backend, x, y, state=None)
+    data_ctx.meta["debug_finite_checks"] = bool(cfg.debug_finite_checks)
+    op_ctx = GPUOperatorContext()
+
+    t0 = time.perf_counter()
+    data_ctx = _run_gpu_precompute(
+        backend,
+        solver,
+        cfg,
+        data_ctx,
+        op_ctx,
+        use_original_precompute=False,
+    )
+    t1 = time.perf_counter()
+
+    btab_cfg = btab_cfg or BTABConfig()
+    beta_gpu, it, relres, stats, setup_diag, precond_data = solve_box_eigenpro_active_block(
+        backend,
+        data_ctx,
+        float(cfg.reg_lambda),
+        data_ctx.rhs_gpu,
+        op_ctx,
+        tol=cfg.tol,
+        maxiter=cfg.maxiter,
+        btab_cfg=btab_cfg,
+        profile_components=cfg.profile_components,
+        return_precond_data=True,
+    )
+    t2 = time.perf_counter()
+    _ = predict_v1(backend, data_ctx, x, beta_gpu)
+    t3 = time.perf_counter()
+    post_diag = run_btab_post_diagnostics(
+        backend,
+        data_ctx,
+        float(cfg.reg_lambda),
+        precond_data,
+        route="boxeig",
+        mode=str(getattr(btab_cfg, "diagnostic_mode", "cheap")),
+        tol=float(getattr(btab_cfg, "diagnostic_tol", 1e-2)),
+        power_iter=int(getattr(btab_cfg, "diagnostic_power_iter", 30)),
+    )
+
+    time_total = float(t2 - t0)
+    diagnostics = {
+        "version": "v7_btab_boxeig",
+        "status": "ok",
+        "nufft_backend": backend.nufft_name,
+        "nufft_stage": data_ctx.meta.get("nufft_stage"),
+        "cg_iters": int(it),
+        "cg_relres": float(relres),
+        "outer_iters": int(it),
+        "outer_relres": float(relres),
+        "time_precompute": float(t1 - t0),
+        "time_precond_build": float(setup_diag.get("time_precond_build", float("nan"))),
+        "time_solve": float(t2 - t1),
+        "time_predict": float(t3 - t2),
+        "time_total": time_total,
+        "time_post_diagnostics": float(post_diag.get("time_post_diagnostics", 0.0)),
+        "time_total_with_diagnostics": float(time_total + post_diag.get("time_post_diagnostics", 0.0)),
+        "active_mode": setup_diag.get("active_mode"),
+        "active_topk": setup_diag.get("active_topk"),
+        "active_tau": setup_diag.get("active_tau"),
+        "S_kind": setup_diag.get("S_kind", "expanded_box"),
+        "solve_mode": setup_diag.get("solve_mode"),
+        "exact_apply_mode": setup_diag.get("exact_apply_mode"),
+        "outer_solver": setup_diag.get("outer_solver"),
+        "outer_gmres_restart": int(setup_diag.get("outer_gmres_restart", 0)),
+        "inner_tol": float(setup_diag.get("inner_tol", float("nan"))),
+        "inner_maxiter": int(setup_diag.get("inner_maxiter", 0)),
+        "inner_precond": setup_diag.get("inner_precond"),
+        "active_size": int(setup_diag.get("active_size", 0)),
+        "box_size": int(setup_diag.get("box_size", 0)),
+        "tail_size": int(setup_diag.get("tail_size", 0)),
+        "btab_active_size_raw": int(setup_diag.get("btab_active_size_raw", setup_diag.get("active_size", 0))),
+        "btab_box_size": int(setup_diag.get("btab_box_size", setup_diag.get("box_size", 0))),
+        "box_radii": setup_diag.get("box_radii", []),
+        "box_shape": setup_diag.get("box_shape", []),
+        "gamma": float(setup_diag.get("gamma", float("nan"))),
+        "sigma2_equiv_reg_lambda": float(setup_diag.get("sigma2_equiv_reg_lambda", cfg.reg_lambda)),
+        "time_active_set": float(setup_diag.get("time_active_set", float("nan"))),
+        "time_build_Ag": float(setup_diag.get("time_build_Ag", float("nan"))),
+        "time_build_box_matrix": float(setup_diag.get("time_build_box_matrix", 0.0)),
+        "time_symmetrize_regularize": float(setup_diag.get("time_symmetrize_regularize", 0.0)),
+        "time_cholesky": float(setup_diag.get("time_cholesky", 0.0)),
+        "time_build_inverse": float(setup_diag.get("time_build_inverse", 0.0)),
+        "time_build_local_fft": float(setup_diag.get("time_build_local_fft", float("nan"))),
+        "time_eig_setup": float(setup_diag.get("time_eig_setup", float("nan"))),
+        "box_memory_bytes": int(setup_diag.get("box_memory_bytes", 0)),
+        "chol_memory_bytes": int(setup_diag.get("chol_memory_bytes", 0)),
+        "inverse_memory_bytes": int(setup_diag.get("inverse_memory_bytes", 0)),
+        "local_fft_memory_bytes": int(setup_diag.get("local_fft_memory_bytes", 0)),
+        "precond_apply_calls": int(setup_diag.get("precond_apply_calls", 0)),
+        "inner_total_iters": int(setup_diag.get("inner_total_iters", 0)),
+        "inner_total_matvec": int(setup_diag.get("inner_total_matvec", 0)),
+        "inner_total_precond": int(setup_diag.get("inner_total_precond", 0)),
+        "inner_last_relres": float(setup_diag.get("inner_last_relres", float("nan"))),
+        "inner_max_iters": int(setup_diag.get("inner_max_iters", 0)),
+        "time_diag_total": float(setup_diag.get("time_diag_total", float("nan"))),
+        "time_box_gather_total": float(setup_diag.get("time_box_gather_total", float("nan"))),
+        "time_box_solve_total": float(setup_diag.get("time_box_solve_total", float("nan"))),
+        "time_box_scatter_total": float(setup_diag.get("time_box_scatter_total", float("nan"))),
+        "time_diag_avg": float(setup_diag.get("time_diag_avg", float("nan"))),
+        "time_box_gather_avg": float(setup_diag.get("time_box_gather_avg", float("nan"))),
+        "time_box_solve_avg": float(setup_diag.get("time_box_solve_avg", float("nan"))),
+        "time_box_scatter_avg": float(setup_diag.get("time_box_scatter_avg", float("nan"))),
+        "btab_eig_q": int(setup_diag.get("btab_eig_q", getattr(btab_cfg, "eig_q", 0))),
+        "btab_eig_size_S": int(setup_diag.get("btab_eig_size_S", 0)),
+        "btab_eig_size_T": int(setup_diag.get("btab_eig_size_T", 0)),
+        "btab_eig_theta_q1": float(setup_diag.get("btab_eig_theta_q1", float("nan"))),
+        "btab_eig_theta_q1_over_sigma2": float(setup_diag.get("btab_eig_theta_q1_over_sigma2", float("nan"))),
+        "btab_eig_storage_bytes": int(setup_diag.get("btab_eig_storage_bytes", 0)),
+        "btab_eig_n_eig_matvec": int(setup_diag.get("btab_eig_n_eig_matvec", 0)),
+        "btab_eig_n_ABB_matvec_cols": int(setup_diag.get("btab_eig_n_ABB_matvec_cols", setup_diag.get("btab_eig_n_eig_matvec", 0))),
+        "btab_eig_ncv_actual": int(setup_diag.get("btab_eig_ncv_actual", 0)),
+        "btab_eig_backend": str(setup_diag.get("btab_eig_backend", "")),
+        "btab_eig_tol": float(setup_diag.get("btab_eig_tol", float("nan"))),
+        "btab_eig_maxiter": int(setup_diag.get("btab_eig_maxiter", 0)),
+        "btab_eig_apply_batch_cols": setup_diag.get("btab_eig_apply_batch_cols"),
+        "t_matvec_avg": float(stats["t_matvec_avg"]),
+        "t_matvec_total": float(stats["t_matvec_total"]),
+        "n_matvec": int(stats["n_matvec"]),
+        "cg_n_matvec": int(stats["n_matvec"]),
+        "t_precond_total": float(stats["t_precond_total"]),
+        "t_precond_avg": float(stats["t_precond_avg"]),
+        "n_precond": int(stats["n_precond"]),
+        "outer_status": setup_diag.get("outer_status", stats.get("status")),
+        "device_name": backend.device_name,
+        "has_nufft": backend.has_nufft,
+        **_common_dimension_diagnostics(data_ctx),
+        "chunk_size": cfg.chunk_size,
+        "debug_finite_checks": bool(cfg.debug_finite_checks),
+        "profile_components": bool(cfg.profile_components),
+        **post_diag,
     }
     return V1Outputs(
         beta_gpu=beta_gpu,

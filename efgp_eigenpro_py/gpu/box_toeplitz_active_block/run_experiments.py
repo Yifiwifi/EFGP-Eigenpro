@@ -20,10 +20,11 @@ from ..versions import (
     GPURunConfig,
     run_v1_pure_efgp,
     run_v3_full_gpu_eigenspace,
+    run_v7_box_eigenpro_active_block,
     run_v6_box_toeplitz_active_block,
 )
 from .active_set import format_box_tag
-from .config import BTABConfig, BTABExperimentConfig
+from .config import BTABConfig, BTABExperimentConfig, resolve_btab_experiment_route
 
 
 _HERE = Path(__file__).resolve().parent
@@ -277,6 +278,10 @@ def method_rows_for_dataset(
     repeat_idx: int = 0,
     is_warmup: bool = False,
 ) -> list[dict[str, Any]]:
+    cfg = resolve_btab_experiment_route(
+        cfg,
+        n_train=int(dataset_payload["n_train"]),
+    )
     x_train = np.asarray(dataset_payload["x_train"], dtype=np.float64)
     y_train = np.asarray(dataset_payload["y_train"], dtype=np.float64).reshape(-1)
     x_test = np.asarray(dataset_payload["x_test"], dtype=np.float64)
@@ -312,6 +317,7 @@ def method_rows_for_dataset(
             "is_warmup": bool(is_warmup),
             "run_seed": int(run_seed),
             "method": tag,
+            "btab_experiment_route": str(cfg.btab_experiment_route),
             **extra,
         }
         try:
@@ -356,6 +362,11 @@ def method_rows_for_dataset(
         )
 
     if str(cfg.btab_active_mode).lower() == "topk":
+        inverse_topk_list = (
+            cfg.btab_topk_list
+            if cfg.btab_inverse_topk_list is None
+            else cfg.btab_inverse_topk_list
+        )
         configs = [
             BTABConfig(
                 active_mode="topk",
@@ -371,8 +382,11 @@ def method_rows_for_dataset(
                 inner_maxiter=int(cfg.btab_inner_maxiter),
                 inner_precond=str(cfg.btab_inner_precond),
                 keep_box_matrix=bool(cfg.btab_keep_box_matrix),
+                diagnostic_mode=str(cfg.btab_diagnostic_mode),
+                diagnostic_power_iter=int(cfg.btab_diagnostic_power_iter),
+                diagnostic_tol=float(cfg.btab_diagnostic_tol),
             )
-            for k in cfg.btab_topk_list
+            for k in inverse_topk_list
         ]
     else:
         configs = [
@@ -390,6 +404,9 @@ def method_rows_for_dataset(
                 inner_maxiter=int(cfg.btab_inner_maxiter),
                 inner_precond=str(cfg.btab_inner_precond),
                 keep_box_matrix=bool(cfg.btab_keep_box_matrix),
+                diagnostic_mode=str(cfg.btab_diagnostic_mode),
+                diagnostic_power_iter=int(cfg.btab_diagnostic_power_iter),
+                diagnostic_tol=float(cfg.btab_diagnostic_tol),
             )
             for tau in cfg.btab_tau_list
         ]
@@ -433,6 +450,103 @@ def method_rows_for_dataset(
                 "btab_inner_tol": float(btab_cfg.inner_tol),
                 "btab_inner_maxiter": int(btab_cfg.inner_maxiter),
                 "btab_inner_precond": str(btab_cfg.inner_precond),
+                "btab_diagnostic_mode": str(btab_cfg.diagnostic_mode),
+                "btab_diagnostic_power_iter": int(btab_cfg.diagnostic_power_iter),
+                "btab_diagnostic_tol": float(btab_cfg.diagnostic_tol),
+            },
+        )
+    if cfg.btab_boxeig_topk_q_pairs is None:
+        boxeig_configs = [
+            (base_cfg, int(q))
+            for base_cfg in configs
+            for q in cfg.btab_eig_q_list
+        ]
+    else:
+        boxeig_configs = [
+            (
+                BTABConfig(
+                    active_mode="topk",
+                    active_topk=int(k),
+                    active_tau=None,
+                    box_budget=cfg.btab_box_budget,
+                    solve_mode=str(cfg.btab_solve_mode),
+                    exact_box_max_size=cfg.btab_exact_box_max_size,
+                    exact_apply_mode=str(cfg.btab_exact_apply_mode),
+                    outer_solver=str(cfg.btab_outer_solver),
+                    outer_gmres_restart=int(cfg.btab_outer_gmres_restart),
+                    inner_tol=float(cfg.btab_inner_tol),
+                    inner_maxiter=int(cfg.btab_inner_maxiter),
+                    inner_precond=str(cfg.btab_inner_precond),
+                    keep_box_matrix=bool(cfg.btab_keep_box_matrix),
+                    diagnostic_mode=str(cfg.btab_diagnostic_mode),
+                    diagnostic_power_iter=int(cfg.btab_diagnostic_power_iter),
+                    diagnostic_tol=float(cfg.btab_diagnostic_tol),
+                ),
+                int(q),
+            )
+            for k, q in cfg.btab_boxeig_topk_q_pairs
+        ]
+    for base_cfg, q in boxeig_configs:
+        tag = format_box_tag(
+            type("BoxTag", (), {
+                "active_mode": base_cfg.active_mode,
+                "active_topk": base_cfg.active_topk,
+                "active_tau": base_cfg.active_tau,
+            })()
+        )
+        btab_cfg = replace(
+            base_cfg,
+            solve_mode="boxeig",
+            exact_apply_mode="boxeig",
+            eig_q=int(q),
+            eig_tol=float(cfg.btab_eig_tol),
+            eig_maxiter=cfg.btab_eig_maxiter,
+            eig_ncv=cfg.btab_eig_ncv,
+            eig_apply_batch_cols=cfg.btab_eig_apply_batch_cols,
+            diagnostic_mode=str(cfg.btab_diagnostic_mode),
+            diagnostic_power_iter=int(cfg.btab_diagnostic_power_iter),
+            diagnostic_tol=float(cfg.btab_diagnostic_tol),
+        )
+        _run_case(
+            f"btab_boxeig_{tag}_q{int(q)}",
+            lambda btab_cfg=btab_cfg: run_v7_box_eigenpro_active_block(
+                solver,
+                x_train,
+                y_train,
+                gpu_cfg,
+                btab_cfg=btab_cfg,
+            ),
+            extra={
+                "btab_active_mode": str(btab_cfg.active_mode),
+                "btab_active_topk": (
+                    None if btab_cfg.active_topk is None else int(btab_cfg.active_topk)
+                ),
+                "btab_active_tau": (
+                    None if btab_cfg.active_tau is None else float(btab_cfg.active_tau)
+                ),
+                "btab_box_budget": (
+                    None if btab_cfg.box_budget is None else int(btab_cfg.box_budget)
+                ),
+                "btab_solve_mode": "boxeig",
+                "btab_exact_box_max_size": (
+                    None
+                    if btab_cfg.exact_box_max_size is None
+                    else int(btab_cfg.exact_box_max_size)
+                ),
+                "btab_exact_apply_mode": "boxeig",
+                "btab_outer_solver": str(btab_cfg.outer_solver),
+                "btab_outer_gmres_restart": int(btab_cfg.outer_gmres_restart),
+                "btab_inner_tol": float(btab_cfg.inner_tol),
+                "btab_inner_maxiter": int(btab_cfg.inner_maxiter),
+                "btab_inner_precond": str(btab_cfg.inner_precond),
+                "btab_eig_q": int(btab_cfg.eig_q),
+                "btab_eig_tol": float(btab_cfg.eig_tol),
+                "btab_eig_maxiter": btab_cfg.eig_maxiter,
+                "btab_eig_ncv": btab_cfg.eig_ncv,
+                "btab_eig_apply_batch_cols": btab_cfg.eig_apply_batch_cols,
+                "btab_diagnostic_mode": str(btab_cfg.diagnostic_mode),
+                "btab_diagnostic_power_iter": int(btab_cfg.diagnostic_power_iter),
+                "btab_diagnostic_tol": float(btab_cfg.diagnostic_tol),
             },
         )
     return rows
@@ -499,6 +613,7 @@ def aggregate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "tol",
         "maxiter",
         "method",
+        "btab_experiment_route",
         "top_q",
         "version",
         "nufft_backend",
@@ -521,6 +636,14 @@ def aggregate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "btab_inner_tol",
         "btab_inner_maxiter",
         "btab_inner_precond",
+        "btab_eig_q",
+        "btab_eig_tol",
+        "btab_eig_maxiter",
+        "btab_eig_ncv",
+        "btab_eig_apply_batch_cols",
+        "btab_diagnostic_mode",
+        "btab_diagnostic_power_iter",
+        "btab_diagnostic_tol",
         "active_mode",
         "active_topk",
         "active_tau",
@@ -531,6 +654,9 @@ def aggregate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "inner_tol",
         "inner_maxiter",
         "inner_precond",
+        "diagnostic_mode",
+        "btab_eig_backend",
+        "btab_eig_ncv_actual",
         "mtot",
         "dim",
         "efgp_matrix_dim",
@@ -625,12 +751,18 @@ def run_experiments(cfg: BTABExperimentConfig | None = None) -> dict[str, Any]:
     out_dir = cfg.resolve_output_dir(_HERE)
     out_dir.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
+    resolved_route_configs: dict[str, dict[str, Any]] = {}
     resolved_stems = resolve_dataset_stems(cfg)
     eps_values = [float(v) for v in (cfg.eps_list or [cfg.eps])]
     for stem in resolved_stems:
         payload = load_processed_dataset(stem)
+        dataset_cfg = resolve_btab_experiment_route(
+            cfg,
+            n_train=int(payload["n_train"]),
+        )
+        resolved_route_configs[stem] = asdict(dataset_cfg)
         for eps in eps_values:
-            run_cfg = replace(cfg, eps=float(eps), eps_list=list(eps_values))
+            run_cfg = replace(dataset_cfg, eps=float(eps), eps_list=list(eps_values))
             for warmup_idx in range(int(cfg.warmup_repeats)):
                 np.random.seed(int(cfg.seed) + int(warmup_idx))
                 method_rows_for_dataset(
@@ -654,11 +786,16 @@ def run_experiments(cfg: BTABExperimentConfig | None = None) -> dict[str, Any]:
         json.dumps(asdict(cfg), indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+    (out_dir / "resolved_route_configs.json").write_text(
+        json.dumps(resolved_route_configs, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
     return {
         "output_dir": str(out_dir),
         "rows": rows,
         "dataset_stems": resolved_stems,
         "eps_values": eps_values,
+        "resolved_route_configs": resolved_route_configs,
     }
 
 
@@ -668,6 +805,31 @@ def _parse_int_list(raw: str) -> list[int]:
 
 def _parse_float_list(raw: str) -> list[float]:
     return [float(tok.strip()) for tok in raw.split(",") if tok.strip()]
+
+
+def _parse_topk_q_pairs(raw: str) -> list[tuple[int, int]] | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    pairs: list[tuple[int, int]] = []
+    for token in text.split(","):
+        parts = token.strip().split(":")
+        if len(parts) != 2:
+            raise ValueError(
+                "Box-EigenPro pairs must use 'topk:q' format, for example "
+                "'4096:128,8192:192'."
+            )
+        pairs.append((int(parts[0]), int(parts[1])))
+    return pairs
+
+
+def _parse_optional_int(raw: Any) -> int | None:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text or text.lower() in ("none", "null", "auto"):
+        return None
+    return int(text)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -689,9 +851,35 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--measured-repeats", type=int, default=BTABExperimentConfig().measured_repeats)
     p.add_argument("--seed", type=int, default=BTABExperimentConfig().seed)
     p.add_argument("--eigenpro-topq-list", type=str, default="45,90")
+    p.add_argument(
+        "--btab-experiment-route",
+        type=str,
+        default=BTABExperimentConfig().btab_experiment_route,
+        choices=("cartesian", "custom", "group_a", "group_b", "group_c", "schedule"),
+        help=(
+            "BTAB parameter expansion. 'cartesian' uses the legacy full "
+            "top-k x q sweep; named routes use curated non-Cartesian "
+            "shortlists; 'schedule' selects one from each dataset's n_train."
+        ),
+    )
     p.add_argument("--btab-active-mode", type=str, default=BTABExperimentConfig().btab_active_mode)
     p.add_argument("--btab-topk-list", type=str, default="512,1024,2048")
     p.add_argument("--btab-tau-list", type=str, default="1e-1,1e-2")
+    p.add_argument(
+        "--btab-inverse-topk-list",
+        type=str,
+        default="",
+        help="Explicit custom inverse shortlist, for example '1024,2048,4096'.",
+    )
+    p.add_argument(
+        "--btab-boxeig-topk-q-pairs",
+        type=str,
+        default="",
+        help=(
+            "Explicit custom Box-EigenPro shortlist in topk:q format, "
+            "for example '4096:128,8192:128,8192:192'."
+        ),
+    )
     p.add_argument("--btab-box-budget", type=int, default=BTABExperimentConfig().btab_box_budget)
     p.add_argument("--btab-solve-mode", type=str, default=BTABExperimentConfig().btab_solve_mode)
     p.add_argument("--btab-exact-box-max-size", type=int, default=BTABExperimentConfig().btab_exact_box_max_size)
@@ -701,6 +889,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--btab-inner-tol", type=float, default=BTABExperimentConfig().btab_inner_tol)
     p.add_argument("--btab-inner-maxiter", type=int, default=BTABExperimentConfig().btab_inner_maxiter)
     p.add_argument("--btab-inner-precond", type=str, default=BTABExperimentConfig().btab_inner_precond)
+    p.add_argument("--btab-eig-q-list", type=str, default="32,64,128")
+    p.add_argument("--btab-eig-tol", type=float, default=BTABExperimentConfig().btab_eig_tol)
+    p.add_argument("--btab-eig-maxiter", type=str, default="")
+    p.add_argument("--btab-eig-ncv", type=str, default="")
+    p.add_argument("--btab-eig-apply-batch-cols", type=str, default="")
+    p.add_argument("--btab-diagnostic-mode", type=str, default=BTABExperimentConfig().btab_diagnostic_mode)
+    p.add_argument("--btab-diagnostic-power-iter", type=int, default=BTABExperimentConfig().btab_diagnostic_power_iter)
+    p.add_argument("--btab-diagnostic-tol", type=float, default=BTABExperimentConfig().btab_diagnostic_tol)
     p.add_argument("--output-dir", type=str, default="")
     return p
 
@@ -727,9 +923,18 @@ def config_from_args(args: argparse.Namespace) -> BTABExperimentConfig:
         measured_repeats=int(args.measured_repeats),
         seed=int(args.seed),
         eigenpro_topq_list=_parse_int_list(args.eigenpro_topq_list),
+        btab_experiment_route=str(args.btab_experiment_route),
         btab_active_mode=str(args.btab_active_mode),
         btab_topk_list=_parse_int_list(args.btab_topk_list),
         btab_tau_list=_parse_float_list(args.btab_tau_list),
+        btab_inverse_topk_list=(
+            _parse_int_list(args.btab_inverse_topk_list)
+            if str(args.btab_inverse_topk_list).strip()
+            else None
+        ),
+        btab_boxeig_topk_q_pairs=_parse_topk_q_pairs(
+            args.btab_boxeig_topk_q_pairs
+        ),
         btab_box_budget=args.btab_box_budget,
         btab_solve_mode=str(args.btab_solve_mode),
         btab_exact_box_max_size=args.btab_exact_box_max_size,
@@ -739,6 +944,14 @@ def config_from_args(args: argparse.Namespace) -> BTABExperimentConfig:
         btab_inner_tol=float(args.btab_inner_tol),
         btab_inner_maxiter=int(args.btab_inner_maxiter),
         btab_inner_precond=str(args.btab_inner_precond),
+        btab_eig_q_list=_parse_int_list(args.btab_eig_q_list),
+        btab_eig_tol=float(args.btab_eig_tol),
+        btab_eig_maxiter=_parse_optional_int(args.btab_eig_maxiter),
+        btab_eig_ncv=_parse_optional_int(args.btab_eig_ncv),
+        btab_eig_apply_batch_cols=_parse_optional_int(args.btab_eig_apply_batch_cols),
+        btab_diagnostic_mode=str(args.btab_diagnostic_mode),
+        btab_diagnostic_power_iter=int(args.btab_diagnostic_power_iter),
+        btab_diagnostic_tol=float(args.btab_diagnostic_tol),
         output_dir=str(args.output_dir or ""),
     )
 

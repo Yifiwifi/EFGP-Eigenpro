@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -25,6 +25,14 @@ class BTABConfig:
     chol_jitter: float = 1e-12
     diag_floor: float = 1e-30
     keep_box_matrix: bool = False
+    eig_q: int = 64
+    eig_tol: float = 1e-3
+    eig_maxiter: Optional[int] = None
+    eig_ncv: Optional[int] = None
+    eig_apply_batch_cols: Optional[int] = None
+    diagnostic_mode: str = "cheap"  # "none", "cheap", "full"
+    diagnostic_power_iter: int = 30
+    diagnostic_tol: float = 1e-2
 
 
 @dataclass
@@ -54,8 +62,11 @@ class BTABExperimentConfig:
     measured_repeats: int = 1
     eigenpro_topq_list: list[int] = field(default_factory=lambda: [45, 90])
     btab_active_mode: str = "topk"
+    btab_experiment_route: str = "cartesian"
     btab_topk_list: list[int] = field(default_factory=lambda: [512, 1024, 2048])
     btab_tau_list: list[float] = field(default_factory=lambda: [1e-1, 1e-2])
+    btab_inverse_topk_list: Optional[list[int]] = None
+    btab_boxeig_topk_q_pairs: Optional[list[tuple[int, int]]] = None
     btab_box_budget: Optional[int] = 5000
     btab_solve_mode: str = "auto"
     btab_exact_box_max_size: Optional[int] = 5000
@@ -66,6 +77,14 @@ class BTABExperimentConfig:
     btab_inner_maxiter: int = 50
     btab_inner_precond: str = "diag"
     btab_keep_box_matrix: bool = False
+    btab_eig_q_list: list[int] = field(default_factory=lambda: [32, 64, 128])
+    btab_eig_tol: float = 1e-3
+    btab_eig_maxiter: Optional[int] = None
+    btab_eig_ncv: Optional[int] = None
+    btab_eig_apply_batch_cols: Optional[int] = None
+    btab_diagnostic_mode: str = "cheap"
+    btab_diagnostic_power_iter: int = 30
+    btab_diagnostic_tol: float = 1e-2
     seed: int = 0
     output_dir: str = ""
     run_tag: str = field(
@@ -77,3 +96,159 @@ class BTABExperimentConfig:
         if self.output_dir:
             return Path(self.output_dir).expanduser().resolve()
         return Path(base_dir).resolve() / "outputs" / self.run_tag
+
+
+def resolve_btab_experiment_route(
+    cfg: BTABExperimentConfig,
+    *,
+    n_train: Optional[int] = None,
+) -> BTABExperimentConfig:
+    """Resolve a named BTAB experiment route into an exact method shortlist.
+
+    ``cartesian`` preserves the historical Cartesian-product behavior.
+    ``custom`` uses the explicit inverse top-k values and Box-EigenPro
+    ``(top-k, q)`` pairs stored on the config. Named routes provide curated
+    non-Cartesian shortlists so large experiments do not accidentally run
+    every combination.
+    """
+    route = str(cfg.btab_experiment_route or "cartesian").strip().lower()
+    aliases = {
+        "full": "cartesian",
+        "legacy": "cartesian",
+        "a": "group_a",
+        "exact": "group_a",
+        "exact_inverse": "group_a",
+        "b": "group_b",
+        "boxeig": "group_b",
+        "idea_validation": "group_b",
+        "c": "group_c",
+        "large": "group_c",
+        "large_scale": "group_c",
+        "auto": "schedule",
+        "n_schedule": "schedule",
+    }
+    route = aliases.get(route, route)
+    if route == "cartesian":
+        return replace(
+            cfg,
+            btab_experiment_route="cartesian",
+            btab_inverse_topk_list=None,
+            btab_boxeig_topk_q_pairs=None,
+        )
+    if route == "custom":
+        if cfg.btab_inverse_topk_list is None:
+            raise ValueError(
+                "btab_experiment_route='custom' requires "
+                "btab_inverse_topk_list."
+            )
+        if cfg.btab_boxeig_topk_q_pairs is None:
+            raise ValueError(
+                "btab_experiment_route='custom' requires "
+                "btab_boxeig_topk_q_pairs."
+            )
+        return replace(
+            cfg,
+            btab_experiment_route="custom",
+            btab_active_mode="topk",
+            btab_tau_list=[],
+        )
+    if route in {"schedule_small", "schedule_medium", "schedule_large"}:
+        return cfg
+
+    exact_apply_mode = "chol_solve"
+    if route == "schedule":
+        if n_train is None:
+            raise ValueError("btab_experiment_route='schedule' requires n_train.")
+        if int(n_train) <= 3_000_000:
+            topk = [512, 1024, 2048, 4096]
+            inverse = [1024, 2048, 4096]
+            boxeig = [
+                (1024, 64),
+                (1024, 128),
+                (2048, 128),
+                (4096, 128),
+                (4096, 192),
+            ]
+            eig_q = [64, 128, 192]
+            box_budget = 6000
+            resolved_route = "schedule_small"
+        elif int(n_train) <= 30_000_000:
+            topk = [1024, 2048, 4096, 8192]
+            inverse = [2048, 4096]
+            boxeig = [(8192, 128), (8192, 192)]
+            eig_q = [128, 192]
+            box_budget = 12000
+            resolved_route = "schedule_medium"
+        else:
+            topk = [2048, 4096, 8192, 16384]
+            inverse = [4096]
+            boxeig = [
+                (8192, 128),
+                (8192, 192),
+                (16384, 192),
+                (16384, 256),
+            ]
+            eig_q = [128, 192, 256]
+            box_budget = 25000
+            resolved_route = "schedule_large"
+    elif route == "group_a":
+        # Large exact-inverse performance check.  Dense inverse apply trades
+        # a more expensive one-off build for a much cheaper per-iteration
+        # matvec than repeated triangular solves.
+        topk = [1024, 2048, 4096]
+        inverse = list(topk)
+        boxeig = []
+        eig_q = []
+        box_budget = 6000
+        exact_apply_mode = "inverse"
+        resolved_route = route
+    elif route == "group_b":
+        # Large-box Box-EigenPro idea check: B_eig > B_inv with q << |B|.
+        # Keep this route separate from the exact-inverse sweep.
+        topk = [4096, 8192]
+        inverse = []
+        boxeig = [
+            (4096, 128),
+            (4096, 192),
+            (8192, 128),
+            (8192, 192),
+        ]
+        eig_q = [128, 192]
+        box_budget = 12000
+        resolved_route = route
+    elif route == "group_c":
+        topk = [1024, 2048, 4096, 8192, 16384]
+        inverse = [1024, 2048, 4096]
+        boxeig = [
+            (4096, 128),
+            (4096, 192),
+            (8192, 128),
+            (8192, 192),
+            (16384, 192),
+            (16384, 256),
+        ]
+        eig_q = [128, 192, 256]
+        box_budget = 25000
+        exact_apply_mode = "chol_solve"
+        resolved_route = route
+    else:
+        raise ValueError(
+            "Unknown btab_experiment_route "
+            f"{cfg.btab_experiment_route!r}; expected cartesian, custom, "
+            "group_a, group_b, group_c, or schedule."
+        )
+
+    return replace(
+        cfg,
+        btab_experiment_route=resolved_route,
+        btab_active_mode="topk",
+        btab_topk_list=topk,
+        btab_tau_list=[],
+        btab_inverse_topk_list=inverse,
+        btab_boxeig_topk_q_pairs=boxeig,
+        btab_box_budget=box_budget,
+        btab_solve_mode="auto",
+        btab_exact_box_max_size=6000,
+        btab_exact_apply_mode=exact_apply_mode,
+        btab_eig_q_list=eig_q,
+    )

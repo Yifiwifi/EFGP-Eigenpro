@@ -1,0 +1,1 @@
+dataset_stem,eps,method,precompute_mode,selector_tag,btab_active_size_raw,btab_box_size,rho_max_T,tail_energy,epsilon_T,cg_iters,outer_iters,time_precond_build,time_solve,time_total,time_post_diagnostics,time_total_with_diagnostics,rmse_train,rmse_test
