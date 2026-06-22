@@ -1,0 +1,7 @@
+dataset_family,n_train,eps,selected_topk,time_total,iterations,cg_iters,outer_iters,rmse_test,btab_eig_theta_q1_over_sigma2,btab_eig_eig_residual_max,eta_eig
+USGS_LPC_IL_Winnebago_2018_ground_elevation_regression,10000000,1e-05,1024.0,0.8060349980000865,365.0,365.0,365.0,0.0286149994083213,,,
+USGS_LPC_IL_Winnebago_2018_ground_elevation_regression,30000000,1e-05,1024.0,1.222656815999926,556.0,556.0,556.0,0.027856728622058,,,
+USGS_LPC_IL_Winnebago_2018_ground_elevation_regression,80000000,1e-05,1024.0,9.96630816600009,6000.0,6000.0,6000.0,0.0678040346544733,,,
+synthetic_true_func_2d,10000000,1e-05,1024.0,0.5607101610003156,187.0,187.0,187.0,0.0005597136677355,,,
+synthetic_true_func_2d,30000000,1e-05,1024.0,0.7311785490001057,253.0,253.0,253.0,0.0003488382038798,,,
+synthetic_true_func_2d,100000000,1e-05,1024.0,0.9833782460000292,200.0,200.0,200.0,0.000198746748116,,,

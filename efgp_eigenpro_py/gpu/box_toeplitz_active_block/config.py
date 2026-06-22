@@ -60,7 +60,7 @@ class BTABExperimentConfig:
     debug_finite_checks: bool = False
     warmup_repeats: int = 0
     measured_repeats: int = 1
-    eigenpro_topq_list: list[int] = field(default_factory=lambda: [45, 90])
+    eigenpro_topq_list: list[int] = field(default_factory=lambda: [45, 90,135,180])
     btab_active_mode: str = "topk"
     btab_experiment_route: str = "cartesian"
     btab_topk_list: list[int] = field(default_factory=lambda: [512, 1024, 2048])
@@ -218,18 +218,21 @@ def resolve_btab_experiment_route(
         resolved_route = route
     elif route == "group_c":
         topk = [1024, 2048, 4096, 8192, 16384]
-        inverse = [1024, 2048]
+        inverse = [1024, 2048,4096]
         boxeig = [
-            (4096, 128),
             (4096, 192),
-            (8192, 128),
+            (4096, 256),
             (8192, 192),
-            (16384, 128),
+            (8192, 256),
             (16384, 192),
             (16384, 256),
+            (20480, 192),
+            (20480, 256),
+            (32768, 192),
+            (32768, 256),
         ]
         eig_q = [128, 192]
-        box_budget = 25000
+        box_budget = 50000
         exact_apply_mode = "inverse"
         resolved_route = route
     else:
