@@ -218,18 +218,19 @@ def resolve_btab_experiment_route(
         resolved_route = route
     elif route == "group_c":
         topk = [1024, 2048, 4096, 8192, 16384]
-        inverse = [1024, 2048, 4096]
+        inverse = [1024, 2048]
         boxeig = [
             (4096, 128),
             (4096, 192),
             (8192, 128),
             (8192, 192),
+            (16384, 128),
             (16384, 192),
             (16384, 256),
         ]
-        eig_q = [128, 192, 256]
+        eig_q = [128, 192]
         box_budget = 25000
-        exact_apply_mode = "chol_solve"
+        exact_apply_mode = "inverse"
         resolved_route = route
     else:
         raise ValueError(
