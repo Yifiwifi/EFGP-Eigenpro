@@ -6,7 +6,9 @@
 \usepackage{booktabs}
 \usepackage{array}
 \usepackage{multicol}
+\usepackage{graphicx}
 \usepackage{hyperref}
+\graphicspath{{efgp_eigenpro_py/gpu/box_toeplitz_active_block/picture/}}
 
 \title{Fast KRR via Frequency-Space Preconditioning}
 \subtitle{EigenPro-style deflation for Equispaced Fourier Gaussian Processes}
@@ -413,6 +415,42 @@ and apply a low-rank deflation preconditioner inside CG.
 \begin{alertblock}{Goal}
 Keep the data pass $O(N+M\log M)$, but reduce the number of FFT-CG iterations.
 \end{alertblock}
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}{Active Fourier mass profile}
+\begin{columns}[T,onlytextwidth]
+\column{0.62\textwidth}
+\begin{center}
+\includegraphics[width=\linewidth]{rho_radial_mass_profile}
+\end{center}
+\column{0.34\textwidth}
+\begin{block}{What this checks}
+\begin{itemize}
+  \item The active box captures most low-frequency $\rho$ mass.
+  \item The radial profile shows how quickly Fourier weights decay away from the origin.
+  \item The cumulative curve makes the cutoff quality visible.
+\end{itemize}
+\end{block}
+\end{columns}
+\end{frame}
+
+% ---------------------------------------------------------
+\begin{frame}{Normalized tail coupling distribution}
+\begin{columns}[T,onlytextwidth]
+\column{0.62\textwidth}
+\begin{center}
+\includegraphics[width=\linewidth]{normalized_tail_couplings}
+\end{center}
+\column{0.34\textwidth}
+\begin{block}{Diagnostic message}
+\begin{itemize}
+  \item Tail modes are not assumed to be exactly diagonal.
+  \item Normalized off-diagonal couplings quantify residual tail interactions.
+  \item Small typical coupling supports treating the tail as a controlled correction.
+\end{itemize}
+\end{block}
+\end{columns}
 \end{frame}
 
 % ---------------------------------------------------------

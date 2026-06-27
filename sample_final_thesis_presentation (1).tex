@@ -11,7 +11,9 @@
 \usepackage{algorithmicx}
 \usepackage{algpseudocode}
 \usepackage{xcolor}
+\usepackage{graphicx}
 \usepackage{hyperref}
+\graphicspath{{efgp_eigenpro_py/gpu/box_toeplitz_active_block/picture/}}
 
 % ---------- Style ----------
 \definecolor{MainBlue}{HTML}{174A7E}
@@ -547,9 +549,45 @@ xmin=1,xmax=6,ymin=0,ymax=7,xtick={1,2,3,4,5,6},ytick={0,2,4,6}]
 \end{columns}
 \end{frame}
 
+% 17
+\begin{frame}{Active Fourier mass profile}
+\begin{columns}[T,onlytextwidth]
+\column{0.62\textwidth}
+\begin{center}
+\includegraphics[width=\linewidth]{rho_radial_mass_profile}
+\end{center}
+\column{0.34\textwidth}
+\begin{block}{What this checks}
+\begin{itemize}
+  \item The selected active box captures most of the low-frequency $\rho$ mass.
+  \item Radial averaging shows how quickly Fourier weight decays away from the origin.
+  \item The cumulative curve gives a direct sanity check for the active-set cutoff.
+\end{itemize}
+\end{block}
+\end{columns}
+\end{frame}
+
+% 18
+\begin{frame}{Normalized tail coupling distribution}
+\begin{columns}[T,onlytextwidth]
+\column{0.62\textwidth}
+\begin{center}
+\includegraphics[width=\linewidth]{normalized_tail_couplings}
+\end{center}
+\column{0.34\textwidth}
+\begin{block}{Diagnostic message}
+\begin{itemize}
+  \item Tail modes are not assumed to be exactly diagonal.
+  \item The normalized off-diagonal coupling distribution measures how strong the residual interactions are.
+  \item Small typical coupling supports treating the tail as a controlled correction.
+\end{itemize}
+\end{block}
+\end{columns}
+\end{frame}
+
 \section{Proposed method}
 
-% 17
+% 19
 \begin{frame}{Main idea: EigenPro in frequency space}
 \begin{center}
 \begin{tikzpicture}[node distance=1.1cm, every node/.style={font=\small}]

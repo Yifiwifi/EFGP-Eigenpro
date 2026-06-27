@@ -241,6 +241,64 @@ def make_kernel(cfg: BTABExperimentConfig, dim: int):
     raise ValueError(f"unknown kernel_family={cfg.kernel_family!r}")
 
 
+def _kernel_param_value(
+    params: dict[str, Any],
+    canonical_key: str,
+    default: Any,
+    *aliases: str,
+) -> Any:
+    for key in (canonical_key, *aliases):
+        if key in params:
+            return params[key]
+    return default
+
+
+def iter_kernel_configs(cfg: BTABExperimentConfig) -> list[BTABExperimentConfig]:
+    """Expand cfg.kernel_family_list into concrete per-kernel configs."""
+    raw_families = cfg.kernel_family_list or [cfg.kernel_family]
+    families = [str(family).strip() for family in raw_families if str(family).strip()]
+    if not families:
+        raise ValueError("kernel_family_list is empty; provide at least one kernel family.")
+
+    params_by_family = {
+        str(key).strip().lower(): dict(value)
+        for key, value in (cfg.kernel_params_by_family or {}).items()
+        if str(key).strip()
+    }
+    kernel_cfgs: list[BTABExperimentConfig] = []
+    for family in families:
+        params = params_by_family.get(family.lower(), {})
+        kernel_cfgs.append(
+            replace(
+                cfg,
+                kernel_family=str(
+                    _kernel_param_value(params, "kernel_family", family, "family")
+                ),
+                kernel_lengthscale=float(
+                    _kernel_param_value(
+                        params,
+                        "kernel_lengthscale",
+                        cfg.kernel_lengthscale,
+                        "lengthscale",
+                        "length_scale",
+                    )
+                ),
+                kernel_nu=float(
+                    _kernel_param_value(params, "kernel_nu", cfg.kernel_nu, "nu")
+                ),
+                kernel_variance=float(
+                    _kernel_param_value(
+                        params,
+                        "kernel_variance",
+                        cfg.kernel_variance,
+                        "variance",
+                    )
+                ),
+            )
+        )
+    return kernel_cfgs
+
+
 def _backend_to_numpy(arr: Any) -> np.ndarray:
     if hasattr(arr, "get"):
         return np.asarray(arr.get())
@@ -760,28 +818,31 @@ def run_experiments(cfg: BTABExperimentConfig | None = None) -> dict[str, Any]:
             cfg,
             n_train=int(payload["n_train"]),
         )
-        resolved_route_configs[stem] = asdict(dataset_cfg)
-        for eps in eps_values:
-            run_cfg = replace(dataset_cfg, eps=float(eps), eps_list=list(eps_values))
-            for warmup_idx in range(int(cfg.warmup_repeats)):
-                np.random.seed(int(cfg.seed) + int(warmup_idx))
-                method_rows_for_dataset(
-                    run_cfg,
-                    payload,
-                    repeat_idx=int(warmup_idx),
-                    is_warmup=True,
-                )
-            for repeat_idx in range(int(cfg.measured_repeats)):
-                np.random.seed(int(cfg.seed) + int(repeat_idx))
-                rows.extend(
+        kernel_cfgs = iter_kernel_configs(dataset_cfg)
+        for kernel_cfg in kernel_cfgs:
+            route_key = stem if len(kernel_cfgs) == 1 else f"{stem}|{kernel_cfg.kernel_family}"
+            resolved_route_configs[route_key] = asdict(kernel_cfg)
+            for eps in eps_values:
+                run_cfg = replace(kernel_cfg, eps=float(eps), eps_list=list(eps_values))
+                for warmup_idx in range(int(cfg.warmup_repeats)):
+                    np.random.seed(int(cfg.seed) + int(warmup_idx))
                     method_rows_for_dataset(
                         run_cfg,
                         payload,
-                        repeat_idx=int(repeat_idx),
-                        is_warmup=False,
+                        repeat_idx=int(warmup_idx),
+                        is_warmup=True,
                     )
-                )
-                write_outputs(rows, out_dir)
+                for repeat_idx in range(int(cfg.measured_repeats)):
+                    np.random.seed(int(cfg.seed) + int(repeat_idx))
+                    rows.extend(
+                        method_rows_for_dataset(
+                            run_cfg,
+                            payload,
+                            repeat_idx=int(repeat_idx),
+                            is_warmup=False,
+                        )
+                    )
+                    write_outputs(rows, out_dir)
     (out_dir / "experiment_config.json").write_text(
         json.dumps(asdict(cfg), indent=2, ensure_ascii=False),
         encoding="utf-8",

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from ..backends import BackendConfig
 
@@ -45,6 +45,8 @@ class BTABExperimentConfig:
     )
     n_train_list: list[int] = field(default_factory=list)
     kernel_family: str = "matern"
+    kernel_family_list: list[str] = field(default_factory=list)
+    kernel_params_by_family: dict[str, dict[str, Any]] = field(default_factory=dict)
     kernel_lengthscale: float = 0.1
     kernel_nu: float = 1.5
     kernel_variance: float = 1.0
@@ -195,10 +197,31 @@ def resolve_btab_experiment_route(
         # Large exact-inverse performance check.  Dense inverse apply trades
         # a more expensive one-off build for a much cheaper per-iteration
         # matvec than repeated triangular solves.
-        topk = [1024, 2048, 4096]
-        inverse = list(topk)
-        boxeig = []
-        eig_q = []
+        topk = [512, 1024, 2048, 4096,8192]
+        inverse = [512, 1024, 2048, 4096]
+        boxeig = [
+    # small active blocks: useful for N=1e6, 3e6
+    (1024, 64),
+    (1024, 128),
+    (2048, 64),
+    (2048, 128),
+    (2048, 192),
+
+    # medium active blocks: useful for N=3e6, 1e7
+    (4096, 128),
+    (4096, 192),
+    (4096, 256),
+    (8192, 128),
+    (8192, 192),
+    (8192, 256),
+
+    # large active blocks: useful for N=1e7, 3e7
+    (16384, 128),
+    (16384, 192),
+    (16384, 256),
+]
+
+        eig_q = [64,128,192]
         box_budget = 6000
         exact_apply_mode = "inverse"
         resolved_route = route
