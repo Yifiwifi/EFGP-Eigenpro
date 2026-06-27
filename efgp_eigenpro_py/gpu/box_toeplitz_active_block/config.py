@@ -222,7 +222,7 @@ def resolve_btab_experiment_route(
 ]
 
         eig_q = [64,128,192]
-        box_budget = 6000
+        box_budget = 80000
         exact_apply_mode = "inverse"
         resolved_route = route
     elif route == "group_b":
