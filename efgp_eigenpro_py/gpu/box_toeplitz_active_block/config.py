@@ -194,9 +194,7 @@ def resolve_btab_experiment_route(
             box_budget = 25000
             resolved_route = "schedule_large"
     elif route == "group_a":
-        # Large exact-inverse performance check.  Dense inverse apply trades
-        # a more expensive one-off build for a much cheaper per-iteration
-        # matvec than repeated triangular solves.
+    # for matern kernel with small sample, M=35721        
         topk = [512, 1024, 2048, 4096,8192]
         inverse = [512,728, 1024, 2048, 4096]
         boxeig = [
@@ -226,20 +224,28 @@ def resolve_btab_experiment_route(
         exact_apply_mode = "inverse"
         resolved_route = route
     elif route == "group_b":
-        # Large-box Box-EigenPro idea check: B_eig > B_inv with q << |B|.
+        # for SE kernel, M=1225
         # Keep this route separate from the exact-inverse sweep.
-        topk = [4096, 8192]
-        inverse = []
+        topk = [64,128,256,512,1024]
+        inverse = [64,128,256,512,1024]
         boxeig = [
-            (4096, 128),
-            (4096, 192),
-            (8192, 128),
-            (8192, 192),
+            (64, 16),
+            (64, 32),
+            (128, 16),
+            (128, 32),
+            (128, 64),
+            (256, 32),
+            (256, 64),
+            (256, 128),
+            (512, 64),
+            (512, 128),
+            (512, 256)
         ]
-        eig_q = [128, 192]
-        box_budget = 12000
+        eig_q = [16,32,64,128, 192,256]
+        box_budget = 80000
         resolved_route = route
     elif route == "group_c":
+        # for matern kernel with large sample, M=35721
         topk = [1024, 2048, 4096, 8192, 16384]
         inverse = [2048,4096,8192,16384]    #[1024, 2048,4096]
         boxeig = [
@@ -253,13 +259,13 @@ def resolve_btab_experiment_route(
             (32768, 192),
             (32768, 256),
             (32768, 320),
-            (36864, 192),
-            (36864, 256),
-            (36864, 320),
+            (35721, 192),
+            (32721, 256),
+            (32721, 320),
         ]
         #''' (4096, 192),(4096, 256),(8192, 192),            (8192, 256),(16384, 192),            (16384, 256),'''
 
-        eig_q = [128, 192,256]
+        eig_q = [128, 192,256,320]
         box_budget = 80000
         exact_apply_mode = "inverse"
         resolved_route = route

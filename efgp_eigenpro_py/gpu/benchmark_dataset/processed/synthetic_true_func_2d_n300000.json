@@ -6,17 +6,19 @@
   "input_definition": "x_train and x_test are sampled in [0,1]^2 using the benchmark helpers",
   "target_definition": "y_train = true_func_2d(x_train) + Gaussian noise, y_test = true_func_2d(x_test)",
   "generation": {
-    "train_generator": "make_dataset",
+    "train_generator": "streamed_make_dataset_chunks",
     "test_generator": "make_test_set",
     "target_function": "true_func_2d",
     "dim": 2,
     "n_train": 300000,
-    "n_test": 1000,
+    "n_test": 75000,
     "noise_std": 0.02,
     "seed_train": 20260421,
     "seed_test": 1,
     "train_distribution": "uniform in [0,1]^2",
-    "test_distribution": "uniform in [0,1]^2"
+    "test_distribution": "uniform in [0,1]^2",
+    "chunk_rows": 1000000,
+    "storage_dtype": "<class 'numpy.float32'>"
   },
   "split": {
     "method": "pre-generated train/test sets",
@@ -41,9 +43,13 @@
     "eps": 1e-05,
     "l2_scaled": true
   },
+  "serialization": {
+    "npz_mode": "deflated",
+    "array_dtype": "<class 'numpy.float32'>"
+  },
   "shapes": {
     "n_train": 300000,
-    "n_test": 1000,
+    "n_test": 75000,
     "dim": 2
   },
   "paper_task_statement": "(x1, x2) -> true_func_2d(x) with noisy train targets"

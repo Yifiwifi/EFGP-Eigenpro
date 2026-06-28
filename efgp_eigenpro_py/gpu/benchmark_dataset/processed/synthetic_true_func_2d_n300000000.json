@@ -11,7 +11,7 @@
     "target_function": "true_func_2d",
     "dim": 2,
     "n_train": 300000000,
-    "n_test": 1000,
+    "n_test": 75000000,
     "noise_std": 0.02,
     "seed_train": 20260421,
     "seed_test": 1,
@@ -49,7 +49,7 @@
   },
   "shapes": {
     "n_train": 300000000,
-    "n_test": 1000,
+    "n_test": 75000000,
     "dim": 2
   },
   "paper_task_statement": "(x1, x2) -> true_func_2d(x) with noisy train targets"

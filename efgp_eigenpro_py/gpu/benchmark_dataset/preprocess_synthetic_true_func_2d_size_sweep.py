@@ -93,7 +93,7 @@ def main() -> None:
                 output_json,
                 dataset_stem=dataset_stem,
                 n_train=int(n_train),
-                n_test=int(args.n_test),
+                n_test=int(round(int(n_train) * 0.25)),  # 25% of n_train, so 8:2 train:test ratio
                 noise=float(args.noise),
                 seed_train=int(args.seed_train),
                 seed_test=int(args.seed_test),
@@ -101,7 +101,7 @@ def main() -> None:
             row = {
                 "dataset_stem": dataset_stem,
                 "n_train_requested": int(n_train),
-                "n_test_requested": int(args.n_test),
+                "n_test_requested": int(round(int(n_train) * 0.25)),
                 "output_npz": str(output_npz),
                 "output_json": str(output_json),
                 **metadata.get("shapes", {}),
@@ -125,7 +125,7 @@ def main() -> None:
         "dataset_stem_prefix": dataset_stem_prefix,
         "output_dir": str(output_dir),
         "n_train_list": [int(v) for v in n_train_list],
-        "n_test": int(args.n_test),
+        "n_test": int(round(int(n_train_list[0]) * 0.25)),
         "noise": float(args.noise),
         "seed_train": int(args.seed_train),
         "seed_test": int(args.seed_test),
