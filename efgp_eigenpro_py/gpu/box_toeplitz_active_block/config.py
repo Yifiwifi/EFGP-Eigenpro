@@ -198,7 +198,7 @@ def resolve_btab_experiment_route(
         # a more expensive one-off build for a much cheaper per-iteration
         # matvec than repeated triangular solves.
         topk = [512, 1024, 2048, 4096,8192]
-        inverse = [512, 1024, 2048, 4096]
+        inverse = [512,728, 1024, 2048, 4096]
         boxeig = [
     # small active blocks: useful for N=1e6, 3e6
     (1024, 64),
