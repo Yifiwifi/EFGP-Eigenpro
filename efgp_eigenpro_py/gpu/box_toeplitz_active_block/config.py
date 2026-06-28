@@ -241,10 +241,15 @@ def resolve_btab_experiment_route(
         resolved_route = route
     elif route == "group_c":
         topk = [1024, 2048, 4096, 8192, 16384]
-        inverse = [8192,16384]    #[1024, 2048,4096]
+        inverse = [2048,4096,8192,16384]    #[1024, 2048,4096]
         boxeig = [
+            (16384, 192),
+            (16384, 256),
+            (16384, 320),
+
             (20480, 192),
             (20480, 256),
+            (20480, 320),
             (32768, 192),
             (32768, 256),
             (32768, 320),
@@ -254,7 +259,7 @@ def resolve_btab_experiment_route(
         ]
         #''' (4096, 192),(4096, 256),(8192, 192),            (8192, 256),(16384, 192),            (16384, 256),'''
 
-        eig_q = [128, 192]
+        eig_q = [128, 192,256]
         box_budget = 80000
         exact_apply_mode = "inverse"
         resolved_route = route
