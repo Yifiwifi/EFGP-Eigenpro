@@ -1,0 +1,3 @@
+dataset_family,n_train,eps,selected_topk,selected_q,time_total,iterations,cg_iters,outer_iters,rmse_test,btab_eig_theta_q1_over_sigma2,btab_eig_eig_residual_max
+synthetic_true_func_2d,100000000,1e-05,512.0,256.0,1.0791796169999088,60.0,60.0,60.0,0.0004299417564903,185.73398734319937,2.067195326585366e-11
+synthetic_true_func_2d,300000000,1e-05,512.0,128.0,2.473362085999952,440.0,440.0,440.0,0.0004560920823283,212671.23960572417,9.853798343417145e-14
