@@ -250,7 +250,7 @@ def resolve_btab_experiment_route(
 
     (8192, 192),
     (8192, 256),
-    (8192, 320)
+    (8192, 320),
 
     # large active blocks: useful for N=1e7, 3e7
  
