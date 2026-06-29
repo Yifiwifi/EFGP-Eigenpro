@@ -63,7 +63,7 @@ class BTABExperimentConfig:
     debug_finite_checks: bool = False
     warmup_repeats: int = 0
     measured_repeats: int = 1
-    eigenpro_topq_list: list[int] = field(default_factory=lambda: [64,128,192,256,320])
+    eigenpro_topq_list: list[int] = field(default_factory=lambda: [64,128, 256,320,384,448])
     btab_active_mode: str = "topk"
     btab_experiment_route: str = "cartesian"
     btab_experiment_routes: list[str] = field(default_factory=list)
@@ -240,24 +240,23 @@ def resolve_btab_experiment_route(
         inverse = [512,728, 1024, 2048, 4096]
         boxeig = [
     # small active blocks: useful for N=1e6, 3e6
-    (1024, 64),
-    (1024, 128),
-    (2048, 64),
-    (2048, 128),
+
     (2048, 192),
 
     # medium active blocks: useful for N=3e6, 1e7
-    (4096, 128),
+
     (4096, 192),
     (4096, 256),
-    (8192, 128),
+
     (8192, 192),
     (8192, 256),
+    (8192, 320)
 
     # large active blocks: useful for N=1e7, 3e7
-    (16384, 128),
+ 
     (16384, 192),
     (16384, 256),
+    (16384, 320),
 ]
 
         eig_q = [64,128,192]
@@ -288,20 +287,14 @@ def resolve_btab_experiment_route(
     elif route == "group_b":
         # for SE kernel, M=1225
         # Keep this route separate from the exact-inverse sweep.
-        topk = [64,128,256,512,1024]
-        inverse = [64,128,256,512,1024]
+        topk = [512,1024]
+        inverse = [512,1024]
         boxeig = [
-            (64, 16),
-            (64, 32),
-            (128, 16),
-            (128, 32),
-            (128, 64),
-            (256, 32),
-            (256, 64),
             (256, 128),
-            (512, 64),
             (512, 128),
-            (512, 256)
+            (512, 256),
+            (768, 128),
+            (768, 256),
         ]
         eig_q = [16,32,64,128, 192,256]
         box_budget = 80000
@@ -331,25 +324,22 @@ def resolve_btab_experiment_route(
         topk = [1024, 2048, 4096, 8192, 16384]
         inverse = [2048,4096]    #[1024, 2048,4096]
         boxeig = [
-            (4096, 128),
-            (4096, 192),
-            (8192, 128),
-            (8192, 192),
-            (16384, 192),
-            (16384, 256),
-            (20480, 192),
-            (20480, 256),
             (20480, 320),
+            (20480, 384),
             (32768, 192),
             (32768, 256),
             (32768, 320),
+            (32768, 384),
+            (32768, 448),
             (35721, 192),
             (35721, 256),
             (35721, 320),
+            (35721, 384),
+            (35721, 448),
         ]
         #''' (4096, 192),(4096, 256),(8192, 192),            (8192, 256),(16384, 192),            (16384, 256),'''
 
-        eig_q = [128, 192,256,320]
+        eig_q = [128, 192,256,320,384,448]
         box_budget = 80000
         exact_apply_mode = "inverse"
         resolved_route = route

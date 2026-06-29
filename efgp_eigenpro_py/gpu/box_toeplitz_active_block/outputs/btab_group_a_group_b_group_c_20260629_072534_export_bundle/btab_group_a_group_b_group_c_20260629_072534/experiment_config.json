@@ -1,0 +1,99 @@
+{
+  "dataset_stems": [
+    "synthetic_true_func_2d_n1000000",
+    "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain1000000"
+  ],
+  "n_train_list": [],
+  "kernel_family": "matern",
+  "kernel_family_list": [
+    "matern"
+  ],
+  "kernel_params_by_family": {
+    "SE": {
+      "kernel_lengthscale": 0.1,
+      "kernel_variance": 1.0
+    },
+    "matern": {
+      "kernel_lengthscale": 0.1,
+      "kernel_nu": 1.5,
+      "kernel_variance": 1.0
+    }
+  },
+  "kernel_lengthscale": 0.1,
+  "kernel_nu": 1.5,
+  "kernel_variance": 1.0,
+  "reg_lambda": 0.1,
+  "eps": 1e-05,
+  "eps_list": [
+    1e-05
+  ],
+  "nufft_tol": 1e-10,
+  "l2_scaled": true,
+  "tol": 1e-07,
+  "maxiter": 80000,
+  "non_v1_maxiter": 3000,
+  "chunk_size": null,
+  "profile_components": true,
+  "debug_finite_checks": false,
+  "warmup_repeats": 0,
+  "measured_repeats": 1,
+  "eigenpro_topq_list": [
+    64,
+    128,
+    192,
+    256,
+    320
+  ],
+  "btab_active_mode": "topk",
+  "btab_experiment_route": "cartesian",
+  "btab_experiment_routes": [
+    "group_a",
+    "group_b",
+    "group_c"
+  ],
+  "btab_topk_list": [
+    256,
+    512,
+    1024,
+    2048,
+    4096
+  ],
+  "btab_tau_list": [
+    0.1,
+    0.01
+  ],
+  "btab_inverse_topk_list": null,
+  "btab_boxeig_topk_q_pairs": null,
+  "btab_box_budget": 30000,
+  "btab_solve_mode": "auto",
+  "btab_exact_box_max_size": 6000,
+  "btab_exact_apply_mode": "chol_solve",
+  "btab_outer_solver": "auto",
+  "btab_outer_gmres_restart": 50,
+  "btab_inner_tol": 0.001,
+  "btab_inner_maxiter": 50,
+  "btab_inner_precond": "diag",
+  "btab_keep_box_matrix": false,
+  "btab_eig_q_list": [
+    64,
+    128,
+    192,
+    256
+  ],
+  "btab_eig_tol": 0.001,
+  "btab_eig_maxiter": null,
+  "btab_eig_ncv": null,
+  "btab_eig_apply_batch_cols": null,
+  "btab_diagnostic_mode": "cheap",
+  "btab_diagnostic_power_iter": 30,
+  "btab_diagnostic_tol": 0.01,
+  "seed": 0,
+  "output_dir": "",
+  "run_tag": "btab_group_a_group_b_group_c_20260629_072534",
+  "backend": {
+    "xp": "cupy",
+    "fft": "cupy",
+    "nufft": "auto",
+    "linalg": "cupy"
+  }
+}

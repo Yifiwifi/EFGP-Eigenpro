@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -15,7 +16,7 @@ import numpy as np
 DIM = 2
 DEFAULT_N_TRAIN = 100_000
 DEFAULT_N_TEST = 1_000
-DEFAULT_NOISE = 0.02
+DEFAULT_NOISE = 0.3
 DEFAULT_SEED_TRAIN = 20260421
 DEFAULT_SEED_TEST = 1
 
@@ -77,6 +78,7 @@ def _generate_train_to_memmaps(
     dim: int,
     noise: float,
     seed: int,
+    chunk_rows: int = DEFAULT_CHUNK_ROWS,
     storage_dtype: np.dtype = DEFAULT_STORAGE_DTYPE,
 ) -> tuple[np.memmap, np.memmap, np.memmap, np.memmap]:
     """Stream synthetic train arrays to disk-backed memmaps.
@@ -115,7 +117,7 @@ def _generate_train_to_memmaps(
 
     rng = np.random.default_rng(int(seed))
     noise_f = float(noise)
-    for sl in _iter_row_slices(n_train):
+    for sl in _iter_row_slices(n_train, chunk_rows=int(chunk_rows)):
         n_chunk = int(sl.stop - sl.start)
         x_chunk = rng.uniform(0.0, 1.0, size=(n_chunk, dim)).astype(storage_dtype, copy=False)
         f_chunk = true_func_2d(x_chunk).astype(storage_dtype, copy=False)
@@ -150,13 +152,18 @@ def build_synthetic_dataset(
     noise: float = DEFAULT_NOISE,
     seed_train: int = DEFAULT_SEED_TRAIN,
     seed_test: int = DEFAULT_SEED_TEST,
+    chunk_rows: int = DEFAULT_CHUNK_ROWS,
 ) -> dict:
     if int(DIM) != 2:
         raise ValueError(f"true_func_2d requires DIM=2, got {DIM}")
 
     n_train = int(n_train)
     n_test = int(n_test)
+    chunk_rows = max(1, int(chunk_rows))
     output_npz.parent.mkdir(parents=True, exist_ok=True)
+    output_json.parent.mkdir(parents=True, exist_ok=True)
+    tmp_npz = output_npz.with_name(f".{output_npz.name}.tmp.npz")
+    tmp_json = output_json.with_name(f".{output_json.name}.tmp")
 
     x_test, y_test = make_test_set(
         DIM,
@@ -176,6 +183,7 @@ def build_synthetic_dataset(
             dim=int(DIM),
             noise=float(noise),
             seed=int(seed_train),
+            chunk_rows=int(chunk_rows),
             storage_dtype=DEFAULT_STORAGE_DTYPE,
         )
         for arr in (x_train, y_train, y_train_true, train_noise):
@@ -183,7 +191,7 @@ def build_synthetic_dataset(
 
         savez_fn = np.savez if n_train >= UNCOMPRESSED_NPZ_THRESHOLD_ROWS else np.savez_compressed
         savez_fn(
-            output_npz,
+            tmp_npz,
             x_train=x_train,
             x_test=x_test,
             y_train=y_train,
@@ -214,7 +222,7 @@ def build_synthetic_dataset(
             "seed_test": int(seed_test),
             "train_distribution": "uniform in [0,1]^2",
             "test_distribution": "uniform in [0,1]^2",
-            "chunk_rows": int(DEFAULT_CHUNK_ROWS),
+            "chunk_rows": int(chunk_rows),
             "storage_dtype": str(DEFAULT_STORAGE_DTYPE),
         },
         "split": {
@@ -251,7 +259,9 @@ def build_synthetic_dataset(
         },
         "paper_task_statement": "(x1, x2) -> true_func_2d(x) with noisy train targets",
     }
-    output_json.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    tmp_json.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    os.replace(tmp_npz, output_npz)
+    os.replace(tmp_json, output_json)
     return metadata
 
 
@@ -264,6 +274,7 @@ def main() -> None:
     parser.add_argument("--noise", type=float, default=DEFAULT_NOISE)
     parser.add_argument("--seed-train", type=int, default=DEFAULT_SEED_TRAIN)
     parser.add_argument("--seed-test", type=int, default=DEFAULT_SEED_TEST)
+    parser.add_argument("--chunk-rows", type=int, default=DEFAULT_CHUNK_ROWS)
     parser.add_argument("--dataset-stem", type=str, default=None)
     parser.add_argument("--output-npz", type=Path, default=None)
     parser.add_argument("--output-json", type=Path, default=None)
@@ -287,6 +298,7 @@ def main() -> None:
         noise=args.noise,
         seed_train=args.seed_train,
         seed_test=args.seed_test,
+        chunk_rows=args.chunk_rows,
     )
     print("saved npz:", output_npz)
     print("saved json:", output_json)
