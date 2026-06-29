@@ -1,0 +1,14 @@
+{
+  "run_tag": "group_c",
+  "elapsed": "1:00:02",
+  "export_root": "/content/EFGP-Eigenpro/efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs/btab_group_c_group_a_group_b_20260629_051332/group_c_export_bundle",
+  "out_dir": "/content/EFGP-Eigenpro/efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs/btab_group_c_group_a_group_b_20260629_051332/group_c",
+  "notebook_src": "/content/EFGP-Eigenpro/efgp_eigenpro_py/gpu/box_toeplitz_active_block/boxeig_inverse_diagnostics_experiment.ipynb",
+  "drive_output_dir": "/content/drive/MyDrive/EFGP_Eigenpro/benchmark_exports",
+  "github_notebook_url": "https://github.com/Yifiwifi/EFGP-Eigenpro/blob/main/efgp_eigenpro_py/gpu/box_toeplitz_active_block/boxeig_inverse_diagnostics_experiment.ipynb",
+  "colab_notebook_url": "https://colab.research.google.com/github/Yifiwifi/EFGP-Eigenpro/blob/main/efgp_eigenpro_py/gpu/box_toeplitz_active_block/boxeig_inverse_diagnostics_experiment.ipynb",
+  "includes": [
+    "/content/EFGP-Eigenpro/efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs/btab_group_c_group_a_group_b_20260629_051332/group_c_export_bundle/group_c",
+    "/content/EFGP-Eigenpro/efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs/btab_group_c_group_a_group_b_20260629_051332/group_c_export_bundle/notebook/boxeig_inverse_diagnostics_experiment.ipynb"
+  ]
+}

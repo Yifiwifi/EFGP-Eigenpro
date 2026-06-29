@@ -925,6 +925,7 @@ def run_experiments(cfg: BTABExperimentConfig | None = None) -> dict[str, Any]:
         for key, value in result["resolved_route_configs"].items():
             all_resolved_route_configs[f"{group}/{key}"] = value
 
+    write_outputs(all_rows, parent_dir)
     (parent_dir / "experiment_config.json").write_text(
         json.dumps(asdict(cfg), indent=2, ensure_ascii=False),
         encoding="utf-8",

@@ -63,7 +63,7 @@ class BTABExperimentConfig:
     debug_finite_checks: bool = False
     warmup_repeats: int = 0
     measured_repeats: int = 1
-    eigenpro_topq_list: list[int] = field(default_factory=lambda: [90,180])
+    eigenpro_topq_list: list[int] = field(default_factory=lambda: [64,128,192,256,320])
     btab_active_mode: str = "topk"
     btab_experiment_route: str = "cartesian"
     btab_experiment_routes: list[str] = field(default_factory=list)
@@ -329,12 +329,14 @@ def resolve_btab_experiment_route(
     elif route == "group_c":
         # for matern kernel with large sample, M=35721
         topk = [1024, 2048, 4096, 8192, 16384]
-        inverse = [2048,4096,8192]    #[1024, 2048,4096]
+        inverse = [2048,4096]    #[1024, 2048,4096]
         boxeig = [
+            (4096, 128),
+            (4096, 192),
+            (8192, 128),
+            (8192, 192),
             (16384, 192),
             (16384, 256),
-            (16384, 320),
-
             (20480, 192),
             (20480, 256),
             (20480, 320),
