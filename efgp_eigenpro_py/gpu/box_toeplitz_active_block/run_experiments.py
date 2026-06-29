@@ -24,7 +24,13 @@ from ..versions import (
     run_v6_box_toeplitz_active_block,
 )
 from .active_set import format_box_tag
-from .config import BTABConfig, BTABExperimentConfig, resolve_btab_experiment_route
+from .config import (
+    BTABConfig,
+    BTABExperimentConfig,
+    expand_btab_experiment_routes,
+    normalize_btab_experiment_route,
+    resolve_btab_experiment_route,
+)
 
 
 _HERE = Path(__file__).resolve().parent
@@ -317,11 +323,15 @@ def evaluate_output(out: Any, x_eval: np.ndarray, y_eval: np.ndarray) -> float:
     return regression_rmse(y_eval, yhat)
 
 
-def build_gpu_run_config(cfg: BTABExperimentConfig) -> GPURunConfig:
+def build_gpu_run_config(
+    cfg: BTABExperimentConfig,
+    *,
+    maxiter: int | None = None,
+) -> GPURunConfig:
     return GPURunConfig(
         reg_lambda=float(cfg.reg_lambda),
         tol=float(cfg.tol),
-        maxiter=int(cfg.maxiter),
+        maxiter=int(cfg.maxiter if maxiter is None else maxiter),
         chunk_size=cfg.chunk_size,
         debug_finite_checks=bool(cfg.debug_finite_checks),
         profile_components=bool(cfg.profile_components),
@@ -352,11 +362,18 @@ def method_rows_for_dataset(
         nufft_tol=float(cfg.nufft_tol),
         l2scaled=bool(cfg.l2_scaled),
     )
-    gpu_cfg = build_gpu_run_config(cfg)
+    v1_gpu_cfg = build_gpu_run_config(cfg, maxiter=int(cfg.maxiter))
+    precond_gpu_cfg = build_gpu_run_config(cfg, maxiter=int(cfg.non_v1_maxiter))
 
     rows: list[dict[str, Any]] = []
 
-    def _run_case(tag: str, fn, *, extra: dict[str, Any] | None = None) -> None:
+    def _run_case(
+        tag: str,
+        fn,
+        *,
+        run_cfg: GPURunConfig,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
         extra = extra or {}
         base = {
             "dataset_stem": dataset_payload["stem"],
@@ -370,12 +387,15 @@ def method_rows_for_dataset(
             "reg_lambda": float(cfg.reg_lambda),
             "eps": float(cfg.eps),
             "tol": float(cfg.tol),
-            "maxiter": int(cfg.maxiter),
+            "maxiter": int(run_cfg.maxiter),
+            "v1_maxiter": int(cfg.maxiter),
+            "non_v1_maxiter": int(cfg.non_v1_maxiter),
             "repeat_idx": int(repeat_idx),
             "is_warmup": bool(is_warmup),
             "run_seed": int(run_seed),
             "method": tag,
             "btab_experiment_route": str(cfg.btab_experiment_route),
+            "btab_route_group": str(cfg.btab_experiment_route),
             **extra,
         }
         try:
@@ -398,7 +418,11 @@ def method_rows_for_dataset(
             }
         rows.append(row)
 
-    _run_case("plain_cg", lambda: run_v1_pure_efgp(solver, x_train, y_train, gpu_cfg))
+    _run_case(
+        "plain_cg",
+        lambda: run_v1_pure_efgp(solver, x_train, y_train, v1_gpu_cfg),
+        run_cfg=v1_gpu_cfg,
+    )
 
     for top_q in cfg.eigenpro_topq_list:
         eig_cfg = EigenspaceConfig(
@@ -413,9 +437,10 @@ def method_rows_for_dataset(
                 solver,
                 x_train,
                 y_train,
-                gpu_cfg,
+                precond_gpu_cfg,
                 eig_cfg=eig_cfg,
             ),
+            run_cfg=precond_gpu_cfg,
             extra={"top_q": int(top_q)},
         )
 
@@ -482,9 +507,10 @@ def method_rows_for_dataset(
                 solver,
                 x_train,
                 y_train,
-                gpu_cfg,
+                precond_gpu_cfg,
                 btab_cfg=btab_cfg,
             ),
+            run_cfg=precond_gpu_cfg,
             extra={
                 "btab_active_mode": str(btab_cfg.active_mode),
                 "btab_active_topk": (
@@ -571,9 +597,10 @@ def method_rows_for_dataset(
                 solver,
                 x_train,
                 y_train,
-                gpu_cfg,
+                precond_gpu_cfg,
                 btab_cfg=btab_cfg,
             ),
+            run_cfg=precond_gpu_cfg,
             extra={
                 "btab_active_mode": str(btab_cfg.active_mode),
                 "btab_active_topk": (
@@ -670,8 +697,11 @@ def aggregate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "eps",
         "tol",
         "maxiter",
+        "v1_maxiter",
+        "non_v1_maxiter",
         "method",
         "btab_experiment_route",
+        "btab_route_group",
         "top_q",
         "version",
         "nufft_backend",
@@ -804,9 +834,20 @@ def write_outputs(rows: list[dict[str, Any]], out_dir: Path) -> None:
     write_rows(master_rows, out_dir, stem="summary")
 
 
-def run_experiments(cfg: BTABExperimentConfig | None = None) -> dict[str, Any]:
-    cfg = cfg or BTABExperimentConfig()
-    out_dir = cfg.resolve_output_dir(_HERE)
+def _apply_named_route_experiment_defaults(cfg: BTABExperimentConfig) -> BTABExperimentConfig:
+    route = normalize_btab_experiment_route(cfg.btab_experiment_route)
+    if route in {"group_a", "group_b", "group_c"}:
+        return resolve_btab_experiment_route(cfg)
+    return cfg
+
+
+def _run_experiments_single(
+    cfg: BTABExperimentConfig,
+    *,
+    out_dir: Path | None = None,
+) -> dict[str, Any]:
+    cfg = _apply_named_route_experiment_defaults(cfg)
+    out_dir = out_dir or cfg.resolve_output_dir(_HERE)
     out_dir.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
     resolved_route_configs: dict[str, dict[str, Any]] = {}
@@ -860,6 +901,61 @@ def run_experiments(cfg: BTABExperimentConfig | None = None) -> dict[str, Any]:
     }
 
 
+def run_experiments(cfg: BTABExperimentConfig | None = None) -> dict[str, Any]:
+    cfg = cfg or BTABExperimentConfig()
+    route_cfgs = expand_btab_experiment_routes(cfg)
+    if len(route_cfgs) == 1:
+        return _run_experiments_single(route_cfgs[0])
+
+    parent_dir = cfg.resolve_output_dir(_HERE)
+    parent_dir.mkdir(parents=True, exist_ok=True)
+    group_results: dict[str, Any] = {}
+    all_rows: list[dict[str, Any]] = []
+    all_resolved_stems: list[str] = []
+    all_eps_values: list[float] = []
+    all_resolved_route_configs: dict[str, dict[str, Any]] = {}
+    for route_cfg in route_cfgs:
+        group = normalize_btab_experiment_route(route_cfg.btab_experiment_route)
+        group_dir = parent_dir / group
+        result = _run_experiments_single(route_cfg, out_dir=group_dir)
+        group_results[group] = result
+        all_rows.extend(result["rows"])
+        all_resolved_stems.extend(result["dataset_stems"])
+        all_eps_values.extend(result["eps_values"])
+        for key, value in result["resolved_route_configs"].items():
+            all_resolved_route_configs[f"{group}/{key}"] = value
+
+    (parent_dir / "experiment_config.json").write_text(
+        json.dumps(asdict(cfg), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (parent_dir / "multi_group_results.json").write_text(
+        json.dumps(
+            {
+                group: {
+                    "output_dir": result["output_dir"],
+                    "dataset_stems": result["dataset_stems"],
+                    "eps_values": result["eps_values"],
+                    "n_rows": len(result["rows"]),
+                }
+                for group, result in group_results.items()
+            },
+            indent=2,
+            ensure_ascii=False,
+            default=_json_default,
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "output_dir": str(parent_dir),
+        "rows": all_rows,
+        "dataset_stems": list(dict.fromkeys(all_resolved_stems)),
+        "eps_values": list(dict.fromkeys(all_eps_values)),
+        "resolved_route_configs": all_resolved_route_configs,
+        "group_results": group_results,
+    }
+
+
 def _parse_int_list(raw: str) -> list[int]:
     return [int(tok.strip()) for tok in raw.split(",") if tok.strip()]
 
@@ -907,6 +1003,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--nufft-tol", type=float, default=BTABExperimentConfig().nufft_tol)
     p.add_argument("--tol", type=float, default=BTABExperimentConfig().tol)
     p.add_argument("--maxiter", type=int, default=BTABExperimentConfig().maxiter)
+    p.add_argument("--non-v1-maxiter", type=int, default=BTABExperimentConfig().non_v1_maxiter)
     p.add_argument("--chunk-size", type=int, default=None)
     p.add_argument("--warmup-repeats", type=int, default=BTABExperimentConfig().warmup_repeats)
     p.add_argument("--measured-repeats", type=int, default=BTABExperimentConfig().measured_repeats)
@@ -921,6 +1018,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "BTAB parameter expansion. 'cartesian' uses the legacy full "
             "top-k x q sweep; named routes use curated non-Cartesian "
             "shortlists; 'schedule' selects one from each dataset's n_train."
+        ),
+    )
+    p.add_argument(
+        "--btab-experiment-routes",
+        type=str,
+        default="",
+        help=(
+            "Optional comma-separated named groups to run into subdirectories, "
+            "for example 'group_a,group_b'."
         ),
     )
     p.add_argument("--btab-active-mode", type=str, default=BTABExperimentConfig().btab_active_mode)
@@ -979,12 +1085,18 @@ def config_from_args(args: argparse.Namespace) -> BTABExperimentConfig:
         nufft_tol=float(args.nufft_tol),
         tol=float(args.tol),
         maxiter=int(args.maxiter),
+        non_v1_maxiter=int(args.non_v1_maxiter),
         chunk_size=args.chunk_size,
         warmup_repeats=int(args.warmup_repeats),
         measured_repeats=int(args.measured_repeats),
         seed=int(args.seed),
         eigenpro_topq_list=_parse_int_list(args.eigenpro_topq_list),
         btab_experiment_route=str(args.btab_experiment_route),
+        btab_experiment_routes=(
+            [tok.strip() for tok in str(args.btab_experiment_routes).split(",") if tok.strip()]
+            if str(args.btab_experiment_routes).strip()
+            else []
+        ),
         btab_active_mode=str(args.btab_active_mode),
         btab_topk_list=_parse_int_list(args.btab_topk_list),
         btab_tau_list=_parse_float_list(args.btab_tau_list),

@@ -1,5 +1,11 @@
 from .active_set import BoxActiveSet, build_box_active_set, compute_rho, format_box_tag
-from .config import BTABConfig, BTABExperimentConfig, resolve_btab_experiment_route
+from .config import (
+    BTABConfig,
+    BTABExperimentConfig,
+    expand_btab_experiment_routes,
+    normalize_btab_experiment_route,
+    resolve_btab_experiment_route,
+)
 from .preconditioner import (
     BoxToeplitzPreconditionerData,
     apply_box_toeplitz_preconditioner,
@@ -16,6 +22,8 @@ from .runner import solve_box_eigenpro_active_block, solve_box_toeplitz_active_b
 __all__ = [
     "BTABConfig",
     "BTABExperimentConfig",
+    "expand_btab_experiment_routes",
+    "normalize_btab_experiment_route",
     "resolve_btab_experiment_route",
     "BoxActiveSet",
     "BoxToeplitzPreconditionerData",

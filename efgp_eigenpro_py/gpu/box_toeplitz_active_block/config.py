@@ -57,6 +57,7 @@ class BTABExperimentConfig:
     l2_scaled: bool = True
     tol: float = 1e-6
     maxiter: int = 6000
+    non_v1_maxiter: int = 5000
     chunk_size: Optional[int] = None
     profile_components: bool = True
     debug_finite_checks: bool = False
@@ -65,6 +66,7 @@ class BTABExperimentConfig:
     eigenpro_topq_list: list[int] = field(default_factory=lambda: [90,180])
     btab_active_mode: str = "topk"
     btab_experiment_route: str = "cartesian"
+    btab_experiment_routes: list[str] = field(default_factory=list)
     btab_topk_list: list[int] = field(default_factory=lambda: [512, 1024, 2048])
     btab_tau_list: list[float] = field(default_factory=lambda: [1e-1, 1e-2])
     btab_inverse_topk_list: Optional[list[int]] = None
@@ -100,6 +102,60 @@ class BTABExperimentConfig:
         return Path(base_dir).resolve() / "outputs" / self.run_tag
 
 
+_BTAB_ROUTE_ALIASES = {
+    "full": "cartesian",
+    "legacy": "cartesian",
+    "a": "group_a",
+    "exact": "group_a",
+    "exact_inverse": "group_a",
+    "b": "group_b",
+    "boxeig": "group_b",
+    "idea_validation": "group_b",
+    "c": "group_c",
+    "large": "group_c",
+    "large_scale": "group_c",
+    "auto": "schedule",
+    "n_schedule": "schedule",
+}
+
+_BTAB_NAMED_GROUPS = {"group_a", "group_b", "group_c"}
+
+
+def normalize_btab_experiment_route(route: str) -> str:
+    route = str(route or "cartesian").strip().lower()
+    return _BTAB_ROUTE_ALIASES.get(route, route)
+
+
+def expand_btab_experiment_routes(cfg: BTABExperimentConfig) -> list[BTABExperimentConfig]:
+    """Expand a config with optional multiple named route groups.
+
+    ``btab_experiment_routes`` is intended for running several named presets in
+    one notebook invocation. Non-named routes stay single-route to preserve the
+    historical Cartesian/custom/schedule semantics.
+    """
+    raw_routes = cfg.btab_experiment_routes or [cfg.btab_experiment_route]
+    routes = [normalize_btab_experiment_route(route) for route in raw_routes if str(route).strip()]
+    if not routes:
+        routes = [normalize_btab_experiment_route(cfg.btab_experiment_route)]
+    if len(routes) > 1:
+        invalid = [route for route in routes if route not in _BTAB_NAMED_GROUPS]
+        if invalid:
+            raise ValueError(
+                "btab_experiment_routes supports multiple entries only for "
+                f"group_a, group_b, and group_c; got {invalid!r}."
+            )
+    expanded: list[BTABExperimentConfig] = []
+    for route in routes:
+        expanded.append(
+            replace(
+                cfg,
+                btab_experiment_route=route,
+                btab_experiment_routes=[],
+            )
+        )
+    return expanded
+
+
 def resolve_btab_experiment_route(
     cfg: BTABExperimentConfig,
     *,
@@ -113,23 +169,7 @@ def resolve_btab_experiment_route(
     non-Cartesian shortlists so large experiments do not accidentally run
     every combination.
     """
-    route = str(cfg.btab_experiment_route or "cartesian").strip().lower()
-    aliases = {
-        "full": "cartesian",
-        "legacy": "cartesian",
-        "a": "group_a",
-        "exact": "group_a",
-        "exact_inverse": "group_a",
-        "b": "group_b",
-        "boxeig": "group_b",
-        "idea_validation": "group_b",
-        "c": "group_c",
-        "large": "group_c",
-        "large_scale": "group_c",
-        "auto": "schedule",
-        "n_schedule": "schedule",
-    }
-    route = aliases.get(route, route)
+    route = normalize_btab_experiment_route(cfg.btab_experiment_route)
     if route == "cartesian":
         return replace(
             cfg,
@@ -158,6 +198,7 @@ def resolve_btab_experiment_route(
         return cfg
 
     exact_apply_mode = "chol_solve"
+    route_preset: dict[str, Any] = {}
     if route == "schedule":
         if n_train is None:
             raise ValueError("btab_experiment_route='schedule' requires n_train.")
@@ -194,7 +235,7 @@ def resolve_btab_experiment_route(
             box_budget = 25000
             resolved_route = "schedule_large"
     elif route == "group_a":
-    # for matern kernel with small sample, M=35721        
+        # for matern kernel with small sample, M=35721
         topk = [512, 1024, 2048, 4096,8192]
         inverse = [512,728, 1024, 2048, 4096]
         boxeig = [
@@ -223,6 +264,27 @@ def resolve_btab_experiment_route(
         box_budget = 80000
         exact_apply_mode = "inverse"
         resolved_route = route
+        route_preset = {
+            "dataset_stems": [
+                "synthetic_true_func_2d_n1000000",
+                "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain1000000",
+            ],
+            "n_train_list": [3_000_000, 1_000_000,30_000_000, 10_000_000],
+            "kernel_family": "matern",
+            "kernel_family_list": ["matern"],
+            "kernel_params_by_family": {
+                "matern": {
+                    "kernel_lengthscale": 0.1,
+                    "kernel_nu": 1.5,
+                    "kernel_variance": 1.0,
+                }
+            },
+            "kernel_lengthscale": 0.1,
+            "kernel_nu": 1.5,
+            "kernel_variance": 1.0,
+            "eps": 1e-5,
+            "eps_list": [1e-5],
+        }
     elif route == "group_b":
         # for SE kernel, M=1225
         # Keep this route separate from the exact-inverse sweep.
@@ -244,6 +306,26 @@ def resolve_btab_experiment_route(
         eig_q = [16,32,64,128, 192,256]
         box_budget = 80000
         resolved_route = route
+        route_preset = {
+            "dataset_stems": [
+                "synthetic_true_func_2d_n1000000",
+                "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain1000000",
+            ],
+            "n_train_list": [300_000_000, 100_000_000,3_000_000, 1_000_000,30_000_000, 10_000_000],
+            "kernel_family": "SE",
+            "kernel_family_list": ["SE"],
+            "kernel_params_by_family": {
+                "SE": {
+                    "kernel_lengthscale": 0.1,
+                    "kernel_variance": 1.0,
+                }
+            },
+            "kernel_lengthscale": 0.1,
+            "kernel_nu": 1.5,
+            "kernel_variance": 1.0,
+            "eps": 1e-5,
+            "eps_list": [1e-5],
+        }
     elif route == "group_c":
         # for matern kernel with large sample, M=35721
         topk = [1024, 2048, 4096, 8192, 16384]
@@ -269,6 +351,27 @@ def resolve_btab_experiment_route(
         box_budget = 80000
         exact_apply_mode = "inverse"
         resolved_route = route
+        route_preset = {
+            "dataset_stems": [
+                "synthetic_true_func_2d_n1000000",
+                "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain1000000",
+            ],
+            "n_train_list": [300_000_000, 100_000_000],
+            "kernel_family": "matern",
+            "kernel_family_list": ["matern"],
+            "kernel_params_by_family": {
+                "matern": {
+                    "kernel_lengthscale": 0.1,
+                    "kernel_nu": 1.5,
+                    "kernel_variance": 1.0,
+                }
+            },
+            "kernel_lengthscale": 0.1,
+            "kernel_nu": 1.5,
+            "kernel_variance": 1.0,
+            "eps": 1e-5,
+            "eps_list": [1e-5],
+        }
     else:
         raise ValueError(
             "Unknown btab_experiment_route "
@@ -278,15 +381,17 @@ def resolve_btab_experiment_route(
 
     return replace(
         cfg,
+        **route_preset,
         btab_experiment_route=resolved_route,
+        btab_experiment_routes=[],
         btab_active_mode="topk",
-        btab_topk_list=topk,
+        btab_topk_list=list(topk),
         btab_tau_list=[],
-        btab_inverse_topk_list=inverse,
-        btab_boxeig_topk_q_pairs=boxeig,
+        btab_inverse_topk_list=list(inverse),
+        btab_boxeig_topk_q_pairs=list(boxeig),
         btab_box_budget=box_budget,
         btab_solve_mode="auto",
         btab_exact_box_max_size=20000,
         btab_exact_apply_mode=exact_apply_mode,
-        btab_eig_q_list=eig_q,
+        btab_eig_q_list=list(eig_q),
     )
