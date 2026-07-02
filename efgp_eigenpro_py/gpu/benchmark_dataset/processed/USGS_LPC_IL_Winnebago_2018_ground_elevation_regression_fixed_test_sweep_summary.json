@@ -1,0 +1,129 @@
+{
+  "source_npz": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain300000000.npz",
+  "source_json": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain300000000_618.json",
+  "output_dir": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed",
+  "dataset_stem_prefix": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression",
+  "n_train_pool": 300000000,
+  "source_n_test_pool": 75000000,
+  "source_test_size": 0.2,
+  "test_size": 0.2,
+  "n_test_list": [
+    250000,
+    750000,
+    2500000,
+    7500000,
+    25000000
+  ],
+  "dim": 2,
+  "n_train_list": [
+    1000000,
+    3000000,
+    10000000,
+    30000000,
+    100000000
+  ],
+  "grid_size": 64,
+  "seed": 0,
+  "chunk_rows": 1000000,
+  "candidate_oversample": 1.15,
+  "candidate_min_extra_per_cell": 256,
+  "spatial_plan": {
+    "grid_size": 64,
+    "seed": 0,
+    "n_train_pool": 300000000,
+    "max_n_train": 100000000,
+    "occupied_train_cells": 634,
+    "candidate_oversample": 1.15,
+    "candidate_min_extra_per_cell": 256,
+    "n_candidates": 115002078,
+    "train_cell_counts_summary": {
+      "n_cells": 4096,
+      "n_occupied_cells": 634,
+      "min_nonzero": 41689,
+      "max": 651238
+    },
+    "test_cell_counts_summary": {
+      "n_cells": 4096,
+      "n_occupied_cells": 634,
+      "min_nonzero": 10564,
+      "max": 162526
+    }
+  },
+  "generated": [
+    {
+      "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain1000000",
+      "output_npz": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain1000000.npz",
+      "output_json": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain1000000.json",
+      "n_train": 1000000,
+      "n_test": 250000,
+      "n_clean": 1250000,
+      "train_sampling_method": "spatial_grid_stratified_nested_prefix",
+      "grid_coverage": {
+        "n_test_occupied_cells": 634,
+        "n_test_cells_with_train_points": 634,
+        "test_cell_coverage_by_train": 1.0,
+        "n_train_occupied_cells": 634
+      }
+    },
+    {
+      "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain3000000",
+      "output_npz": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain3000000.npz",
+      "output_json": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain3000000.json",
+      "n_train": 3000000,
+      "n_test": 750000,
+      "n_clean": 3750000,
+      "train_sampling_method": "spatial_grid_stratified_nested_prefix",
+      "grid_coverage": {
+        "n_test_occupied_cells": 634,
+        "n_test_cells_with_train_points": 634,
+        "test_cell_coverage_by_train": 1.0,
+        "n_train_occupied_cells": 634
+      }
+    },
+    {
+      "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+      "output_npz": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000.npz",
+      "output_json": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000.json",
+      "n_train": 10000000,
+      "n_test": 2500000,
+      "n_clean": 12500000,
+      "train_sampling_method": "spatial_grid_stratified_nested_prefix",
+      "grid_coverage": {
+        "n_test_occupied_cells": 634,
+        "n_test_cells_with_train_points": 634,
+        "test_cell_coverage_by_train": 1.0,
+        "n_train_occupied_cells": 634
+      }
+    },
+    {
+      "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain30000000",
+      "output_npz": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain30000000.npz",
+      "output_json": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain30000000.json",
+      "n_train": 30000000,
+      "n_test": 7500000,
+      "n_clean": 37500000,
+      "train_sampling_method": "spatial_grid_stratified_nested_prefix",
+      "grid_coverage": {
+        "n_test_occupied_cells": 634,
+        "n_test_cells_with_train_points": 634,
+        "test_cell_coverage_by_train": 1.0,
+        "n_train_occupied_cells": 634
+      }
+    },
+    {
+      "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain100000000",
+      "output_npz": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain100000000.npz",
+      "output_json": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain100000000.json",
+      "n_train": 100000000,
+      "n_test": 25000000,
+      "n_clean": 125000000,
+      "train_sampling_method": "spatial_grid_stratified_nested_prefix",
+      "grid_coverage": {
+        "n_test_occupied_cells": 634,
+        "n_test_cells_with_train_points": 634,
+        "test_cell_coverage_by_train": 1.0,
+        "n_train_occupied_cells": 634
+      }
+    }
+  ]
+}

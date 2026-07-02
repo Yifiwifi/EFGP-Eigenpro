@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from typing import Any
+from typing import Callable
 
 from ..iterative_solvers import fgmres_solve_gpu, pcg_solve_gpu
 from ..v1_ops import apply_A_v1
@@ -37,6 +38,7 @@ def solve_box_toeplitz_active_block(
     btab_cfg: BTABConfig,
     profile_components: bool = True,
     return_precond_data: bool = False,
+    trace_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[Any, int, float, dict[str, Any], dict[str, Any]] | tuple[Any, int, float, dict[str, Any], dict[str, Any], Any]:
     t0 = time.perf_counter()
     precond_data = build_box_toeplitz_preconditioner(
@@ -79,6 +81,7 @@ def solve_box_toeplitz_active_block(
             maxiter,
             return_stats=True,
             profile_components=profile_components,
+            trace_callback=trace_callback,
         )
     setup_diag = dict(precond_data.diagnostics)
     setup_diag.update(
@@ -121,6 +124,7 @@ def solve_box_eigenpro_active_block(
     btab_cfg: BTABConfig,
     profile_components: bool = True,
     return_precond_data: bool = False,
+    trace_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[Any, int, float, dict[str, Any], dict[str, Any]] | tuple[Any, int, float, dict[str, Any], dict[str, Any], Any]:
     t0 = time.perf_counter()
     precond_data = build_box_eigenpro_preconditioner(
@@ -164,6 +168,7 @@ def solve_box_eigenpro_active_block(
             maxiter,
             return_stats=True,
             profile_components=profile_components,
+            trace_callback=trace_callback,
         )
     setup_diag = dict(precond_data.diagnostics)
     setup_diag.update(

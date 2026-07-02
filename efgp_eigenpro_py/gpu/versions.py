@@ -167,6 +167,8 @@ def run_v1_pure_efgp(
     x: np.ndarray,
     y: np.ndarray,
     cfg: GPURunConfig,
+    *,
+    trace_callback_factory: Optional[Callable[[Any, Any], Callable[[dict[str, Any]], None]]] = None,
 ) -> V1Outputs:
     """
     V1: ``top_q=0`` — GPU FFT Toeplitz matvec + GPU plain CG; NUFFT precompute/predict
@@ -190,6 +192,11 @@ def run_v1_pure_efgp(
     t1 = time.perf_counter()
 
     reg = float(cfg.reg_lambda)
+    trace_callback = (
+        trace_callback_factory(backend, data_ctx)
+        if trace_callback_factory is not None
+        else None
+    )
     t2 = time.perf_counter()
     beta_gpu, it, relres, cg_stats = solve_beta_plain_cg_v1(
         backend,
@@ -200,6 +207,7 @@ def run_v1_pure_efgp(
         cfg.maxiter,
         return_stats=True,
         profile_components=cfg.profile_components,
+        trace_callback=trace_callback,
     )
     t3 = time.perf_counter()
     _ = predict_v1(backend, data_ctx, x, beta_gpu)
@@ -368,6 +376,8 @@ def run_v3_full_gpu_eigenspace(
     y: np.ndarray,
     cfg: GPURunConfig,
     eig_cfg: Optional[EigenspaceConfig] = None,
+    *,
+    trace_callback_factory: Optional[Callable[[Any, Any], Callable[[dict[str, Any]], None]]] = None,
 ) -> V1Outputs:
     """
     V3: GPU eigenspace estimation + GPU preconditioner + GPU PCG.
@@ -563,6 +573,11 @@ def run_v3_full_gpu_eigenspace(
         else:
             apply_preconditioner_v2(backend, precond_data, v, op_ctx=op_ctx, out=out)
 
+    trace_callback = (
+        trace_callback_factory(backend, data_ctx)
+        if trace_callback_factory is not None
+        else None
+    )
     beta_gpu, it, relres, stats = pcg_solve_gpu(
         backend,
         _matvec,
@@ -573,6 +588,7 @@ def run_v3_full_gpu_eigenspace(
         cfg.maxiter,
         return_stats=True,
         profile_components=cfg.profile_components,
+        trace_callback=trace_callback,
     )
     t4 = time.perf_counter()
     _ = predict_v1(backend, data_ctx, x, beta_gpu)
@@ -638,6 +654,7 @@ def run_v6_box_toeplitz_active_block(
     cfg: GPURunConfig,
     *,
     btab_cfg: Optional[BTABConfig] = None,
+    trace_callback_factory: Optional[Callable[[Any, Any], Callable[[dict[str, Any]], None]]] = None,
 ) -> V1Outputs:
     """
     V6: GPU FFT Toeplitz matvec + Box-Toeplitz Active Block preconditioner
@@ -660,6 +677,11 @@ def run_v6_box_toeplitz_active_block(
     t1 = time.perf_counter()
 
     btab_cfg = btab_cfg or BTABConfig()
+    trace_callback = (
+        trace_callback_factory(backend, data_ctx)
+        if trace_callback_factory is not None
+        else None
+    )
     beta_gpu, it, relres, stats, setup_diag, precond_data = solve_box_toeplitz_active_block(
         backend,
         data_ctx,
@@ -671,6 +693,7 @@ def run_v6_box_toeplitz_active_block(
         btab_cfg=btab_cfg,
         profile_components=cfg.profile_components,
         return_precond_data=True,
+        trace_callback=trace_callback,
     )
     t2 = time.perf_counter()
     _ = predict_v1(backend, data_ctx, x, beta_gpu)
@@ -777,6 +800,7 @@ def run_v7_box_eigenpro_active_block(
     cfg: GPURunConfig,
     *,
     btab_cfg: Optional[BTABConfig] = None,
+    trace_callback_factory: Optional[Callable[[Any, Any], Callable[[dict[str, Any]], None]]] = None,
 ) -> V1Outputs:
     """
     V7: GPU FFT Toeplitz matvec + expanded-box EigenPro inverse block
@@ -799,6 +823,11 @@ def run_v7_box_eigenpro_active_block(
     t1 = time.perf_counter()
 
     btab_cfg = btab_cfg or BTABConfig()
+    trace_callback = (
+        trace_callback_factory(backend, data_ctx)
+        if trace_callback_factory is not None
+        else None
+    )
     beta_gpu, it, relres, stats, setup_diag, precond_data = solve_box_eigenpro_active_block(
         backend,
         data_ctx,
@@ -810,6 +839,7 @@ def run_v7_box_eigenpro_active_block(
         btab_cfg=btab_cfg,
         profile_components=cfg.profile_components,
         return_precond_data=True,
+        trace_callback=trace_callback,
     )
     t2 = time.perf_counter()
     _ = predict_v1(backend, data_ctx, x, beta_gpu)

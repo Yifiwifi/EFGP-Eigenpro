@@ -685,6 +685,7 @@ def solve_beta_plain_cg_v1(
     *,
     return_stats: bool = False,
     profile_components: bool = True,
+    trace_callback: Optional[Callable[[dict[str, Any]], None]] = None,
 ) -> tuple[Any, int, float] | tuple[Any, int, float, dict[str, float]]:
     """
     Plain CG on GPU with reusable buffers on ``op_ctx``.
@@ -705,4 +706,5 @@ def solve_beta_plain_cg_v1(
         return_stats=return_stats,
         work_prefix="cg",
         profile_components=profile_components,
+        trace_callback=trace_callback,
     )

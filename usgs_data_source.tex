@@ -1,0 +1,201 @@
+\section{USGS 3DEP LiDAR data source and v2 train--test construction}
+\label{sec:usgs-data-source}
+
+The real spatial regression benchmark is constructed from the United States
+Geological Survey (USGS) 3D Elevation Program (3DEP) LiDAR point cloud product.
+We use the classified LiDAR point tiles from the USGS Rockyweb delivery
+directory
+\[
+\texttt{https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/}
+\]
+under the project subdirectory
+\[
+\texttt{USGS\_LPC\_IL\_Winnebago\_2018/laz/}.
+\]
+The resulting regression task is two-dimensional ground elevation prediction:
+the input is the horizontal coordinate pair \(x_i=(e_i,n_i)\), where \(e_i\)
+and \(n_i\) are the projected easting and northing coordinates stored in the
+LAS/LAZ files, and the response is the corresponding elevation \(z_i\).
+Thus each sample is interpreted as
+\[
+(e_i,n_i) \longmapsto z_i .
+\]
+
+\paragraph{Download and tile-selection rules.}
+For the v2 experimental process, the USGS datasets are described according to
+the latest v2 preprocessing code, implemented in
+\texttt{preprocess\_usgs\_3dep\_lidar\_contiguous\_v2.py}.  This script first
+discovers all available LAS/LAZ files for the Winnebago project.  It checks the
+standard Rockyweb manifest files
+\texttt{0\_file\_download\_links.txt} and \texttt{file\_download\_links.txt};
+if these manifests are unavailable or incomplete, it falls back to the Apache
+directory index and recursively searches for files ending in \texttt{.las} or
+\texttt{.laz}.  When a manifest contains stale cloud-storage links, only the
+file basename is trusted and the URL is canonicalized back to the current
+Rockyweb project directory.  This makes the data source reproducible even if
+older manifest URLs have moved.
+
+For the main size sweep up to \(3\times 10^7\) training samples, we select a
+spatially contiguous block of \(64\) LiDAR tiles.  Tile coordinates are parsed
+from filenames of the form
+\[
+\texttt{USGS\_LPC\_IL\_Winnebago\_2018\_a\_b.laz},
+\]
+where \(a\) and \(b\) are treated as grid coordinates.  The tiles are ordered by
+their grid-coordinate ranks, and the algorithm chooses a compact near-square
+block close to the center of the available project grid.  For the generated
+datasets with \(10^5\), \(3\times 10^5\), \(10^6\), \(3\times 10^6\),
+\(10^7\), and \(3\times 10^7\) training points, the selected block contains
+tile coordinates from \((2559,2055)\) to \((2573,2069)\).  For the largest
+streaming variants, the metadata records \texttt{tile\_selection=all}; the
+\(3\times 10^8\) version uses \(438\) tiles, while the \(10^9\) version uses
+\(999\) tiles.
+
+\paragraph{Point filtering and v2 raw sample extraction.}
+Each selected LAS/LAZ file is read with \texttt{laspy}.  By default, v2 keeps
+only points with LAS classification label \(2\).  In the LAS classification
+convention, class \(2\) denotes ground returns, so this filter removes
+buildings, vegetation, and other non-ground objects before the elevation
+regression problem is formed.  The metadata records \texttt{finite\_only=true},
+and the subsequent bounding-box, scale, mean, and standard-deviation checks
+guard against non-finite values in the retained arrays.  No per-file cap is
+used in the recorded benchmark datasets.
+
+The v2 code is designed for very large datasets and avoids materializing all
+eligible points in memory.  It first scans the selected tiles and records the
+number of eligible ground points in each file.  If the total number of eligible
+points exceeds the requested point budget, the script allocates an exact number
+of sampled points to each tile.  When supported by NumPy, this allocation uses a
+multivariate hypergeometric draw, followed by uniform sampling without
+replacement inside each tile; this is equivalent to drawing a fixed-size sample
+from the union of all eligible ground points while keeping the implementation
+streaming.  A deterministic proportional-allocation fallback is used on older
+NumPy versions.  The random generator for the sampling allocation is
+\[
+\operatorname{rng}
+=
+\text{\texttt{np.random.default\_rng}}(\text{\texttt{seed}}),
+\qquad \text{\texttt{seed}}=0.
+\]
+For a target training size \(N_{\mathrm{train}}\) and test fraction
+\(\rho_{\mathrm{test}}\), the total number of retained clean points is
+\[
+N_{\mathrm{total}}
+=
+\left\lceil
+\frac{N_{\mathrm{train}}}{1-\rho_{\mathrm{test}}}
+\right\rceil .
+\]
+This choice ensures that, after the train--test construction below, the
+training set has the requested target size.
+
+\paragraph{V2 train--test construction.}
+After filtering and optional fixed-size sampling, v2 constructs train and test
+arrays directly on disk using NumPy memmaps.  Let
+\[
+\mathcal{D}=\{(x_i,z_i)\}_{i=1}^{N_{\mathrm{total}}}
+\]
+denote the retained clean point set.  The desired test size is
+\[
+N_{\mathrm{test}}
+=
+\operatorname{round}(\rho_{\mathrm{test}}N_{\mathrm{total}}),
+\qquad
+N_{\mathrm{train}}=N_{\mathrm{total}}-N_{\mathrm{test}}.
+\]
+Instead of forming a global permutation of all retained points, v2 allocates the
+exact number of training samples to each tile from the already allocated sample
+counts.  This second allocation uses
+\[
+\text{\texttt{np.random.default\_rng}}(\text{\texttt{seed}}+17).
+\]
+The remaining sampled points in each tile are assigned to the test set.  Within
+each tile, v2 then draws a local random permutation using the main generator
+with \(\text{\texttt{seed}}=0\), writes the selected training coordinates and
+elevations to \texttt{x\_train\_raw.npy} and \texttt{y\_train\_raw.npy}, and
+writes the selected test coordinates and elevations to
+\texttt{x\_test\_raw.npy} and \texttt{y\_test\_raw.npy}.  The metadata records
+this split as
+\[
+\text{\texttt{method = random\_per\_file\_exact\_allocation}}.
+\]
+This is the v2 experimental path for large USGS runs: it is random,
+reproducible from the recorded seeds, and avoids the out-of-memory behavior of
+the older concatenate-then-split implementation.
+
+For comparison with the requested target size, the final array sizes satisfy
+\[
+|\mathcal{D}_{\mathrm{train}}|=N_{\mathrm{train}},
+\qquad
+|\mathcal{D}_{\mathrm{test}}|=N_{\mathrm{test}}.
+\]
+For the standard benchmark datasets, \(\rho_{\mathrm{test}}=0.2\), giving an
+\(80/20\) train--test split.  For the recorded \(10^9\)-training-sample
+streaming run, the metadata records \(\rho_{\mathrm{test}}=0.08\), which gives
+\(10^9\) training samples and \(86{,}956{,}522\) test samples from
+\(1{,}086{,}956{,}522\) retained points.
+
+\paragraph{Normalization.}
+The train--test split is performed on the raw physical coordinates and
+elevations.  Normalization statistics are then estimated from the training set
+only and applied to both training and test data.  In v2 these statistics and
+the normalization pass are computed chunk-by-chunk over the memmap arrays.  If
+\(x_i=(e_i,n_i)\), define
+\[
+x_{\min}=\min_{i\in\mathcal{I}_{\mathrm{train}}} x_i
+\quad\text{componentwise},
+\qquad
+s_x = \max_{i\in\mathcal{I}_{\mathrm{train}}}
+\max_{k\in\{1,2\}} (x_{ik}-x_{\min,k}).
+\]
+The normalized input is
+\[
+\widetilde{x}_i = \frac{x_i-x_{\min}}{s_x}.
+\]
+For the target, the training-set mean and standard deviation are
+\[
+\mu_z=\frac{1}{N_{\mathrm{train}}}
+\sum_{i\in\mathcal{I}_{\mathrm{train}}} z_i,
+\qquad
+\sigma_z =
+\left(
+\frac{1}{N_{\mathrm{train}}}
+\sum_{i\in\mathcal{I}_{\mathrm{train}}}(z_i-\mu_z)^2
+\right)^{1/2},
+\]
+and the normalized response is
+\[
+\widetilde{z}_i=\frac{z_i-\mu_z}{\sigma_z}.
+\]
+Using only training-set statistics prevents information from the test responses
+from entering the training procedure.
+
+\paragraph{Recorded dataset sizes.}
+The processed datasets are saved as NumPy \texttt{.npz} files with arrays
+\texttt{x\_train}, \texttt{y\_train}, \texttt{x\_test}, and \texttt{y\_test},
+and each file is accompanied by a JSON metadata file recording the source URL,
+downloaded tiles, filtering rule, random seed, split fraction, normalization
+statistics, serialization mode, and final shapes.  In v2 the arrays are stored
+as \(\text{\texttt{float32}}\); for datasets with at least \(5\times 10^7\) retained
+points, the script uses uncompressed \texttt{np.savez} storage instead of
+\texttt{np.savez\_compressed} to avoid excessive compression cost.  The latest
+experiment runner resolves dataset files by the family prefix
+\[
+\texttt{USGS\_LPC\_IL\_Winnebago\_2018\_ground\_elevation\_regression}
+\]
+and the recorded \(N_{\mathrm{train}}\) value, so the experiment consumes the
+processed stems of the form
+\[
+\texttt{USGS\_LPC\_IL\_Winnebago\_2018\_ground\_elevation\_regression\_ntrain}N.
+\]
+The main recorded USGS size sweep contains
+\[
+N_{\mathrm{train}}
+\in
+\{10^5,\;3\times10^5,\;10^6,\;3\times10^6,\;10^7,\;3\times10^7,\;
+10^8,\;3\times10^8,\;10^9\}.
+\]
+For the \(80/20\) datasets, the test sizes are \(N_{\mathrm{test}}
+=0.25N_{\mathrm{train}}\), e.g. \(10^6\) training points and \(250{,}000\)
+test points.  The \(10^9\) streaming run is the exception noted above, with an
+\(8\%\) test fraction.

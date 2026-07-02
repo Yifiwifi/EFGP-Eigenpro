@@ -1,0 +1,110 @@
+{
+  "dataset_name": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain100000000",
+  "task_type": "2d_lidar_elevation_regression",
+  "source_url": "https://rockyweb.usgs.gov/vdelivery/Datasets/Staged/Elevation/LPC/Projects/USGS_LPC_IL_Winnebago_2018/laz/",
+  "processed_file": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain100000000.npz",
+  "input_definition": "LAS/LAZ horizontal coordinates (x, y), shifted and shared-scaled into a bounded 2D domain",
+  "target_definition": "standardized LAS/LAZ elevation z",
+  "paper_task_statement": "(x, y) -> elevation",
+  "derived_from": {
+    "source_npz": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain300000000.npz",
+    "source_json": "D:\\NU\\ML\\efgp_eigenpro_py\\gpu\\benchmark_dataset\\processed\\USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain300000000_618.json",
+    "source_dataset_name": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain300000000",
+    "source_shapes": {
+      "n_loaded_before_total_subsample": 1089216477,
+      "n_clean": 375000000,
+      "n_train": 300000000,
+      "n_test": 75000000,
+      "dim": 2
+    },
+    "source_split": {
+      "method": "random_per_file_exact_allocation",
+      "test_size": 0.2,
+      "seed": 0,
+      "split_indices_saved": false
+    },
+    "source_cleaning": {
+      "finite_only": true,
+      "classification_keep": [
+        2
+      ],
+      "classification_keep_note": "LAS class 2 is ground in standard classified lidar; pass empty string to disable filtering.",
+      "max_points_per_file": null,
+      "max_total_points": 375000000,
+      "storage_dtype": "<class 'numpy.float32'>"
+    },
+    "source_tile_selection_metadata": {
+      "tile_selection": "all",
+      "n_selected": 438
+    }
+  },
+  "test_sampling": {
+    "source": "x_test/y_test sampled from source_npz test pool",
+    "n_test": 25000000,
+    "method": "spatial_grid_stratified_nested_prefix",
+    "nested_within_sweep": true,
+    "cell_count_allocation": "largest_remainder_proportional_to_source_test_cell_counts"
+  },
+  "train_sampling": {
+    "method": "spatial_grid_stratified_nested_prefix",
+    "grid_size": 64,
+    "seed": 0,
+    "n_train_pool": 300000000,
+    "n_selected": 100000000,
+    "nested_within_sweep": true,
+    "cell_count_allocation": "largest_remainder_proportional_to_source_train_cell_counts",
+    "output_order": "deterministically_shuffled_after_nested_selection"
+  },
+  "split": {
+    "method": "source_npz_train_test_pools_spatial_grid_nested_subsets",
+    "seed": 0,
+    "test_set_shared_across_sweep": false,
+    "test_set_nested_within_sweep": true,
+    "train_test_ratio_preserved": true,
+    "split_indices_saved": false
+  },
+  "diagnostics": {
+    "grid_coverage": {
+      "n_test_occupied_cells": 634,
+      "n_test_cells_with_train_points": 634,
+      "test_cell_coverage_by_train": 1.0,
+      "n_train_occupied_cells": 634
+    }
+  },
+  "x_transform": {
+    "method": "shift_and_shared_scale",
+    "x_min_train": [
+      2502000.0,
+      2016000.0
+    ],
+    "shared_scale": 112000.0
+  },
+  "y_transform": {
+    "method": "train_standardization",
+    "mean": 825.0101182841339,
+    "std": 47.981006256371366
+  },
+  "raw_bbox": {
+    "x_min": 2502000.0,
+    "x_max": 2582000.0,
+    "y_min": 2016000.0,
+    "y_max": 2128000.0,
+    "z_min": 710.5830078125,
+    "z_max": 998.448974609375
+  },
+  "tile_selection_metadata": {
+    "tile_selection": "all",
+    "n_selected": 438
+  },
+  "serialization": {
+    "npz_mode": "stored",
+    "array_dtype": "float32"
+  },
+  "shapes": {
+    "n_train": 100000000,
+    "n_test": 25000000,
+    "n_clean": 125000000,
+    "dim": 2,
+    "n_train_pool": 300000000
+  }
+}

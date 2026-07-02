@@ -31,6 +31,7 @@ def cg_solve_gpu(
     work_prefix: str = "cg",
     profile_components: bool = True,
     spd_guard: bool = True,
+    trace_callback: Optional[Callable[[dict[str, Any]], None]] = None,
 ) -> tuple[Any, int, float] | tuple[Any, int, float, dict[str, float]]:
     """
     Conjugate Gradient on GPU with reusable workspaces.
@@ -62,6 +63,7 @@ def cg_solve_gpu(
 
     t_matvec_total = 0.0
     n_matvec = 0
+    trace_t0 = time.perf_counter()
 
     def _matvec_in(v: Any, out: Any) -> None:
         nonlocal t_matvec_total, n_matvec
@@ -84,6 +86,15 @@ def cg_solve_gpu(
     rsold = float(xp.real(backend.linalg.vdot(r, r)))
     norm_b = max(float(backend.linalg.norm(b)), 1e-30)
     it = 0
+    if trace_callback is not None:
+        trace_callback(
+            {
+                "iteration": 0,
+                "relres": math.sqrt(max(rsold, 0.0)) / norm_b,
+                "elapsed_time": time.perf_counter() - trace_t0,
+                "x": x,
+            }
+        )
 
     if maxiter <= 0:
         relres = float(backend.linalg.norm(r) / norm_b)
@@ -132,6 +143,15 @@ def cg_solve_gpu(
         r -= alpha * Ap
         rsnew = float(xp.real(backend.linalg.vdot(r, r)))
         rel = math.sqrt(rsnew) / norm_b
+        if trace_callback is not None:
+            trace_callback(
+                {
+                    "iteration": it,
+                    "relres": rel,
+                    "elapsed_time": time.perf_counter() - trace_t0,
+                    "x": x,
+                }
+            )
         if rel < tol:
             status = "converged"
             break
@@ -172,6 +192,7 @@ def pcg_solve_gpu(
     work_prefix: str = "pcg",
     profile_components: bool = True,
     spd_guard: bool = True,
+    trace_callback: Optional[Callable[[dict[str, Any]], None]] = None,
 ) -> tuple[Any, int, float] | tuple[Any, int, float, dict[str, float]]:
     """
     Preconditioned CG on GPU.
@@ -204,6 +225,7 @@ def pcg_solve_gpu(
     t_precond_total = 0.0
     n_matvec = 0
     n_precond = 0
+    trace_t0 = time.perf_counter()
 
     def _matvec_in(v: Any, out: Any) -> None:
         nonlocal t_matvec_total, n_matvec
@@ -238,6 +260,15 @@ def pcg_solve_gpu(
     rzold = float(xp.real(backend.linalg.vdot(r, z)))
     norm_b = max(float(backend.linalg.norm(b)), 1e-30)
     it = 0
+    if trace_callback is not None:
+        trace_callback(
+            {
+                "iteration": 0,
+                "relres": float(backend.linalg.norm(r) / norm_b),
+                "elapsed_time": time.perf_counter() - trace_t0,
+                "x": x,
+            }
+        )
 
     if maxiter <= 0:
         relres = float(backend.linalg.norm(r) / norm_b)
@@ -289,6 +320,15 @@ def pcg_solve_gpu(
         r -= alpha * Ap
         rrnew = float(xp.real(backend.linalg.vdot(r, r)))
         rel = math.sqrt(max(rrnew, 0.0)) / norm_b 
+        if trace_callback is not None:
+            trace_callback(
+                {
+                    "iteration": it,
+                    "relres": rel,
+                    "elapsed_time": time.perf_counter() - trace_t0,
+                    "x": x,
+                }
+            )
         if rel < tol:
             status = "converged"
             break
