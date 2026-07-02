@@ -93,6 +93,8 @@ def cg_solve_gpu(
                 "relres": math.sqrt(max(rsold, 0.0)) / norm_b,
                 "elapsed_time": time.perf_counter() - trace_t0,
                 "x": x,
+                "is_final": False,
+                "converged": False,
             }
         )
 
@@ -143,6 +145,7 @@ def cg_solve_gpu(
         r -= alpha * Ap
         rsnew = float(xp.real(backend.linalg.vdot(r, r)))
         rel = math.sqrt(rsnew) / norm_b
+        converged = rel < tol
         if trace_callback is not None:
             trace_callback(
                 {
@@ -150,9 +153,11 @@ def cg_solve_gpu(
                     "relres": rel,
                     "elapsed_time": time.perf_counter() - trace_t0,
                     "x": x,
+                    "is_final": converged or it >= maxiter,
+                    "converged": converged,
                 }
             )
-        if rel < tol:
+        if converged:
             status = "converged"
             break
         beta = rsnew / max(rsold, 1e-30)
@@ -267,6 +272,8 @@ def pcg_solve_gpu(
                 "relres": float(backend.linalg.norm(r) / norm_b),
                 "elapsed_time": time.perf_counter() - trace_t0,
                 "x": x,
+                "is_final": False,
+                "converged": False,
             }
         )
 
@@ -320,6 +327,7 @@ def pcg_solve_gpu(
         r -= alpha * Ap
         rrnew = float(xp.real(backend.linalg.vdot(r, r)))
         rel = math.sqrt(max(rrnew, 0.0)) / norm_b 
+        converged = rel < tol
         if trace_callback is not None:
             trace_callback(
                 {
@@ -327,9 +335,11 @@ def pcg_solve_gpu(
                     "relres": rel,
                     "elapsed_time": time.perf_counter() - trace_t0,
                     "x": x,
+                    "is_final": converged or it >= maxiter,
+                    "converged": converged,
                 }
             )
-        if rel < tol:
+        if converged:
             status = "converged"
             break
         _precond_in(r, z)

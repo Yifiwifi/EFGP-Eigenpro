@@ -99,7 +99,7 @@ def test_custom_route_requires_both_explicit_shortlists(missing_field, message):
         (
             "group_c",
             80000,
-            [2048, 4096],
+            [2048, 4096, 8192, 10240],
             [
                 (20480, 320),
                 (20480, 384),

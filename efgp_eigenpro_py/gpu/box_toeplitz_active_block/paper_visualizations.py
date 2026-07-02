@@ -53,6 +53,11 @@ class PaperVisualizationConfig:
     residual_sample_size: int = 100_000
     residual_sample_seed: int = 17
     rmse_checkpoint_count: int = 70
+    residual_trace_dense_until: int = 100
+    residual_trace_mid_until: int = 1000
+    residual_trace_stride_mid: int = 10
+    residual_trace_stride_late: int = 50
+    residual_zoom_iterations: int = 400
     spectrum_active_topk: int = 2048
     spectrum_boxeig_q: int = 256
     map_active_topk: int = 4096
@@ -61,6 +66,7 @@ class PaperVisualizationConfig:
     map_bins: int = 256
     make_active_score: bool = True
     make_spectrum: bool = True
+    make_mechanism_figure: bool = True
     make_residual: bool = True
     make_rmse: bool = True
     make_prediction_map: bool = True
@@ -71,6 +77,26 @@ PAPER_LABELS = {
     "v3": "Global EigenPro-style PCG",
     "active_inverse": "Active inverse",
     "boxeig": "Box-EigenPro",
+}
+
+BLUE = "#0072B2"
+ORANGE = "#E69F00"
+GREEN = "#009E73"
+RED = "#D55E00"
+PURPLE = "#CC79A7"
+BLACK = "#000000"
+GRAY = "#999999"
+
+PROFILE_STYLES = {
+    "SE": {"color": BLUE, "linestyle": "-", "linewidth": 1.4},
+    "matern": {"color": PURPLE, "linestyle": "-", "linewidth": 1.4},
+}
+
+METHOD_STYLES = {
+    "EFGP-CG": {"color": BLUE, "linestyle": "-", "linewidth": 1.35},
+    "Global EigenPro-style PCG": {"color": ORANGE, "linestyle": "--", "linewidth": 1.35},
+    "Active inverse": {"color": GREEN, "linestyle": "-.", "linewidth": 1.35},
+    "Box-EigenPro": {"color": RED, "linestyle": "-", "linewidth": 1.35},
 }
 
 
@@ -117,12 +143,49 @@ def _write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str] | N
             writer.writerow({k: _json_safe(row.get(k, "")) for k in fieldnames})
 
 
+def _read_csv_rows(path: Path) -> list[dict[str, str]]:
+    with path.open("r", newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+def _read_json_if_exists(path: Path) -> Any | None:
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _find_existing(out_dir: Path, names: list[str]) -> Path | None:
+    for name in names:
+        path = out_dir / name
+        if path.exists():
+            return path
+    return None
+
+
+def _to_float(value: Any, default: float = float("nan")) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _to_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return int(float(value))
+    except Exception:
+        return default
+
+
 def _save_figure(fig: Any, out_dir: Path, stem: str) -> dict[str, str]:
     out_dir.mkdir(parents=True, exist_ok=True)
     png = out_dir / f"{stem}.png"
     pdf = out_dir / f"{stem}.pdf"
-    fig.savefig(png, dpi=220, bbox_inches="tight")
     fig.savefig(pdf, bbox_inches="tight")
+    fig.savefig(png, dpi=300, bbox_inches="tight")
     return {"png": str(png), "pdf": str(pdf)}
 
 
@@ -132,6 +195,22 @@ def _import_pyplot() -> Any:
     matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
 
+    matplotlib.rcParams.update(
+        {
+            "figure.dpi": 120,
+            "savefig.dpi": 300,
+            "font.size": 9,
+            "axes.labelsize": 9,
+            "axes.titlesize": 9,
+            "xtick.labelsize": 8,
+            "ytick.labelsize": 8,
+            "legend.fontsize": 8,
+            "axes.linewidth": 0.8,
+            "lines.linewidth": 1.35,
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+        }
+    )
     return plt
 
 
@@ -179,15 +258,30 @@ def _kernel_for_profile(family: str, dim: int, viz_cfg: PaperVisualizationConfig
     )
 
 
-def make_active_score_mass_figure(
-    exp_cfg: BTABExperimentConfig,
-    viz_cfg: PaperVisualizationConfig,
-) -> dict[str, Any]:
-    del exp_cfg
-    plt = _import_pyplot()
-    out_dir = Path(viz_cfg.output_dir)
+def _single_col_size(height: float = 2.3) -> tuple[float, float]:
+    return (3.4, float(height))
+
+
+def _double_col_size(height: float = 2.4) -> tuple[float, float]:
+    return (6.8, float(height))
+
+
+def _panel_label(ax: Any, label: str) -> None:
+    ax.text(
+        -0.16,
+        1.06,
+        label,
+        transform=ax.transAxes,
+        fontsize=9,
+        fontweight="bold",
+        va="top",
+        ha="left",
+    )
+
+
+def _active_score_profile_data(viz_cfg: PaperVisualizationConfig) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     rows: list[dict[str, Any]] = []
-    fig, ax = plt.subplots(figsize=(7.2, 4.6))
+    profiles: list[dict[str, Any]] = []
     profile_specs = [
         ("SE kernel, M=1225", "SE"),
         ("Matern 3/2 kernel, M=35721", "matern"),
@@ -202,7 +296,17 @@ def make_active_score_mass_figure(
         denom = max(float(np.sum(rho_sorted)), 1e-300)
         cum = np.cumsum(rho_sorted) / denom
         rank = np.arange(1, int(cum.size) + 1)
-        ax.plot(rank, cum, label=f"{label} (mtot={grid.mtot})")
+        profiles.append(
+            {
+                "label": label,
+                "kernel_family": family,
+                "rank": rank,
+                "cumulative_mass": cum,
+                "M": int(cum.size),
+                "mtot": int(grid.mtot),
+                "h": float(grid.h),
+            }
+        )
         for idx in np.unique(np.geomspace(1, int(cum.size), min(400, int(cum.size))).astype(int)):
             rows.append(
                 {
@@ -217,16 +321,40 @@ def make_active_score_mass_figure(
                     "reg_lambda": float(viz_cfg.reg_lambda),
                 }
             )
+    return profiles, rows
+
+
+def _plot_active_score_profiles(ax: Any, profiles: list[dict[str, Any]]) -> None:
+    for profile in profiles:
+        family = str(profile["kernel_family"])
+        style = PROFILE_STYLES.get(family, {"color": BLACK, "linestyle": "-", "linewidth": 1.25})
+        ax.plot(
+            profile["rank"],
+            profile["cumulative_mass"],
+            label=f"{profile['label']}",
+            **style,
+        )
     for s_act in (512, 1024, 2048):
-        ax.axvline(s_act, color="0.72", linestyle="--", linewidth=0.9)
-        ax.text(s_act, 0.04, f"{s_act}", rotation=90, va="bottom", ha="right", fontsize=8, color="0.35")
+        ax.axvline(s_act, color=GRAY, linestyle=":", linewidth=0.8)
     ax.set_xscale("log")
     ax.set_ylim(0.0, 1.02)
     ax.set_xlabel("top-k Fourier modes")
-    ax.set_ylabel("normalized cumulative active-score mass")
-    ax.set_title("Active-score profiles for the Fourier grids used in the experiments")
-    ax.grid(True, which="both", alpha=0.25)
-    ax.legend(fontsize=8)
+    ax.set_ylabel("cumulative mass")
+    ax.grid(True, which="both", alpha=0.22, linewidth=0.5)
+    ax.legend(frameon=False, loc="lower right")
+
+
+def make_active_score_mass_figure(
+    exp_cfg: BTABExperimentConfig,
+    viz_cfg: PaperVisualizationConfig,
+) -> dict[str, Any]:
+    del exp_cfg
+    plt = _import_pyplot()
+    out_dir = Path(viz_cfg.output_dir)
+    profiles, rows = _active_score_profile_data(viz_cfg)
+    fig, ax = plt.subplots(figsize=_single_col_size(2.35))
+    _plot_active_score_profiles(ax, profiles)
+    ax.set_title("Active-score cumulative mass")
     paths = _save_figure(fig, out_dir, "active_score_cumulative_mass")
     plt.close(fig)
     csv_path = out_dir / "active_score_cumulative_mass.csv"
@@ -270,12 +398,10 @@ def _prepare_solver_context(
     return backend, data_ctx, op_ctx, solver, run_cfg
 
 
-def make_active_window_spectrum_figure(
+def _active_window_spectrum_data(
     exp_cfg: BTABExperimentConfig,
     viz_cfg: PaperVisualizationConfig,
 ) -> dict[str, Any]:
-    plt = _import_pyplot()
-    out_dir = Path(viz_cfg.output_dir)
     dataset = load_processed_dataset(viz_cfg.residual_dataset_stem)
     cfg = _cfg_for_kernel(exp_cfg, viz_cfg, "matern")
     backend, data_ctx, _op_ctx, _solver, _run_cfg = _prepare_solver_context(cfg, dataset)
@@ -314,26 +440,10 @@ def make_active_window_spectrum_figure(
         rows.append({"spectrum": "raw_A_BB", "rank": int(i), "eigenvalue": float(val)})
     for i, val in enumerate(pre, 1):
         rows.append({"spectrum": "box_eigenpro_preconditioned", "rank": int(i), "eigenvalue": float(val)})
-    csv_path = out_dir / "active_window_spectrum_diagnostic.csv"
-    _write_csv(csv_path, rows)
-    fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.2), constrained_layout=True)
-    axes[0].semilogy(np.arange(1, raw.size + 1), np.maximum(raw, 1e-300), color="#1f77b4")
-    axes[0].set_title("Raw active-window spectrum")
-    axes[0].set_xlabel("rank")
-    axes[0].set_ylabel("eigenvalue")
-    axes[0].grid(True, which="both", alpha=0.25)
-    axes[1].plot(np.arange(1, pre.size + 1), pre, color="#d62728", linewidth=1.2)
-    axes[1].axhline(1.0, color="0.35", linestyle="--", linewidth=1.0, label="exact inverse reference")
-    axes[1].set_title("Box-EigenPro active-window spectrum")
-    axes[1].set_xlabel("rank")
-    axes[1].set_ylabel("eigenvalue of P_B A_BB")
-    axes[1].grid(True, alpha=0.25)
-    axes[1].legend(fontsize=8)
-    fig.suptitle("Active-window spectrum diagnostic (Matern USGS N=1e8)")
-    paths = _save_figure(fig, out_dir, "active_window_spectrum_diagnostic")
-    plt.close(fig)
     return {
-        "figure_name": "active_window_spectrum_diagnostic",
+        "raw": raw,
+        "preconditioned": pre,
+        "rows": rows,
         "dataset_stem": str(dataset["stem"]),
         "N_train": int(dataset["n_train"]),
         "kernel": "matern",
@@ -341,8 +451,81 @@ def make_active_window_spectrum_figure(
         "active_topk": int(viz_cfg.spectrum_active_topk),
         "box_size": int(n_box),
         "btab_eig_q": int(viz_cfg.spectrum_boxeig_q),
+    }
+
+
+def _plot_raw_spectrum(ax: Any, raw: np.ndarray) -> None:
+    ax.semilogy(np.arange(1, raw.size + 1), np.maximum(raw, 1e-300), color=BLACK, linewidth=1.1)
+    ax.set_xlabel("rank")
+    ax.set_ylabel("eigenvalue")
+    ax.grid(True, which="both", alpha=0.22, linewidth=0.5)
+
+
+def _plot_corrected_spectrum(ax: Any, pre: np.ndarray) -> None:
+    ax.plot(np.arange(1, pre.size + 1), pre, color=RED, linewidth=1.2)
+    ax.axhline(1.0, color=GRAY, linestyle=":", linewidth=0.9, label="exact inverse")
+    ax.set_xlabel("rank")
+    ax.set_ylabel(r"eig. of $P_B A_{BB}$")
+    ax.grid(True, alpha=0.22, linewidth=0.5)
+    ax.legend(frameon=False, loc="best")
+
+
+def make_active_window_spectrum_figure(
+    exp_cfg: BTABExperimentConfig,
+    viz_cfg: PaperVisualizationConfig,
+) -> dict[str, Any]:
+    plt = _import_pyplot()
+    out_dir = Path(viz_cfg.output_dir)
+    data = _active_window_spectrum_data(exp_cfg, viz_cfg)
+    raw = data["raw"]
+    pre = data["preconditioned"]
+    csv_path = out_dir / "active_window_spectrum_diagnostic.csv"
+    _write_csv(csv_path, data["rows"])
+    fig, axes = plt.subplots(1, 2, figsize=_double_col_size(2.35), constrained_layout=True)
+    _plot_raw_spectrum(axes[0], raw)
+    axes[0].set_title("Raw active-window spectrum")
+    _plot_corrected_spectrum(axes[1], pre)
+    axes[1].set_title("Box-EigenPro corrected spectrum")
+    paths = _save_figure(fig, out_dir, "active_window_spectrum_diagnostic")
+    plt.close(fig)
+    return {
+        "figure_name": "active_window_spectrum_diagnostic",
         "output_csv": str(csv_path),
         **paths,
+        **{k: v for k, v in data.items() if k not in {"raw", "preconditioned", "rows"}},
+    }
+
+
+def make_mechanism_diagnostics_figure(
+    exp_cfg: BTABExperimentConfig,
+    viz_cfg: PaperVisualizationConfig,
+) -> dict[str, Any]:
+    plt = _import_pyplot()
+    out_dir = Path(viz_cfg.output_dir)
+    profiles, active_rows = _active_score_profile_data(viz_cfg)
+    spectrum = _active_window_spectrum_data(exp_cfg, viz_cfg)
+    active_csv = out_dir / "figure1_mechanism_active_score.csv"
+    spectrum_csv = out_dir / "figure1_mechanism_spectrum.csv"
+    _write_csv(active_csv, active_rows)
+    _write_csv(spectrum_csv, spectrum["rows"])
+    fig, axes = plt.subplots(1, 3, figsize=_double_col_size(2.2), constrained_layout=True)
+    _plot_active_score_profiles(axes[0], profiles)
+    axes[0].set_title("Active-score mass")
+    _panel_label(axes[0], "(a)")
+    _plot_raw_spectrum(axes[1], spectrum["raw"])
+    axes[1].set_title("Raw active-window spectrum")
+    _panel_label(axes[1], "(b)")
+    _plot_corrected_spectrum(axes[2], spectrum["preconditioned"])
+    axes[2].set_title("Corrected spectrum")
+    _panel_label(axes[2], "(c)")
+    paths = _save_figure(fig, out_dir, "figure1_mechanism_diagnostics")
+    plt.close(fig)
+    return {
+        "figure_name": "figure1_mechanism_diagnostics",
+        "output_active_score_csv": str(active_csv),
+        "output_spectrum_csv": str(spectrum_csv),
+        **paths,
+        **{k: v for k, v in spectrum.items() if k not in {"raw", "preconditioned", "rows"}},
     }
 
 
@@ -453,6 +636,15 @@ def _make_checkpoints(maxiter: int, count: int) -> set[int]:
     return vals
 
 
+def _should_record_residual(iteration: int, viz_cfg: PaperVisualizationConfig) -> bool:
+    iteration = int(iteration)
+    if iteration <= int(viz_cfg.residual_trace_dense_until):
+        return True
+    if iteration <= int(viz_cfg.residual_trace_mid_until):
+        return iteration % max(1, int(viz_cfg.residual_trace_stride_mid)) == 0
+    return iteration % max(1, int(viz_cfg.residual_trace_stride_late)) == 0
+
+
 class _TraceRecorder:
     def __init__(
         self,
@@ -463,6 +655,7 @@ class _TraceRecorder:
         x_eval: np.ndarray,
         y_eval: np.ndarray,
         checkpoints: set[int],
+        viz_cfg: PaperVisualizationConfig,
     ) -> None:
         self.method_key = method_key
         self.method_label = method_label
@@ -470,6 +663,7 @@ class _TraceRecorder:
         self.x_eval = np.asarray(x_eval, dtype=np.float64)
         self.y_eval = np.asarray(y_eval, dtype=np.float64).reshape(-1)
         self.checkpoints = set(int(v) for v in checkpoints)
+        self.viz_cfg = viz_cfg
         self.rows: list[dict[str, Any]] = []
         self.backend = None
         self.data_ctx = None
@@ -480,13 +674,19 @@ class _TraceRecorder:
 
         def _callback(event: dict[str, Any]) -> None:
             iteration = int(event["iteration"])
+            is_checkpoint = iteration in self.checkpoints
+            is_final = bool(event.get("is_final", False))
+            if not (is_checkpoint or is_final or _should_record_residual(iteration, self.viz_cfg)):
+                return
             rmse = float("nan")
             checkpoint_kind = "residual"
-            if iteration in self.checkpoints:
+            if is_checkpoint:
                 yhat = predict_v1(backend, data_ctx, self.x_eval, event["x"])
                 yp = _asnumpy(yhat).astype(np.float64, copy=False).reshape(-1)
                 rmse = float(np.sqrt(np.mean((yp - self.y_eval) ** 2)))
                 checkpoint_kind = "rmse_checkpoint"
+            if is_final and checkpoint_kind == "residual":
+                checkpoint_kind = "final_residual"
             row = {
                 **self.metadata,
                 "method_key": self.method_key,
@@ -496,6 +696,12 @@ class _TraceRecorder:
                 "relres": float(event.get("relres", float("nan"))),
                 "rmse_test_sample": rmse,
                 "checkpoint_kind": checkpoint_kind,
+                "trace_sampling_policy": (
+                    f"every iteration through {int(self.viz_cfg.residual_trace_dense_until)}, "
+                    f"every {int(self.viz_cfg.residual_trace_stride_mid)} through "
+                    f"{int(self.viz_cfg.residual_trace_mid_until)}, then every "
+                    f"{int(self.viz_cfg.residual_trace_stride_late)}; RMSE checkpoints and final always kept"
+                ),
             }
             self.rows.append(row)
 
@@ -603,6 +809,7 @@ def make_residual_and_rmse_figures(
             x_eval=x_eval,
             y_eval=y_eval,
             checkpoints=checkpoints,
+            viz_cfg=viz_cfg,
         )
         if method_key == "plain":
             out = run_v1_pure_efgp(
@@ -659,21 +866,33 @@ def make_residual_and_rmse_figures(
 
     trace_csv = out_dir / "fig6_residual_rmse_trace.csv"
     _write_csv(trace_csv, all_rows)
-    fig, ax = plt.subplots(figsize=(7.2, 4.6))
+    fig, axes = plt.subplots(1, 2, figsize=_double_col_size(2.35), constrained_layout=True)
     for label in PAPER_LABELS.values():
         part = [r for r in all_rows if r.get("method_label") == label]
         if not part:
             continue
-        ax.semilogy([r["iteration"] for r in part], [max(float(r["relres"]), 1e-300) for r in part], label=label)
-    ax.set_xlabel("iteration")
-    ax.set_ylabel("relative residual")
-    ax.set_title("Residual convergence on Matern USGS N=1e8")
-    ax.grid(True, which="both", alpha=0.25)
-    ax.legend(fontsize=8)
+        xs = [r["iteration"] for r in part]
+        ys = [max(float(r["relres"]), 1e-300) for r in part]
+        style = METHOD_STYLES.get(label, {"color": BLACK, "linestyle": "-", "linewidth": 1.25})
+        axes[0].semilogy(xs, ys, label=label, **style)
+        zoom = [(x, y) for x, y in zip(xs, ys) if int(x) <= int(viz_cfg.residual_zoom_iterations)]
+        if zoom:
+            axes[1].semilogy([x for x, _ in zoom], [y for _, y in zoom], label=label, **style)
+    axes[0].set_xlabel("iteration")
+    axes[0].set_ylabel("relative residual")
+    axes[0].set_title("Full range")
+    axes[0].grid(True, which="both", alpha=0.22, linewidth=0.5)
+    axes[0].legend(frameon=False, loc="best")
+    _panel_label(axes[0], "(a)")
+    axes[1].set_xlabel("iteration")
+    axes[1].set_ylabel("relative residual")
+    axes[1].set_title(f"First {int(viz_cfg.residual_zoom_iterations)} iterations")
+    axes[1].grid(True, which="both", alpha=0.22, linewidth=0.5)
+    _panel_label(axes[1], "(b)")
     residual_paths = _save_figure(fig, out_dir, "fig6_residual_convergence")
     plt.close(fig)
 
-    fig, ax = plt.subplots(figsize=(7.2, 4.6))
+    fig, ax = plt.subplots(figsize=_single_col_size(2.35))
     for label in PAPER_LABELS.values():
         part = [
             r for r in all_rows
@@ -681,12 +900,19 @@ def make_residual_and_rmse_figures(
         ]
         if not part:
             continue
-        ax.semilogy([r["iteration"] for r in part], [float(r["rmse_test_sample"]) for r in part], marker="o", markersize=2.8, label=label)
+        style = METHOD_STYLES.get(label, {"color": BLACK, "linestyle": "-", "linewidth": 1.25})
+        ax.semilogy(
+            [r["iteration"] for r in part],
+            [float(r["rmse_test_sample"]) for r in part],
+            marker="o",
+            markersize=2.4,
+            label=label,
+            **style,
+        )
     ax.set_xlabel("iteration")
     ax.set_ylabel("held-out sample RMSE")
-    ax.set_title("RMSE checkpoints on Matern USGS N=1e8")
-    ax.grid(True, which="both", alpha=0.25)
-    ax.legend(fontsize=8)
+    ax.grid(True, which="both", alpha=0.22, linewidth=0.5)
+    ax.legend(frameon=False, loc="best")
     rmse_paths = _save_figure(fig, out_dir, "rmse_checkpoint_convergence")
     plt.close(fig)
 
@@ -764,23 +990,25 @@ def make_prediction_error_map(
     }
     metrics_path = out_dir / "usgs_prediction_error_map_metrics.json"
     _write_json(metrics_path, metrics)
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4.2), constrained_layout=True)
+    fig, axes = plt.subplots(1, 3, figsize=_double_col_size(2.35), constrained_layout=True)
     vals = truth_img[np.isfinite(truth_img)]
     vmin, vmax = (float(np.nanpercentile(vals, 1)), float(np.nanpercentile(vals, 99))) if vals.size else (None, None)
     im0 = axes[0].imshow(truth_img, origin="lower", extent=extent, cmap="terrain", vmin=vmin, vmax=vmax)
-    axes[0].set_title("ground truth")
+    axes[0].set_title("Ground truth")
+    _panel_label(axes[0], "(a)")
     im1 = axes[1].imshow(pred_img, origin="lower", extent=extent, cmap="terrain", vmin=vmin, vmax=vmax)
-    axes[1].set_title("preconditioned prediction")
+    axes[1].set_title("Prediction")
+    _panel_label(axes[1], "(b)")
     err_vals = err_img[np.isfinite(err_img)]
     err_vmax = float(np.nanpercentile(err_vals, 99)) if err_vals.size else None
     im2 = axes[2].imshow(err_img, origin="lower", extent=extent, cmap="magma", vmin=0.0, vmax=err_vmax)
-    axes[2].set_title("absolute error")
+    axes[2].set_title("Absolute error")
+    _panel_label(axes[2], "(c)")
     for ax in axes:
         ax.set_xlabel("x")
         ax.set_ylabel("y")
     fig.colorbar(im0, ax=axes[:2], shrink=0.78, label="standardized elevation")
     fig.colorbar(im2, ax=axes[2], shrink=0.78, label="absolute error")
-    fig.suptitle("USGS prediction/error map (Matern)")
     paths = _save_figure(fig, out_dir, "usgs_prediction_error_map")
     plt.close(fig)
     return {
@@ -807,9 +1035,11 @@ def run_paper_visualizations(
         "not_used_for_main_timing": True,
         "figures": {},
     }
-    if bool(viz_cfg.make_active_score):
+    if bool(viz_cfg.make_mechanism_figure):
+        manifest["figures"]["figure1_mechanism_diagnostics"] = make_mechanism_diagnostics_figure(exp_cfg, viz_cfg)
+    elif bool(viz_cfg.make_active_score):
         manifest["figures"]["active_score_cumulative_mass"] = make_active_score_mass_figure(exp_cfg, viz_cfg)
-    if bool(viz_cfg.make_spectrum):
+    if (not bool(viz_cfg.make_mechanism_figure)) and bool(viz_cfg.make_spectrum):
         manifest["figures"]["active_window_spectrum_diagnostic"] = make_active_window_spectrum_figure(exp_cfg, viz_cfg)
     if bool(viz_cfg.make_residual) or bool(viz_cfg.make_rmse):
         trace_info = make_residual_and_rmse_figures(exp_cfg, viz_cfg)
@@ -821,6 +1051,265 @@ def run_paper_visualizations(
     if bool(viz_cfg.make_prediction_map):
         manifest["figures"]["usgs_prediction_error_map"] = make_prediction_error_map(exp_cfg, viz_cfg)
     manifest_path = out_dir / "paper_visualization_manifest.json"
+    _write_json(manifest_path, manifest)
+    manifest["manifest_path"] = str(manifest_path)
+    return manifest
+
+
+def _profiles_from_saved_rows(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], list[dict[str, str]]] = {}
+    for row in rows:
+        label = str(row.get("profile_label") or row.get("label") or row.get("kernel_family") or "profile")
+        family = str(row.get("kernel_family") or label)
+        grouped.setdefault((label, family), []).append(row)
+    profiles: list[dict[str, Any]] = []
+    for (label, family), part in grouped.items():
+        part = sorted(part, key=lambda r: _to_int(r.get("rank"), 0))
+        rank = np.asarray([_to_int(r.get("rank"), 0) for r in part], dtype=np.int64)
+        mass = np.asarray([_to_float(r.get("cumulative_rho_mass")) for r in part], dtype=np.float64)
+        keep = (rank > 0) & np.isfinite(mass)
+        if not np.any(keep):
+            continue
+        profiles.append(
+            {
+                "label": label,
+                "kernel_family": family,
+                "rank": rank[keep],
+                "cumulative_mass": mass[keep],
+                "M": int(np.max(rank[keep])),
+            }
+        )
+    return profiles
+
+
+def _spectrum_from_saved_rows(rows: list[dict[str, str]]) -> tuple[np.ndarray, np.ndarray]:
+    raw: list[tuple[int, float]] = []
+    corrected: list[tuple[int, float]] = []
+    for row in rows:
+        name = str(row.get("spectrum", "")).strip().lower()
+        pair = (_to_int(row.get("rank"), 0), _to_float(row.get("eigenvalue")))
+        if pair[0] <= 0 or not math.isfinite(pair[1]):
+            continue
+        if "raw" in name:
+            raw.append(pair)
+        elif "preconditioned" in name or "box" in name or "corrected" in name:
+            corrected.append(pair)
+    raw_arr = np.asarray([v for _, v in sorted(raw)], dtype=np.float64)
+    corrected_arr = np.asarray([v for _, v in sorted(corrected)], dtype=np.float64)
+    return raw_arr, corrected_arr
+
+
+def _rerender_mechanism_from_saved(out_dir: Path, active_csv: Path, spectrum_csv: Path) -> dict[str, Any]:
+    plt = _import_pyplot()
+    profiles = _profiles_from_saved_rows(_read_csv_rows(active_csv))
+    raw, corrected = _spectrum_from_saved_rows(_read_csv_rows(spectrum_csv))
+    if not profiles:
+        raise ValueError(f"No active-score profiles could be read from {active_csv}")
+    if raw.size == 0 or corrected.size == 0:
+        raise ValueError(f"No raw/corrected spectrum could be read from {spectrum_csv}")
+    fig, axes = plt.subplots(1, 3, figsize=_double_col_size(2.2), constrained_layout=True)
+    _plot_active_score_profiles(axes[0], profiles)
+    axes[0].set_title("Active-score mass")
+    _panel_label(axes[0], "(a)")
+    _plot_raw_spectrum(axes[1], raw)
+    axes[1].set_title("Raw active-window spectrum")
+    _panel_label(axes[1], "(b)")
+    _plot_corrected_spectrum(axes[2], corrected)
+    axes[2].set_title("Corrected spectrum")
+    _panel_label(axes[2], "(c)")
+    paths = _save_figure(fig, out_dir, "figure1_mechanism_diagnostics")
+    plt.close(fig)
+    return {
+        "figure_name": "figure1_mechanism_diagnostics",
+        "source_active_score_csv": str(active_csv),
+        "source_spectrum_csv": str(spectrum_csv),
+        **paths,
+    }
+
+
+def _rerender_residual_from_saved(
+    out_dir: Path,
+    trace_csv: Path,
+    *,
+    zoom_iterations: int = 400,
+) -> dict[str, Any]:
+    plt = _import_pyplot()
+    rows = _read_csv_rows(trace_csv)
+    residual_rows = [
+        {
+            **row,
+            "iteration_int": _to_int(row.get("iteration"), 0),
+            "relres_float": _to_float(row.get("relres")),
+            "rmse_float": _to_float(row.get("rmse_test_sample")),
+        }
+        for row in rows
+    ]
+    residual_rows = [
+        row for row in residual_rows
+        if row["iteration_int"] >= 0 and math.isfinite(row["relres_float"])
+    ]
+    if not residual_rows:
+        raise ValueError(f"No residual rows could be read from {trace_csv}")
+
+    fig, axes = plt.subplots(1, 2, figsize=_double_col_size(2.35), constrained_layout=True)
+    for label in PAPER_LABELS.values():
+        part = [row for row in residual_rows if row.get("method_label") == label]
+        if not part:
+            continue
+        part = sorted(part, key=lambda r: r["iteration_int"])
+        xs = [row["iteration_int"] for row in part]
+        ys = [max(float(row["relres_float"]), 1e-300) for row in part]
+        style = METHOD_STYLES.get(label, {"color": BLACK, "linestyle": "-", "linewidth": 1.25})
+        axes[0].semilogy(xs, ys, label=label, **style)
+        zoom = [(x, y) for x, y in zip(xs, ys) if int(x) <= int(zoom_iterations)]
+        if zoom:
+            axes[1].semilogy([x for x, _ in zoom], [y for _, y in zoom], label=label, **style)
+    axes[0].set_xlabel("iteration")
+    axes[0].set_ylabel("relative residual")
+    axes[0].set_title("Full range")
+    axes[0].grid(True, which="both", alpha=0.22, linewidth=0.5)
+    axes[0].legend(frameon=False, loc="best")
+    _panel_label(axes[0], "(a)")
+    axes[1].set_xlabel("iteration")
+    axes[1].set_ylabel("relative residual")
+    axes[1].set_title(f"First {int(zoom_iterations)} iterations")
+    axes[1].grid(True, which="both", alpha=0.22, linewidth=0.5)
+    _panel_label(axes[1], "(b)")
+    residual_paths = _save_figure(fig, out_dir, "fig6_residual_convergence")
+    plt.close(fig)
+
+    rmse_rows = [row for row in residual_rows if math.isfinite(row["rmse_float"])]
+    rmse_paths: dict[str, str] | None = None
+    if rmse_rows:
+        fig, ax = plt.subplots(figsize=_single_col_size(2.35))
+        for label in PAPER_LABELS.values():
+            part = [row for row in rmse_rows if row.get("method_label") == label]
+            if not part:
+                continue
+            part = sorted(part, key=lambda r: r["iteration_int"])
+            style = METHOD_STYLES.get(label, {"color": BLACK, "linestyle": "-", "linewidth": 1.25})
+            ax.semilogy(
+                [row["iteration_int"] for row in part],
+                [row["rmse_float"] for row in part],
+                marker="o",
+                markersize=2.4,
+                label=label,
+                **style,
+            )
+        ax.set_xlabel("iteration")
+        ax.set_ylabel("held-out sample RMSE")
+        ax.grid(True, which="both", alpha=0.22, linewidth=0.5)
+        ax.legend(frameon=False, loc="best")
+        rmse_paths = _save_figure(fig, out_dir, "rmse_checkpoint_convergence")
+        plt.close(fig)
+    return {
+        "figure_name": "fig6_residual_and_rmse",
+        "source_trace_csv": str(trace_csv),
+        "residual": residual_paths,
+        "rmse": rmse_paths,
+    }
+
+
+def _rerender_map_from_saved(out_dir: Path, rasters_npz: Path) -> dict[str, Any]:
+    plt = _import_pyplot()
+    with np.load(rasters_npz) as data:
+        truth_img = np.asarray(data["truth"], dtype=np.float64)
+        pred_img = np.asarray(data["prediction"], dtype=np.float64)
+        err_img = np.asarray(data["abs_error"], dtype=np.float64)
+        extent = tuple(float(v) for v in np.asarray(data["extent"], dtype=np.float64).reshape(-1))
+    fig, axes = plt.subplots(1, 3, figsize=_double_col_size(2.35), constrained_layout=True)
+    vals = truth_img[np.isfinite(truth_img)]
+    vmin, vmax = (float(np.nanpercentile(vals, 1)), float(np.nanpercentile(vals, 99))) if vals.size else (None, None)
+    im0 = axes[0].imshow(truth_img, origin="lower", extent=extent, cmap="terrain", vmin=vmin, vmax=vmax)
+    axes[0].set_title("Ground truth")
+    _panel_label(axes[0], "(a)")
+    axes[1].imshow(pred_img, origin="lower", extent=extent, cmap="terrain", vmin=vmin, vmax=vmax)
+    axes[1].set_title("Prediction")
+    _panel_label(axes[1], "(b)")
+    err_vals = err_img[np.isfinite(err_img)]
+    err_vmax = float(np.nanpercentile(err_vals, 99)) if err_vals.size else None
+    im2 = axes[2].imshow(err_img, origin="lower", extent=extent, cmap="magma", vmin=0.0, vmax=err_vmax)
+    axes[2].set_title("Absolute error")
+    _panel_label(axes[2], "(c)")
+    for ax in axes:
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+    fig.colorbar(im0, ax=axes[:2], shrink=0.78, label="standardized elevation")
+    fig.colorbar(im2, ax=axes[2], shrink=0.78, label="absolute error")
+    paths = _save_figure(fig, out_dir, "usgs_prediction_error_map")
+    plt.close(fig)
+    return {
+        "figure_name": "usgs_prediction_error_map",
+        "source_rasters_npz": str(rasters_npz),
+        **paths,
+    }
+
+
+def rerender_paper_visualizations_from_saved_data(
+    viz_dir: str | Path,
+    *,
+    output_dir: str | Path | None = None,
+    zoom_iterations: int = 400,
+) -> dict[str, Any]:
+    """Recreate paper figures from saved CSV/NPZ artifacts without running solvers.
+
+    This path intentionally avoids loading large datasets, creating cufinufft
+    plans, or touching the GPU. It is for visual restyling after the expensive
+    trace/spectrum/map artifacts have already been generated.
+    """
+
+    source_dir = Path(viz_dir).resolve()
+    out_dir = Path(output_dir).resolve() if output_dir is not None else source_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    manifest: dict[str, Any] = {
+        "source_dir": str(source_dir),
+        "output_dir": str(out_dir),
+        "rerender_only": True,
+        "uses_saved_plot_data": True,
+        "does_not_run_solver": True,
+        "does_not_load_large_training_data": True,
+        "source_manifest": _read_json_if_exists(source_dir / "paper_visualization_manifest.json"),
+        "figures": {},
+        "skipped": {},
+    }
+
+    active_csv = _find_existing(
+        source_dir,
+        ["figure1_mechanism_active_score.csv", "active_score_cumulative_mass.csv"],
+    )
+    spectrum_csv = _find_existing(
+        source_dir,
+        ["figure1_mechanism_spectrum.csv", "active_window_spectrum_diagnostic.csv"],
+    )
+    if active_csv is not None and spectrum_csv is not None:
+        manifest["figures"]["figure1_mechanism_diagnostics"] = _rerender_mechanism_from_saved(
+            out_dir,
+            active_csv,
+            spectrum_csv,
+        )
+    else:
+        manifest["skipped"]["figure1_mechanism_diagnostics"] = {
+            "active_csv_found": active_csv is not None,
+            "spectrum_csv_found": spectrum_csv is not None,
+        }
+
+    trace_csv = _find_existing(source_dir, ["fig6_residual_rmse_trace.csv"])
+    if trace_csv is not None:
+        manifest["figures"]["fig6_residual_and_rmse"] = _rerender_residual_from_saved(
+            out_dir,
+            trace_csv,
+            zoom_iterations=int(zoom_iterations),
+        )
+    else:
+        manifest["skipped"]["fig6_residual_and_rmse"] = {"trace_csv_found": False}
+
+    rasters_npz = _find_existing(source_dir, ["usgs_prediction_error_map_rasters.npz"])
+    if rasters_npz is not None:
+        manifest["figures"]["usgs_prediction_error_map"] = _rerender_map_from_saved(out_dir, rasters_npz)
+    else:
+        manifest["skipped"]["usgs_prediction_error_map"] = {"rasters_npz_found": False}
+
+    manifest_path = out_dir / "paper_visualization_rerender_manifest.json"
     _write_json(manifest_path, manifest)
     manifest["manifest_path"] = str(manifest_path)
     return manifest

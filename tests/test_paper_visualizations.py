@@ -8,6 +8,7 @@ from efgp_eigenpro_py.gpu.box_toeplitz_active_block.config import BTABExperiment
 from efgp_eigenpro_py.gpu.box_toeplitz_active_block.paper_visualizations import (
     PaperVisualizationConfig,
     make_active_score_mass_figure,
+    rerender_paper_visualizations_from_saved_data,
 )
 from efgp_eigenpro_py.gpu.iterative_solvers import cg_solve_gpu, pcg_solve_gpu
 
@@ -99,3 +100,61 @@ def test_active_score_visualization_writes_artifacts(tmp_path):
     assert (tmp_path / "active_score_cumulative_mass.pdf").exists()
     assert (tmp_path / "active_score_cumulative_mass.csv").exists()
     assert info["notes"].startswith("Kernel/grid-level")
+
+
+def test_rerender_paper_visualizations_from_saved_data(tmp_path):
+    (tmp_path / "figure1_mechanism_active_score.csv").write_text(
+        "\n".join(
+                [
+                    "profile_label,kernel_family,rank,cumulative_rho_mass",
+                    "\"SE kernel, M=1225\",SE,1,0.7",
+                    "\"SE kernel, M=1225\",SE,10,0.95",
+                    "\"Matern 3/2 kernel, M=35721\",matern,1,0.2",
+                    "\"Matern 3/2 kernel, M=35721\",matern,10,0.5",
+                ]
+            ),
+        encoding="utf-8",
+    )
+    (tmp_path / "figure1_mechanism_spectrum.csv").write_text(
+        "\n".join(
+            [
+                "spectrum,rank,eigenvalue",
+                "raw_A_BB,1,10.0",
+                "raw_A_BB,2,2.0",
+                "box_eigenpro_preconditioned,1,1.1",
+                "box_eigenpro_preconditioned,2,0.9",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "fig6_residual_rmse_trace.csv").write_text(
+        "\n".join(
+            [
+                "method_label,iteration,relres,rmse_test_sample",
+                "EFGP-CG,0,1.0,1.2",
+                "EFGP-CG,10,0.1,0.8",
+                "Box-EigenPro,0,1.0,1.2",
+                "Box-EigenPro,10,0.01,0.75",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    truth = np.arange(16, dtype=np.float64).reshape(4, 4)
+    pred = truth + 0.1
+    err = np.abs(pred - truth)
+    np.savez_compressed(
+        tmp_path / "usgs_prediction_error_map_rasters.npz",
+        truth=truth,
+        prediction=pred,
+        abs_error=err,
+        extent=np.asarray([0.0, 1.0, 0.0, 1.0]),
+    )
+
+    manifest = rerender_paper_visualizations_from_saved_data(tmp_path)
+
+    assert (tmp_path / "figure1_mechanism_diagnostics.pdf").exists()
+    assert (tmp_path / "fig6_residual_convergence.pdf").exists()
+    assert (tmp_path / "rmse_checkpoint_convergence.pdf").exists()
+    assert (tmp_path / "usgs_prediction_error_map.pdf").exists()
+    assert (tmp_path / "paper_visualization_rerender_manifest.json").exists()
+    assert manifest["does_not_run_solver"] is True
