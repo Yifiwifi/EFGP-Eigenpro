@@ -320,7 +320,7 @@ def resolve_btab_experiment_route(
     elif route == "group_c":
         # for matern kernel with large sample, M=35721
         topk = [1024, 2048, 4096, 8192, 16384]
-        inverse = [2048,4096, 8192,10240]    #[1024, 2048,4096]
+        inverse = [4096, 8192 ,12288]    #[1024, 2048,4096]
         boxeig = [
             (20480, 192),
             (20480, 256),
