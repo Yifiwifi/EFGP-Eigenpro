@@ -29,7 +29,7 @@ from .box_eigenpro import (
     apply_box_eigenpro_local,
     build_box_eigenpro_preconditioner,
 )
-from .config import BTABConfig, BTABExperimentConfig
+from .config import BTABConfig, BTABExperimentConfig, resolve_btab_experiment_route
 from .run_experiments import build_gpu_run_config, load_processed_dataset, make_kernel
 
 
@@ -64,12 +64,15 @@ class PaperVisualizationConfig:
     map_sample_size: int = 200_000
     map_sample_seed: int = 23
     map_bins: int = 256
+    boxeig_sweep_n_train: int = 300_000_000
+    boxeig_sweep_dataset_contains: str = "USGS"
     make_active_score: bool = True
     make_spectrum: bool = True
     make_mechanism_figure: bool = True
     make_residual: bool = True
     make_rmse: bool = True
     make_prediction_map: bool = True
+    make_boxeig_sweep: bool = True
 
 
 PAPER_LABELS = {
@@ -178,6 +181,23 @@ def _to_int(value: Any, default: int = 0) -> int:
         return int(float(value))
     except Exception:
         return default
+
+
+def _to_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        if isinstance(value, float) and not math.isfinite(value):
+            return default
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes", "y", "ok", "converged"}:
+        return True
+    if text in {"false", "0", "no", "n", "nan", "none", ""}:
+        return False
+    return default
 
 
 def _save_figure(fig: Any, out_dir: Path, stem: str) -> dict[str, str]:
@@ -529,7 +549,11 @@ def make_mechanism_diagnostics_figure(
     }
 
 
-def _load_summary_frames(root: Path | None) -> tuple[Any | None, list[str]]:
+def _load_summary_frames(
+    root: Path | None,
+    *,
+    prefer_group: str | None = None,
+) -> tuple[Any | None, list[str]]:
     if root is None:
         return None, []
     try:
@@ -538,10 +562,16 @@ def _load_summary_frames(root: Path | None) -> tuple[Any | None, list[str]]:
         return None, []
     paths: list[Path] = []
     root = root.resolve()
-    if (root / "master_summary.csv").exists():
-        paths.append(root / "master_summary.csv")
-    for p in sorted(root.glob("*/master_summary.csv")):
-        paths.append(p)
+    if prefer_group:
+        group_path = root / str(prefer_group) / "master_summary.csv"
+        if group_path.exists():
+            paths.append(group_path)
+    if not paths:
+        if (root / "master_summary.csv").exists():
+            paths.append(root / "master_summary.csv")
+        for p in sorted(root.glob("*/master_summary.csv")):
+            if p not in paths:
+                paths.append(p)
     if not paths:
         return None, []
     frames = []
@@ -624,6 +654,469 @@ def _select_representative_methods(
         version.eq("v7_btab_boxeig") | method.str.startswith("btab_boxeig"),
     )
     return selected
+
+
+def _series_from_frame(df: Any, name: str, default: Any = "") -> Any:
+    if name in df.columns:
+        return df[name]
+    return df.assign(**{name: default})[name]
+
+
+def _numeric_column(df: Any, name: str, default: float = float("nan")) -> Any:
+    import pandas as pd
+
+    if name in df.columns:
+        return pd.to_numeric(df[name], errors="coerce")
+    return pd.Series([default] * len(df), index=df.index, dtype="float64")
+
+
+def _first_finite_series(*series: Any) -> Any:
+    out = series[0].copy()
+    for ser in series[1:]:
+        out = out.where(np.isfinite(out), ser)
+    return out
+
+
+def _parse_int_from_method(method: Any, pattern: str) -> int | None:
+    import re
+
+    m = re.search(pattern, str(method))
+    return int(m.group(1)) if m else None
+
+
+def _group_c_boxeig_sweep_spec(exp_cfg: BTABExperimentConfig) -> dict[str, Any]:
+    cfg = resolve_btab_experiment_route(
+        replace(exp_cfg, btab_experiment_route="group_c"),
+    )
+    pairs = [(int(k), int(q)) for k, q in (cfg.btab_boxeig_topk_q_pairs or [])]
+    return {
+        "route": "group_c",
+        "q_values": sorted({q for _, q in pairs}),
+        "configured_active_topk_targets": sorted({k for k, _ in pairs}),
+        "configured_active_topk_q_pairs": pairs,
+        "scan_variables": ["btab_box_size", "btab_eig_q"],
+        "selector_variables": ["btab_active_topk", "btab_eig_q"],
+    }
+
+
+def _filter_group_c_rows(work: Any) -> Any:
+    for col in ("btab_route_group", "output_group", "btab_experiment_route"):
+        if col in work.columns:
+            route = _series_from_frame(work, col).astype(str).str.lower()
+            filtered = work[route.eq("group_c")].copy()
+            if not filtered.empty:
+                return filtered
+    return work
+
+
+def _resolve_actual_box_size_series(work: Any) -> Any:
+    size = _numeric_column(work, "btab_box_size")
+    size = size.where(np.isfinite(size), _numeric_column(work, "box_size"))
+    missing = ~np.isfinite(size)
+    if bool(missing.any()) and "box_shape" in work.columns:
+        size.loc[missing] = [
+            _box_size_from_shape(value)
+            for value in work.loc[missing, "box_shape"].tolist()
+        ]
+    return size
+
+
+def _prefer_usgs_dataset(work: Any, contains: str) -> Any:
+    if work.empty or "dataset_stem" not in work.columns:
+        return work
+    stems = sorted(_series_from_frame(work, "dataset_stem").astype(str).unique())
+    if len(stems) <= 1:
+        return work
+    needle = str(contains or "").strip().lower()
+    if not needle:
+        return work
+    preferred = [stem for stem in stems if needle in stem.lower()]
+    if preferred:
+        return work[_series_from_frame(work, "dataset_stem").astype(str).isin(preferred)].copy()
+    return work
+
+
+def _box_size_from_shape(value: Any) -> float:
+    import ast
+    import re
+
+    if value is None or (isinstance(value, float) and not math.isfinite(value)):
+        return float("nan")
+    if isinstance(value, (list, tuple, np.ndarray)):
+        vals = [int(v) for v in value]
+    else:
+        text = str(value).strip()
+        if not text or text.lower() in {"nan", "none"}:
+            return float("nan")
+        try:
+            parsed = ast.literal_eval(text)
+            if isinstance(parsed, (list, tuple)):
+                vals = [int(v) for v in parsed]
+            else:
+                vals = [int(parsed)]
+        except Exception:
+            vals = [int(v) for v in re.findall(r"-?\d+", text)]
+    if not vals or any(v <= 0 for v in vals):
+        return float("nan")
+    return float(np.prod(np.asarray(vals, dtype=np.int64), dtype=np.int64))
+
+
+def _boxeig_sweep_tables(
+    exp_cfg: BTABExperimentConfig,
+    viz_cfg: PaperVisualizationConfig,
+) -> dict[str, Any]:
+    sweep_spec = _group_c_boxeig_sweep_spec(exp_cfg)
+    root = Path(viz_cfg.summary_root).resolve() if viz_cfg.summary_root is not None else None
+    df, sources = _load_summary_frames(root, prefer_group="group_c")
+    if df is None or df.empty:
+        return {"available": False, "reason": "no master_summary.csv found", "source_summary_files": sources}
+
+    work = _filter_group_c_rows(df.copy())
+    if work.empty:
+        return {
+            "available": False,
+            "reason": "no group_c rows found in master_summary.csv",
+            "source_summary_files": sources,
+            "sweep_spec": sweep_spec,
+        }
+    if "status" in work.columns:
+        work = work[_series_from_frame(work, "status").astype(str).str.lower().isin(["ok", "converged"])]
+    work = work[
+        _series_from_frame(work, "dataset_stem").astype(str).str.contains(
+            str(viz_cfg.boxeig_sweep_dataset_contains),
+            case=False,
+            na=False,
+        )
+    ]
+    work = _prefer_usgs_dataset(work, str(viz_cfg.boxeig_sweep_dataset_contains))
+    work = work[_series_from_frame(work, "kernel_family").astype(str).str.lower().isin(["matern", "mat", "mat32"])]
+    work = work[
+        np.isclose(
+            _numeric_column(work, "n_train").astype(float),
+            float(viz_cfg.boxeig_sweep_n_train),
+            rtol=0.0,
+            atol=1.0,
+        )
+    ]
+
+    method = _series_from_frame(work, "method").astype(str).str.lower()
+    version = _series_from_frame(work, "version").astype(str).str.lower()
+    boxeig = work[method.str.startswith("btab_boxeig") | version.eq("v7_btab_boxeig")].copy()
+    if boxeig.empty:
+        return {
+            "available": False,
+            "reason": "no Box-EigenPro rows after group_c filtering",
+            "source_summary_files": sources,
+            "sweep_spec": sweep_spec,
+        }
+
+    boxeig["btab_box_size_num"] = _resolve_actual_box_size_series(boxeig)
+    boxeig["btab_eig_q_num"] = _numeric_column(boxeig, "btab_eig_q")
+    missing_q = ~np.isfinite(boxeig["btab_eig_q_num"])
+    if bool(missing_q.any()):
+        boxeig.loc[missing_q, "btab_eig_q_num"] = [
+            _parse_int_from_method(method, r"_q(\d+)$") or float("nan")
+            for method in boxeig.loc[missing_q, "method"].tolist()
+        ]
+    boxeig["btab_active_topk_num"] = _numeric_column(boxeig, "btab_active_topk")
+    missing_topk = ~np.isfinite(boxeig["btab_active_topk_num"])
+    if bool(missing_topk.any()):
+        boxeig.loc[missing_topk, "btab_active_topk_num"] = [
+            _parse_int_from_method(method, r"topk_(\d+)") or float("nan")
+            for method in boxeig.loc[missing_topk, "method"].tolist()
+        ]
+    if sweep_spec["q_values"]:
+        q_values = np.asarray(sweep_spec["q_values"], dtype=np.int64)
+        q_mask = np.isfinite(boxeig["btab_eig_q_num"]) & np.isin(
+            boxeig["btab_eig_q_num"].where(np.isfinite(boxeig["btab_eig_q_num"]), -1).astype(int),
+            q_values,
+        )
+        boxeig = boxeig[q_mask].copy()
+    configured_pairs = {
+        (int(k), int(q))
+        for k, q in sweep_spec.get("configured_active_topk_q_pairs", [])
+    }
+    if configured_pairs and bool(np.isfinite(boxeig["btab_active_topk_num"]).any()):
+        selector_pairs = list(zip(boxeig["btab_active_topk_num"], boxeig["btab_eig_q_num"]))
+        selector_mask = [
+            np.isfinite(topk)
+            and np.isfinite(q)
+            and (int(round(float(topk))), int(round(float(q)))) in configured_pairs
+            for topk, q in selector_pairs
+        ]
+        boxeig = boxeig[selector_mask].copy()
+
+    boxeig["iters"] = _first_finite_series(_numeric_column(boxeig, "cg_iters"), _numeric_column(boxeig, "outer_iters"))
+    boxeig["relres"] = _first_finite_series(_numeric_column(boxeig, "cg_relres"), _numeric_column(boxeig, "outer_relres"))
+    boxeig["time_precond_build_num"] = _numeric_column(boxeig, "time_precond_build")
+    boxeig["time_solve_num"] = _numeric_column(boxeig, "time_solve")
+    boxeig["time_total_num"] = _numeric_column(boxeig, "time_total")
+    fallback_total = boxeig["time_precond_build_num"].fillna(0.0) + boxeig["time_solve_num"].fillna(0.0)
+    boxeig["time_total_num"] = boxeig["time_total_num"].where(np.isfinite(boxeig["time_total_num"]), fallback_total)
+    boxeig["rmse_test_num"] = _numeric_column(boxeig, "rmse_test")
+    boxeig["converged"] = boxeig["relres"].astype(float) <= float(viz_cfg.tol)
+    boxeig = boxeig[
+        np.isfinite(boxeig["btab_box_size_num"])
+        & np.isfinite(boxeig["btab_eig_q_num"])
+        & np.isfinite(boxeig["iters"])
+        & np.isfinite(boxeig["time_total_num"])
+    ].copy()
+    if boxeig.empty:
+        return {
+            "available": False,
+            "reason": "no finite Box-EigenPro rows with actual btab_box_size and q",
+            "source_summary_files": sources,
+            "sweep_spec": sweep_spec,
+        }
+
+    raw_cols = [
+        "dataset_stem",
+        "method",
+        "version",
+        "n_train",
+        "kernel_family",
+        "btab_active_topk_num",
+        "btab_box_size_num",
+        "btab_eig_q_num",
+        "iters",
+        "relres",
+        "converged",
+        "time_precond_build_num",
+        "time_solve_num",
+        "time_total_num",
+        "rmse_test_num",
+        "source_summary_file",
+    ]
+    raw_rows = boxeig[[c for c in raw_cols if c in boxeig.columns]].copy()
+    raw_rows["selector_role"] = "configured group_c active_topk/q row"
+    raw_rows["scan_role"] = "btab_box_size/q after active-window expansion"
+
+    collapsed_rows: list[dict[str, Any]] = []
+    for (box_size, q), group in boxeig.groupby(["btab_box_size_num", "btab_eig_q_num"], sort=True):
+        pool = group[group["converged"]].copy()
+        if pool.empty:
+            pool = group.copy()
+        row = pool.sort_values("time_total_num", kind="mergesort").iloc[0]
+        active_topk_values = sorted(
+            {
+                int(round(v))
+                for v in group["btab_active_topk_num"].dropna().astype(float)
+                if math.isfinite(float(v))
+            }
+        )
+        collapsed_rows.append(
+            {
+                "row_type": "boxeig",
+                "btab_box_size": int(round(float(box_size))),
+                "btab_eig_q": int(round(float(q))),
+                "btab_active_topk_values": ",".join(str(v) for v in active_topk_values),
+                "iters": float(row["iters"]),
+                "relres": float(row["relres"]),
+                "converged": bool(row["converged"]),
+                "time_precond_build": float(row["time_precond_build_num"]) if math.isfinite(float(row["time_precond_build_num"])) else float("nan"),
+                "time_solve": float(row["time_solve_num"]) if math.isfinite(float(row["time_solve_num"])) else float("nan"),
+                "time_total": float(row["time_total_num"]),
+                "rmse_test": float(row["rmse_test_num"]) if math.isfinite(float(row["rmse_test_num"])) else float("nan"),
+                "method": str(row.get("method", "")),
+                "source_summary_file": str(row.get("source_summary_file", "")),
+                "n_source_rows": int(len(group)),
+                "collapse_rule": (
+                    "fastest converged row per actual btab_box_size and btab_eig_q; "
+                    "input btab_active_topk is diagnostic only"
+                ),
+            }
+        )
+
+    def _baseline(label: str, mask: Any) -> dict[str, Any]:
+        sub = work[mask].copy()
+        if sub.empty:
+            return {"row_type": "baseline", "baseline_label": label, "available": False, "reason": "no rows"}
+        sub["iters"] = _first_finite_series(_numeric_column(sub, "cg_iters"), _numeric_column(sub, "outer_iters"))
+        sub["relres"] = _first_finite_series(_numeric_column(sub, "cg_relres"), _numeric_column(sub, "outer_relres"))
+        sub["time_total_num"] = _numeric_column(sub, "time_total")
+        sub["time_solve_num"] = _numeric_column(sub, "time_solve")
+        sub["time_precond_build_num"] = _numeric_column(sub, "time_precond_build")
+        sub["time_total_num"] = sub["time_total_num"].where(
+            np.isfinite(sub["time_total_num"]),
+            sub["time_solve_num"].fillna(0.0) + sub["time_precond_build_num"].fillna(0.0),
+        )
+        sub["rmse_test_num"] = _numeric_column(sub, "rmse_test")
+        sub["converged"] = sub["relres"].astype(float) <= float(viz_cfg.tol)
+        finite = sub[np.isfinite(sub["iters"]) & np.isfinite(sub["time_total_num"])].copy()
+        if finite.empty:
+            return {"row_type": "baseline", "baseline_label": label, "available": False, "reason": "no finite rows"}
+        pool = finite[finite["converged"]].copy()
+        reason = ""
+        if pool.empty:
+            pool = finite
+            reason = "no converged row; plotted as unavailable"
+        row = pool.sort_values("time_total_num", kind="mergesort").iloc[0]
+        return {
+            "row_type": "baseline",
+            "baseline_label": label,
+            "available": bool(row["converged"]),
+            "reason": reason,
+            "method": str(row.get("method", "")),
+            "iters": float(row["iters"]),
+            "relres": float(row["relres"]),
+            "converged": bool(row["converged"]),
+            "time_total": float(row["time_total_num"]),
+            "time_solve": float(row["time_solve_num"]) if math.isfinite(float(row["time_solve_num"])) else float("nan"),
+            "time_precond_build": float(row["time_precond_build_num"]) if math.isfinite(float(row["time_precond_build_num"])) else float("nan"),
+            "rmse_test": float(row["rmse_test_num"]) if math.isfinite(float(row["rmse_test_num"])) else float("nan"),
+            "source_summary_file": str(row.get("source_summary_file", "")),
+        }
+
+    work_method = _series_from_frame(work, "method").astype(str).str.lower()
+    work_version = _series_from_frame(work, "version").astype(str).str.lower()
+    baseline_rows = [
+        _baseline("EFGP-CG", work_method.eq("plain_cg")),
+        _baseline("Global EigenPro-style PCG", work_method.str.startswith("eigenpro_pcg")),
+        _baseline(
+            "Active inverse",
+            work_version.eq("v6_btab") | work_method.str.startswith("btab_auto") | work_method.str.startswith("btab_exact"),
+        ),
+    ]
+    plot_rows = collapsed_rows + baseline_rows
+    best = min(
+        (row for row in collapsed_rows if bool(row.get("converged", False))),
+        key=lambda row: float(row["time_total"]),
+        default=None,
+    )
+    return {
+        "available": True,
+        "source_summary_files": sources,
+        "sweep_spec": {
+            **sweep_spec,
+            "observed_btab_box_sizes": sorted(
+                {
+                    int(round(float(v)))
+                    for v in boxeig["btab_box_size_num"].dropna().astype(float)
+                    if math.isfinite(float(v))
+                }
+            ),
+            "observed_scan_pairs": [
+                [int(round(float(box_size))), int(round(float(q)))]
+                for box_size, q in sorted(
+                    {
+                        (float(row["btab_box_size_num"]), float(row["btab_eig_q_num"]))
+                        for _, row in boxeig.iterrows()
+                    }
+                )
+            ],
+        },
+        "raw_rows": raw_rows.to_dict(orient="records"),
+        "collapsed_rows": collapsed_rows,
+        "baseline_rows": baseline_rows,
+        "plot_rows": plot_rows,
+        "best_boxeig": best,
+    }
+
+
+def _plot_boxeig_sweep_rows(plot_rows: list[dict[str, Any]], out_dir: Path, *, stem: str) -> dict[str, str]:
+    plt = _import_pyplot()
+    fig, axes = plt.subplots(1, 2, figsize=_double_col_size(2.45), constrained_layout=True)
+    box_rows = [row for row in plot_rows if str(row.get("row_type", "")) == "boxeig"]
+    baseline_rows = [row for row in plot_rows if str(row.get("row_type", "")) == "baseline"]
+    box_sizes = sorted(set(_to_int(row.get("btab_box_size"), 0) for row in box_rows if _to_int(row.get("btab_box_size"), 0) > 0))
+    box_palette = [PURPLE, RED, BLACK, BLUE]
+    markers = ["o", "s", "^", "D"]
+    for i, box_size in enumerate(box_sizes):
+        part = [row for row in box_rows if _to_int(row.get("btab_box_size"), 0) == box_size]
+        part = sorted(part, key=lambda row: _to_int(row.get("btab_eig_q"), 0))
+        q = [_to_int(row.get("btab_eig_q"), 0) for row in part]
+        iters = [_to_float(row.get("iters")) for row in part]
+        times = [_to_float(row.get("time_total")) for row in part]
+        label = rf"$|B|={box_size}$"
+        color = box_palette[i % len(box_palette)]
+        marker = markers[i % len(markers)]
+        axes[0].plot(q, iters, color=color, marker=marker, label=label, linewidth=1.25, markersize=4)
+        axes[1].plot(q, times, color=color, marker=marker, label=label, linewidth=1.25, markersize=4)
+
+    best_candidates = [
+        row for row in box_rows
+        if _to_bool(row.get("converged", False)) and math.isfinite(_to_float(row.get("time_total")))
+    ]
+    if best_candidates:
+        best = min(best_candidates, key=lambda row: _to_float(row.get("time_total")))
+        q_best = _to_int(best.get("btab_eig_q"), 0)
+        axes[0].scatter([q_best], [_to_float(best.get("iters"))], marker="*", s=75, color=BLACK, zorder=5)
+        axes[1].scatter([q_best], [_to_float(best.get("time_total"))], marker="*", s=75, color=BLACK, zorder=5, label="best total time")
+
+    for base in baseline_rows:
+        label = str(base.get("baseline_label", "baseline"))
+        available = _to_bool(base.get("available", False))
+        style = METHOD_STYLES.get(label, {"color": GRAY, "linestyle": ":", "linewidth": 1.0})
+        if available:
+            baseline_iters = _to_float(base.get("iters"))
+            baseline_time = _to_float(base.get("time_total"))
+            if math.isfinite(baseline_iters):
+                axes[0].axhline(baseline_iters, label=label, alpha=0.78, **style)
+            if math.isfinite(baseline_time):
+                axes[1].axhline(baseline_time, label=label, alpha=0.78, **style)
+        else:
+            # Keep failed/unavailable baselines visible in the manifest without
+            # implying they are valid comparison lines.
+            continue
+
+    axes[0].set_xlabel("spectral rank q")
+    axes[0].set_ylabel("PCG iterations")
+    axes[0].set_title("Iterations")
+    axes[0].grid(True, alpha=0.22, linewidth=0.5)
+    _panel_label(axes[0], "(a)")
+    axes[1].set_xlabel("spectral rank q")
+    axes[1].set_ylabel("total time (s)")
+    axes[1].set_title("Total time")
+    axes[1].grid(True, alpha=0.22, linewidth=0.5)
+    _panel_label(axes[1], "(b)")
+    axes[0].legend(frameon=False, loc="best")
+    axes[1].legend(frameon=False, loc="best")
+    paths = _save_figure(fig, out_dir, stem)
+    plt.close(fig)
+    return paths
+
+
+def make_group_c_boxeig_parameter_sweep_figure(
+    exp_cfg: BTABExperimentConfig,
+    viz_cfg: PaperVisualizationConfig,
+) -> dict[str, Any]:
+    out_dir = Path(viz_cfg.output_dir)
+    tables = _boxeig_sweep_tables(exp_cfg, viz_cfg)
+    if not bool(tables.get("available", False)):
+        return {
+            "figure_name": "group_c_boxeig_parameter_sweep",
+            "available": False,
+            "reason": tables.get("reason", "unavailable"),
+            "source_summary_files": tables.get("source_summary_files", []),
+        }
+    raw_csv = out_dir / "group_c_boxeig_sweep_raw.csv"
+    collapsed_csv = out_dir / "group_c_boxeig_sweep_collapsed.csv"
+    plot_csv = out_dir / "group_c_boxeig_sweep_plot_data.csv"
+    _write_csv(raw_csv, tables["raw_rows"])
+    _write_csv(collapsed_csv, tables["collapsed_rows"])
+    _write_csv(plot_csv, tables["plot_rows"])
+    paths = _plot_boxeig_sweep_rows(tables["plot_rows"], out_dir, stem="group_c_boxeig_parameter_sweep")
+    return {
+        "figure_name": "group_c_boxeig_parameter_sweep",
+        "available": True,
+        "dataset_filter": str(viz_cfg.boxeig_sweep_dataset_contains),
+        "N_train": int(viz_cfg.boxeig_sweep_n_train),
+        "kernel": "matern",
+        "tol": float(viz_cfg.tol),
+        "output_raw_csv": str(raw_csv),
+        "output_collapsed_csv": str(collapsed_csv),
+        "output_plot_csv": str(plot_csv),
+        "best_boxeig": tables.get("best_boxeig"),
+        "baselines": tables.get("baseline_rows", []),
+        "sweep_spec": tables.get("sweep_spec"),
+        "notes": (
+            "Group C Box-EigenPro sweep uses actual btab_box_size and btab_eig_q as scanned "
+            "variables. Rows are filtered to group_c, q values come from "
+            "config.btab_boxeig_topk_q_pairs, and input btab_active_topk is kept only as "
+            "diagnostic metadata when multiple selector labels collapse to the same |B|."
+        ),
+        **paths,
+    }
 
 
 def _make_checkpoints(maxiter: int, count: int) -> set[int]:
@@ -1050,6 +1543,8 @@ def run_paper_visualizations(
         manifest["figures"]["fig6_residual_and_rmse"] = trace_info
     if bool(viz_cfg.make_prediction_map):
         manifest["figures"]["usgs_prediction_error_map"] = make_prediction_error_map(exp_cfg, viz_cfg)
+    if bool(viz_cfg.make_boxeig_sweep):
+        manifest["figures"]["group_c_boxeig_parameter_sweep"] = make_group_c_boxeig_parameter_sweep_figure(exp_cfg, viz_cfg)
     manifest_path = out_dir / "paper_visualization_manifest.json"
     _write_json(manifest_path, manifest)
     manifest["manifest_path"] = str(manifest_path)
@@ -1245,6 +1740,18 @@ def _rerender_map_from_saved(out_dir: Path, rasters_npz: Path) -> dict[str, Any]
     }
 
 
+def _rerender_boxeig_sweep_from_saved(out_dir: Path, plot_csv: Path) -> dict[str, Any]:
+    rows = _read_csv_rows(plot_csv)
+    if not rows:
+        raise ValueError(f"No Box-EigenPro sweep rows could be read from {plot_csv}")
+    paths = _plot_boxeig_sweep_rows(rows, out_dir, stem="group_c_boxeig_parameter_sweep")
+    return {
+        "figure_name": "group_c_boxeig_parameter_sweep",
+        "source_plot_csv": str(plot_csv),
+        **paths,
+    }
+
+
 def rerender_paper_visualizations_from_saved_data(
     viz_dir: str | Path,
     *,
@@ -1308,6 +1815,15 @@ def rerender_paper_visualizations_from_saved_data(
         manifest["figures"]["usgs_prediction_error_map"] = _rerender_map_from_saved(out_dir, rasters_npz)
     else:
         manifest["skipped"]["usgs_prediction_error_map"] = {"rasters_npz_found": False}
+
+    boxeig_sweep_csv = _find_existing(source_dir, ["group_c_boxeig_sweep_plot_data.csv"])
+    if boxeig_sweep_csv is not None:
+        manifest["figures"]["group_c_boxeig_parameter_sweep"] = _rerender_boxeig_sweep_from_saved(
+            out_dir,
+            boxeig_sweep_csv,
+        )
+    else:
+        manifest["skipped"]["group_c_boxeig_parameter_sweep"] = {"plot_csv_found": False}
 
     manifest_path = out_dir / "paper_visualization_rerender_manifest.json"
     _write_json(manifest_path, manifest)
