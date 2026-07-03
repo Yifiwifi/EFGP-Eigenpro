@@ -26,7 +26,6 @@ from ..versions import (
 from .active_set import compute_rho
 from .box_eigenpro import (
     _local_box_apply_block,
-    apply_box_eigenpro_local,
     build_box_eigenpro_preconditioner,
 )
 from .config import BTABConfig, BTABExperimentConfig, resolve_btab_experiment_route
@@ -98,7 +97,9 @@ PROFILE_STYLES = {
 METHOD_STYLES = {
     "EFGP-CG": {"color": BLUE, "linestyle": "-", "linewidth": 1.35},
     "Global EigenPro-style PCG": {"color": ORANGE, "linestyle": "--", "linewidth": 1.35},
+    "best global EigenPro-style PCG": {"color": ORANGE, "linestyle": "--", "linewidth": 1.35},
     "Active inverse": {"color": GREEN, "linestyle": "-.", "linewidth": 1.35},
+    "Exact active-block solve": {"color": GREEN, "linestyle": "-.", "linewidth": 1.35},
     "Box-EigenPro": {"color": RED, "linestyle": "-", "linewidth": 1.35},
 }
 
@@ -356,6 +357,16 @@ def _plot_active_score_profiles(ax: Any, profiles: list[dict[str, Any]]) -> None
         )
     for s_act in (512, 1024, 2048):
         ax.axvline(s_act, color=GRAY, linestyle=":", linewidth=0.8)
+        ax.text(
+            s_act,
+            0.04,
+            f"top-k={s_act}",
+            rotation=90,
+            va="bottom",
+            ha="right",
+            color=GRAY,
+            fontsize=7,
+        )
     ax.set_xscale("log")
     ax.set_ylim(0.0, 1.02)
     ax.set_xlabel("top-k Fourier modes")
@@ -450,16 +461,18 @@ def _active_window_spectrum_data(
     eye = xp.eye(n_box, dtype=xp.complex128)
     A = _local_box_apply_block(backend, precond, float(cfg.reg_lambda), eye)
     A = 0.5 * (A + A.conj().T)
-    PA = apply_box_eigenpro_local(backend, precond, A)
     raw = np.linalg.eigvalsh(np.asarray(_asnumpy(A), dtype=np.complex128))
-    pre = np.linalg.eigvals(np.asarray(_asnumpy(PA), dtype=np.complex128))
     raw = np.sort(np.real(raw))[::-1]
-    pre = np.sort(np.real(pre))[::-1]
+    q = min(max(int(viz_cfg.spectrum_boxeig_q), 0), max(int(raw.size) - 1, 0))
+    theta_q1 = max(float(raw[q]), 1e-300) if raw.size else 1e-300
+    pre = np.maximum(raw / theta_q1, 1e-300) if raw.size else raw.copy()
+    if q > 0:
+        pre[:q] = 1.0
     rows = []
     for i, val in enumerate(raw, 1):
         rows.append({"spectrum": "raw_A_BB", "rank": int(i), "eigenvalue": float(val)})
     for i, val in enumerate(pre, 1):
-        rows.append({"spectrum": "box_eigenpro_preconditioned", "rank": int(i), "eigenvalue": float(val)})
+        rows.append({"spectrum": "ideal_box_eigenpro_corrected", "rank": int(i), "eigenvalue": float(val)})
     return {
         "raw": raw,
         "preconditioned": pre,
@@ -470,7 +483,8 @@ def _active_window_spectrum_data(
         "M": int(data_ctx.meta["mtot"]) ** int(data_ctx.meta["dim"]),
         "active_topk": int(viz_cfg.spectrum_active_topk),
         "box_size": int(n_box),
-        "btab_eig_q": int(viz_cfg.spectrum_boxeig_q),
+        "btab_eig_q": int(q),
+        "corrected_spectrum_kind": "ideal EigenPro-style flattening from raw A_BB eigenvalues",
     }
 
 
@@ -481,12 +495,22 @@ def _plot_raw_spectrum(ax: Any, raw: np.ndarray) -> None:
     ax.grid(True, which="both", alpha=0.22, linewidth=0.5)
 
 
-def _plot_corrected_spectrum(ax: Any, pre: np.ndarray) -> None:
-    ax.plot(np.arange(1, pre.size + 1), pre, color=RED, linewidth=1.2)
-    ax.axhline(1.0, color=GRAY, linestyle=":", linewidth=0.9, label="exact inverse")
+def _plot_corrected_spectrum(ax: Any, pre: np.ndarray, *, q: int | None = None) -> None:
+    clipped = np.maximum(np.asarray(pre, dtype=np.float64), 1e-8)
+    ax.semilogy(np.arange(1, clipped.size + 1), clipped, color=RED, linewidth=1.2)
+    ax.axhline(1.0, color=GRAY, linestyle=":", linewidth=0.9, label="flattened level")
+    if q is not None and int(q) > 0:
+        ax.axvline(int(q), color=GRAY, linestyle="--", linewidth=0.9, label="rank cutoff")
+    pos = clipped[np.isfinite(clipped) & (clipped > 0)]
+    if pos.size:
+        ymin = max(1e-8, 10.0 ** np.floor(np.log10(float(np.min(pos)))))
+    else:
+        ymin = 1e-8
+    ymax = max(1.2, float(np.nanmax(clipped)) * 1.05) if clipped.size else 1.2
+    ax.set_ylim(ymin, ymax)
     ax.set_xlabel("rank")
     ax.set_ylabel(r"eig. of $P_B A_{BB}$")
-    ax.grid(True, alpha=0.22, linewidth=0.5)
+    ax.grid(True, which="both", alpha=0.22, linewidth=0.5)
     ax.legend(frameon=False, loc="best")
 
 
@@ -504,8 +528,8 @@ def make_active_window_spectrum_figure(
     fig, axes = plt.subplots(1, 2, figsize=_double_col_size(2.35), constrained_layout=True)
     _plot_raw_spectrum(axes[0], raw)
     axes[0].set_title("Raw active-window spectrum")
-    _plot_corrected_spectrum(axes[1], pre)
-    axes[1].set_title("Box-EigenPro corrected spectrum")
+    _plot_corrected_spectrum(axes[1], pre, q=int(data.get("btab_eig_q", 0)))
+    axes[1].set_title("Ideal corrected spectrum")
     paths = _save_figure(fig, out_dir, "active_window_spectrum_diagnostic")
     plt.close(fig)
     return {
@@ -535,8 +559,8 @@ def make_mechanism_diagnostics_figure(
     _plot_raw_spectrum(axes[1], spectrum["raw"])
     axes[1].set_title("Raw active-window spectrum")
     _panel_label(axes[1], "(b)")
-    _plot_corrected_spectrum(axes[2], spectrum["preconditioned"])
-    axes[2].set_title("Corrected spectrum")
+    _plot_corrected_spectrum(axes[2], spectrum["preconditioned"], q=int(spectrum.get("btab_eig_q", 0)))
+    axes[2].set_title("Ideal corrected spectrum")
     _panel_label(axes[2], "(c)")
     paths = _save_figure(fig, out_dir, "figure1_mechanism_diagnostics")
     plt.close(fig)
@@ -771,37 +795,40 @@ def _boxeig_sweep_tables(
     if df is None or df.empty:
         return {"available": False, "reason": "no master_summary.csv found", "source_summary_files": sources}
 
-    work = _filter_group_c_rows(df.copy())
-    if work.empty:
+    work_all = _filter_group_c_rows(df.copy())
+    if work_all.empty:
         return {
             "available": False,
             "reason": "no group_c rows found in master_summary.csv",
             "source_summary_files": sources,
             "sweep_spec": sweep_spec,
         }
-    if "status" in work.columns:
-        work = work[_series_from_frame(work, "status").astype(str).str.lower().isin(["ok", "converged"])]
-    work = work[
-        _series_from_frame(work, "dataset_stem").astype(str).str.contains(
+    work_all = work_all[
+        _series_from_frame(work_all, "dataset_stem").astype(str).str.contains(
             str(viz_cfg.boxeig_sweep_dataset_contains),
             case=False,
             na=False,
         )
     ]
-    work = _prefer_usgs_dataset(work, str(viz_cfg.boxeig_sweep_dataset_contains))
-    work = work[_series_from_frame(work, "kernel_family").astype(str).str.lower().isin(["matern", "mat", "mat32"])]
-    work = work[
+    work_all = _prefer_usgs_dataset(work_all, str(viz_cfg.boxeig_sweep_dataset_contains))
+    work_all = work_all[_series_from_frame(work_all, "kernel_family").astype(str).str.lower().isin(["matern", "mat", "mat32"])]
+    work_all = work_all[
         np.isclose(
-            _numeric_column(work, "n_train").astype(float),
+            _numeric_column(work_all, "n_train").astype(float),
             float(viz_cfg.boxeig_sweep_n_train),
             rtol=0.0,
             atol=1.0,
         )
     ]
+    work_ok = work_all.copy()
+    if "status" in work_ok.columns:
+        work_ok = work_ok[
+            _series_from_frame(work_ok, "status").astype(str).str.lower().isin(["ok", "converged"])
+        ]
 
-    method = _series_from_frame(work, "method").astype(str).str.lower()
-    version = _series_from_frame(work, "version").astype(str).str.lower()
-    boxeig = work[method.str.startswith("btab_boxeig") | version.eq("v7_btab_boxeig")].copy()
+    method = _series_from_frame(work_ok, "method").astype(str).str.lower()
+    version = _series_from_frame(work_ok, "version").astype(str).str.lower()
+    boxeig = work_ok[method.str.startswith("btab_boxeig") | version.eq("v7_btab_boxeig")].copy()
     if boxeig.empty:
         return {
             "available": False,
@@ -927,8 +954,8 @@ def _boxeig_sweep_tables(
             }
         )
 
-    def _baseline(label: str, mask: Any) -> dict[str, Any]:
-        sub = work[mask].copy()
+    def _baseline(label: str, mask: Any, *, source: Any) -> dict[str, Any]:
+        sub = source[mask].copy()
         if sub.empty:
             return {"row_type": "baseline", "baseline_label": label, "available": False, "reason": "no rows"}
         sub["iters"] = _first_finite_series(_numeric_column(sub, "cg_iters"), _numeric_column(sub, "outer_iters"))
@@ -967,14 +994,15 @@ def _boxeig_sweep_tables(
             "source_summary_file": str(row.get("source_summary_file", "")),
         }
 
-    work_method = _series_from_frame(work, "method").astype(str).str.lower()
-    work_version = _series_from_frame(work, "version").astype(str).str.lower()
+    work_method = _series_from_frame(work_all, "method").astype(str).str.lower()
+    work_version = _series_from_frame(work_all, "version").astype(str).str.lower()
     baseline_rows = [
-        _baseline("EFGP-CG", work_method.eq("plain_cg")),
-        _baseline("Global EigenPro-style PCG", work_method.str.startswith("eigenpro_pcg")),
+        _baseline("EFGP-CG", work_method.eq("plain_cg"), source=work_all),
+        _baseline("Global EigenPro-style PCG", work_method.str.startswith("eigenpro_pcg"), source=work_all),
         _baseline(
             "Active inverse",
             work_version.eq("v6_btab") | work_method.str.startswith("btab_auto") | work_method.str.startswith("btab_exact"),
+            source=work_all,
         ),
     ]
     plot_rows = collapsed_rows + baseline_rows
@@ -1019,6 +1047,14 @@ def _plot_boxeig_sweep_rows(plot_rows: list[dict[str, Any]], out_dir: Path, *, s
     box_rows = [row for row in plot_rows if str(row.get("row_type", "")) == "boxeig"]
     baseline_rows = [row for row in plot_rows if str(row.get("row_type", "")) == "baseline"]
     box_sizes = sorted(set(_to_int(row.get("btab_box_size"), 0) for row in box_rows if _to_int(row.get("btab_box_size"), 0) > 0))
+    q_values_all = sorted(
+        {
+            _to_int(row.get("btab_eig_q"), 0)
+            for row in box_rows
+            if _to_int(row.get("btab_eig_q"), 0) > 0
+        }
+    )
+    marker_x = q_values_all[0] if q_values_all else 0
     box_palette = [PURPLE, RED, BLACK, BLUE]
     markers = ["o", "s", "^", "D"]
     for i, box_size in enumerate(box_sizes):
@@ -1046,31 +1082,68 @@ def _plot_boxeig_sweep_rows(plot_rows: list[dict[str, Any]], out_dir: Path, *, s
     for base in baseline_rows:
         label = str(base.get("baseline_label", "baseline"))
         available = _to_bool(base.get("available", False))
-        style = METHOD_STYLES.get(label, {"color": GRAY, "linestyle": ":", "linewidth": 1.0})
+        display_label = label
+        if label == "Global EigenPro-style PCG":
+            display_label = "best global EigenPro-style PCG"
+        elif label == "Active inverse":
+            display_label = "Exact active-block solve"
+        style = METHOD_STYLES.get(display_label, METHOD_STYLES.get(label, {"color": GRAY, "linestyle": ":", "linewidth": 1.0}))
         if available:
             baseline_iters = _to_float(base.get("iters"))
             baseline_time = _to_float(base.get("time_total"))
             if math.isfinite(baseline_iters):
-                axes[0].axhline(baseline_iters, label=label, alpha=0.78, **style)
+                axes[0].axhline(baseline_iters, label=display_label, alpha=0.78, **style)
             if math.isfinite(baseline_time):
-                axes[1].axhline(baseline_time, label=label, alpha=0.78, **style)
-        else:
-            # Keep failed/unavailable baselines visible in the manifest without
-            # implying they are valid comparison lines.
-            continue
+                axes[1].axhline(baseline_time, label=display_label, alpha=0.78, **style)
+        elif label == "Active inverse":
+            baseline_iters = _to_float(base.get("iters"))
+            baseline_time = _to_float(base.get("time_total"))
+            fail_label = "exact active solve (not converged)"
+            if math.isfinite(baseline_iters) and marker_x > 0:
+                axes[0].scatter(
+                    [marker_x],
+                    [max(baseline_iters, 1e-12)],
+                    marker="x",
+                    s=42,
+                    color=GRAY,
+                    linewidths=1.1,
+                    label=fail_label,
+                    zorder=6,
+                )
+            if math.isfinite(baseline_time) and marker_x > 0:
+                axes[1].scatter(
+                    [marker_x],
+                    [baseline_time],
+                    marker="x",
+                    s=42,
+                    color=GRAY,
+                    linewidths=1.1,
+                    label=fail_label,
+                    zorder=6,
+                )
 
     axes[0].set_xlabel("spectral rank q")
-    axes[0].set_ylabel("PCG iterations")
+    axes[0].set_ylabel("PCG iterations (log scale)")
+    axes[0].set_yscale("log")
     axes[0].set_title("Iterations")
-    axes[0].grid(True, alpha=0.22, linewidth=0.5)
+    axes[0].grid(True, which="both", alpha=0.22, linewidth=0.5)
     _panel_label(axes[0], "(a)")
     axes[1].set_xlabel("spectral rank q")
     axes[1].set_ylabel("total time (s)")
     axes[1].set_title("Total time")
     axes[1].grid(True, alpha=0.22, linewidth=0.5)
     _panel_label(axes[1], "(b)")
-    axes[0].legend(frameon=False, loc="best")
-    axes[1].legend(frameon=False, loc="best")
+    fig.suptitle(r"Matérn USGS, $N=3\times 10^8$, $M=35721$", fontsize=9)
+    handles: list[Any] = []
+    labels: list[str] = []
+    for ax in axes:
+        h, lab = ax.get_legend_handles_labels()
+        for handle, text in zip(h, lab):
+            if text not in labels:
+                handles.append(handle)
+                labels.append(text)
+    if handles:
+        fig.legend(handles, labels, frameon=False, loc="lower center", bbox_to_anchor=(0.5, -0.08), ncol=3)
     paths = _save_figure(fig, out_dir, stem)
     plt.close(fig)
     return paths
@@ -1374,12 +1447,20 @@ def make_residual_and_rmse_figures(
     axes[0].set_xlabel("iteration")
     axes[0].set_ylabel("relative residual")
     axes[0].set_title("Full range")
+    axes[0].axhline(
+        float(viz_cfg.tol),
+        color=GRAY,
+        linestyle=":",
+        linewidth=0.9,
+        label=rf"$\varepsilon_{{pcg}}={float(viz_cfg.tol):.0e}$",
+    )
+    axes[1].axhline(float(viz_cfg.tol), color=GRAY, linestyle=":", linewidth=0.9)
     axes[0].grid(True, which="both", alpha=0.22, linewidth=0.5)
     axes[0].legend(frameon=False, loc="best")
     _panel_label(axes[0], "(a)")
     axes[1].set_xlabel("iteration")
     axes[1].set_ylabel("relative residual")
-    axes[1].set_title(f"First {int(viz_cfg.residual_zoom_iterations)} iterations")
+    axes[1].set_title(f"Zoom: first {int(viz_cfg.residual_zoom_iterations)} iterations")
     axes[1].grid(True, which="both", alpha=0.22, linewidth=0.5)
     _panel_label(axes[1], "(b)")
     residual_paths = _save_figure(fig, out_dir, "fig6_residual_convergence")
@@ -1577,7 +1658,7 @@ def _profiles_from_saved_rows(rows: list[dict[str, str]]) -> list[dict[str, Any]
     return profiles
 
 
-def _spectrum_from_saved_rows(rows: list[dict[str, str]]) -> tuple[np.ndarray, np.ndarray]:
+def _spectrum_from_saved_rows(rows: list[dict[str, str]]) -> tuple[np.ndarray, np.ndarray, int | None]:
     raw: list[tuple[int, float]] = []
     corrected: list[tuple[int, float]] = []
     for row in rows:
@@ -1591,13 +1672,20 @@ def _spectrum_from_saved_rows(rows: list[dict[str, str]]) -> tuple[np.ndarray, n
             corrected.append(pair)
     raw_arr = np.asarray([v for _, v in sorted(raw)], dtype=np.float64)
     corrected_arr = np.asarray([v for _, v in sorted(corrected)], dtype=np.float64)
-    return raw_arr, corrected_arr
+    q = None
+    if corrected_arr.size:
+        near_one = np.isfinite(corrected_arr) & np.isclose(corrected_arr, 1.0, rtol=1e-7, atol=1e-10)
+        if bool(np.any(near_one)):
+            q = int(np.argmax(~near_one)) if not bool(np.all(near_one)) else int(corrected_arr.size)
+            if q <= 0:
+                q = int(np.sum(near_one))
+    return raw_arr, corrected_arr, q
 
 
 def _rerender_mechanism_from_saved(out_dir: Path, active_csv: Path, spectrum_csv: Path) -> dict[str, Any]:
     plt = _import_pyplot()
     profiles = _profiles_from_saved_rows(_read_csv_rows(active_csv))
-    raw, corrected = _spectrum_from_saved_rows(_read_csv_rows(spectrum_csv))
+    raw, corrected, q = _spectrum_from_saved_rows(_read_csv_rows(spectrum_csv))
     if not profiles:
         raise ValueError(f"No active-score profiles could be read from {active_csv}")
     if raw.size == 0 or corrected.size == 0:
@@ -1609,8 +1697,8 @@ def _rerender_mechanism_from_saved(out_dir: Path, active_csv: Path, spectrum_csv
     _plot_raw_spectrum(axes[1], raw)
     axes[1].set_title("Raw active-window spectrum")
     _panel_label(axes[1], "(b)")
-    _plot_corrected_spectrum(axes[2], corrected)
-    axes[2].set_title("Corrected spectrum")
+    _plot_corrected_spectrum(axes[2], corrected, q=q)
+    axes[2].set_title("Ideal corrected spectrum")
     _panel_label(axes[2], "(c)")
     paths = _save_figure(fig, out_dir, "figure1_mechanism_diagnostics")
     plt.close(fig)
@@ -1627,6 +1715,7 @@ def _rerender_residual_from_saved(
     trace_csv: Path,
     *,
     zoom_iterations: int = 400,
+    tol: float = 1e-6,
 ) -> dict[str, Any]:
     plt = _import_pyplot()
     rows = _read_csv_rows(trace_csv)
@@ -1662,12 +1751,20 @@ def _rerender_residual_from_saved(
     axes[0].set_xlabel("iteration")
     axes[0].set_ylabel("relative residual")
     axes[0].set_title("Full range")
+    axes[0].axhline(
+        float(tol),
+        color=GRAY,
+        linestyle=":",
+        linewidth=0.9,
+        label=rf"$\varepsilon_{{pcg}}={float(tol):.0e}$",
+    )
+    axes[1].axhline(float(tol), color=GRAY, linestyle=":", linewidth=0.9)
     axes[0].grid(True, which="both", alpha=0.22, linewidth=0.5)
     axes[0].legend(frameon=False, loc="best")
     _panel_label(axes[0], "(a)")
     axes[1].set_xlabel("iteration")
     axes[1].set_ylabel("relative residual")
-    axes[1].set_title(f"First {int(zoom_iterations)} iterations")
+    axes[1].set_title(f"Zoom: first {int(zoom_iterations)} iterations")
     axes[1].grid(True, which="both", alpha=0.22, linewidth=0.5)
     _panel_label(axes[1], "(b)")
     residual_paths = _save_figure(fig, out_dir, "fig6_residual_convergence")
@@ -1757,6 +1854,7 @@ def rerender_paper_visualizations_from_saved_data(
     *,
     output_dir: str | Path | None = None,
     zoom_iterations: int = 400,
+    tol: float = 1e-6,
 ) -> dict[str, Any]:
     """Recreate paper figures from saved CSV/NPZ artifacts without running solvers.
 
@@ -1806,6 +1904,7 @@ def rerender_paper_visualizations_from_saved_data(
             out_dir,
             trace_csv,
             zoom_iterations=int(zoom_iterations),
+            tol=float(tol),
         )
     else:
         manifest["skipped"]["fig6_residual_and_rmse"] = {"trace_csv_found": False}

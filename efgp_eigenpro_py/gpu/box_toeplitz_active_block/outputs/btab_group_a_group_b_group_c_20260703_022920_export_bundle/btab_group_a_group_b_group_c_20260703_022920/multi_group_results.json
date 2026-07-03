@@ -1,0 +1,53 @@
+{
+  "group_a": {
+    "output_dir": "/content/EFGP-Eigenpro/efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs/btab_group_a_group_b_group_c_20260703_022920/group_a",
+    "dataset_stems": [
+      "synthetic_true_func_2d_ntrain3000000",
+      "synthetic_true_func_2d_ntrain1000000",
+      "synthetic_true_func_2d_ntrain30000000",
+      "synthetic_true_func_2d_ntrain10000000",
+      "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain3000000",
+      "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain1000000",
+      "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain30000000",
+      "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000"
+    ],
+    "eps_values": [
+      1e-05
+    ],
+    "n_rows": 168
+  },
+  "group_b": {
+    "output_dir": "/content/EFGP-Eigenpro/efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs/btab_group_a_group_b_group_c_20260703_022920/group_b",
+    "dataset_stems": [
+      "synthetic_true_func_2d_ntrain300000000",
+      "synthetic_true_func_2d_ntrain100000000",
+      "synthetic_true_func_2d_ntrain3000000",
+      "synthetic_true_func_2d_ntrain1000000",
+      "synthetic_true_func_2d_ntrain30000000",
+      "synthetic_true_func_2d_ntrain10000000",
+      "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain300000000",
+      "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain100000000",
+      "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain3000000",
+      "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain1000000",
+      "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain30000000",
+      "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000"
+    ],
+    "eps_values": [
+      1e-05
+    ],
+    "n_rows": 144
+  },
+  "group_c": {
+    "output_dir": "/content/EFGP-Eigenpro/efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs/btab_group_a_group_b_group_c_20260703_022920/group_c",
+    "dataset_stems": [
+      "synthetic_true_func_2d_ntrain300000000",
+      "synthetic_true_func_2d_ntrain100000000",
+      "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain300000000",
+      "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain100000000"
+    ],
+    "eps_values": [
+      1e-05
+    ],
+    "n_rows": 104
+  }
+}

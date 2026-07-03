@@ -107,7 +107,7 @@ def test_active_score_visualization_writes_artifacts(tmp_path):
 def test_group_c_boxeig_parameter_sweep_from_summary(tmp_path):
     rows = [
         {
-            "status": "ok",
+            "status": "maxiter",
             "dataset_stem": "USGS_matern_group_c",
             "kernel_family": "matern",
             "n_train": 300000000,
@@ -276,6 +276,8 @@ def test_group_c_boxeig_parameter_sweep_from_summary(tmp_path):
     assert baselines["EFGP-CG"]["available"] is True
     assert baselines["Global EigenPro-style PCG"]["available"] is True
     assert baselines["Active inverse"]["available"] is False
+    assert baselines["Active inverse"]["iters"] == 5000.0
+    assert baselines["Active inverse"]["reason"] == "no converged row; plotted as unavailable"
 
 
 def test_rerender_paper_visualizations_from_saved_data(tmp_path):
@@ -297,8 +299,8 @@ def test_rerender_paper_visualizations_from_saved_data(tmp_path):
                 "spectrum,rank,eigenvalue",
                 "raw_A_BB,1,10.0",
                 "raw_A_BB,2,2.0",
-                "box_eigenpro_preconditioned,1,1.1",
-                "box_eigenpro_preconditioned,2,0.9",
+                "ideal_box_eigenpro_corrected,1,1.1",
+                "ideal_box_eigenpro_corrected,2,0.9",
             ]
         ),
         encoding="utf-8",
