@@ -197,7 +197,7 @@ def resolve_btab_experiment_route(
     if route in {"schedule_small", "schedule_medium", "schedule_large"}:
         return cfg
 
-    exact_apply_mode = "chol_solve"
+    exact_apply_mode = "inverse"
     route_preset: dict[str, Any] = {}
     if route == "schedule":
         if n_train is None:
@@ -288,7 +288,7 @@ def resolve_btab_experiment_route(
         # for SE kernel, M=1225
         # Keep this route separate from the exact-inverse sweep.
         topk = [512,1024]
-        inverse = [512,1024, 1225]
+        inverse = [512,1024]
         boxeig = [
             (256, 64),
             (512, 128),

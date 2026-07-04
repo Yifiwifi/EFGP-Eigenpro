@@ -1,0 +1,135 @@
+{
+  "paper_visualizations_dir": "/content/EFGP-Eigenpro/efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs/btab_group_b_20260704_062332/paper_visualizations",
+  "config": {
+    "output_dir": "/content/EFGP-Eigenpro/efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs/btab_group_b_20260704_062332/paper_visualizations",
+    "summary_root": "/content/EFGP-Eigenpro/efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs/btab_group_b_20260704_062332",
+    "residual_dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain100000000",
+    "map_dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+    "kernel_family": "matern",
+    "kernel_lengthscale": 0.1,
+    "kernel_nu": 1.5,
+    "kernel_variance": 1.0,
+    "reg_lambda": 0.1,
+    "eps": 1e-05,
+    "nufft_tol": 1e-10,
+    "l2_scaled": true,
+    "tol": 1e-06,
+    "residual_rmse_ratio_tol": 1.1,
+    "residual_maxiter": null,
+    "residual_sample_size": 100000,
+    "residual_sample_seed": 17,
+    "rmse_checkpoint_count": 70,
+    "residual_trace_dense_until": 100,
+    "residual_trace_mid_until": 1000,
+    "residual_trace_stride_mid": 10,
+    "residual_trace_stride_late": 50,
+    "residual_zoom_iterations": 400,
+    "spectrum_active_topk": 2048,
+    "spectrum_boxeig_q": 256,
+    "map_active_topk": 4096,
+    "map_sample_size": 200000,
+    "map_sample_seed": 23,
+    "map_bins": 256,
+    "boxeig_sweep_n_train": 300000000,
+    "boxeig_sweep_dataset_contains": "USGS",
+    "make_active_score": true,
+    "make_spectrum": true,
+    "make_mechanism_figure": true,
+    "make_residual": true,
+    "make_rmse": true,
+    "make_prediction_map": true,
+    "make_boxeig_sweep": true
+  },
+  "trace_run_for_visualization": true,
+  "not_used_for_main_timing": true,
+  "figures": {
+    "figure1_mechanism_diagnostics": {
+      "figure_name": "figure1_mechanism_diagnostics",
+      "output_active_score_csv": "/content/EFGP-Eigenpro/efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs/btab_group_b_20260704_062332/paper_visualizations/figure1_mechanism_active_score.csv",
+      "output_spectrum_csv": "/content/EFGP-Eigenpro/efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs/btab_group_b_20260704_062332/paper_visualizations/figure1_mechanism_spectrum.csv",
+      "png": "/content/EFGP-Eigenpro/efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs/btab_group_b_20260704_062332/paper_visualizations/figure1_mechanism_diagnostics.png",
+      "pdf": "/content/EFGP-Eigenpro/efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs/btab_group_b_20260704_062332/paper_visualizations/figure1_mechanism_diagnostics.pdf",
+      "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain100000000",
+      "N_train": 100000000,
+      "kernel": "matern",
+      "M": 35721,
+      "active_topk": 2048,
+      "box_size": 2601,
+      "btab_eig_q": 256,
+      "corrected_spectrum_kind": "ideal EigenPro-style flattening from raw A_BB eigenvalues"
+    },
+    "fig6_residual_and_rmse": {
+      "figure_name": "fig6_residual_and_rmse",
+      "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain100000000",
+      "N_train": 100000000,
+      "output_csv": "/content/EFGP-Eigenpro/efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs/btab_group_b_20260704_062332/paper_visualizations/fig6_residual_rmse_trace.csv",
+      "residual": {
+        "png": "/content/EFGP-Eigenpro/efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs/btab_group_b_20260704_062332/paper_visualizations/fig6_residual_convergence.png",
+        "pdf": "/content/EFGP-Eigenpro/efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs/btab_group_b_20260704_062332/paper_visualizations/fig6_residual_convergence.pdf"
+      },
+      "rmse": {
+        "png": "/content/EFGP-Eigenpro/efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs/btab_group_b_20260704_062332/paper_visualizations/rmse_checkpoint_convergence.png",
+        "pdf": "/content/EFGP-Eigenpro/efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs/btab_group_b_20260704_062332/paper_visualizations/rmse_checkpoint_convergence.pdf"
+      },
+      "selection": {
+        "source_summary_files": [
+          "/content/EFGP-Eigenpro/efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs/btab_group_b_20260704_062332/master_summary.csv"
+        ],
+        "methods": {
+          "plain": {
+            "available": false,
+            "reason": "no successful row in method family"
+          },
+          "v3": {
+            "available": false,
+            "reason": "no successful row in method family"
+          },
+          "active_inverse": {
+            "available": false,
+            "reason": "no successful row in method family"
+          },
+          "boxeig": {
+            "available": false,
+            "reason": "no successful row in method family"
+          }
+        },
+        "baseline_rmse_test": null
+      },
+      "traced_methods": {
+        "plain": {
+          "available": false,
+          "reason": "no successful row in method family"
+        },
+        "v3": {
+          "available": false,
+          "reason": "no successful row in method family"
+        },
+        "active_inverse": {
+          "available": false,
+          "reason": "no successful row in method family"
+        },
+        "boxeig": {
+          "available": false,
+          "reason": "no successful row in method family"
+        }
+      }
+    },
+    "usgs_prediction_error_map": {
+      "figure_name": "usgs_prediction_error_map",
+      "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+      "N_train": 10000000,
+      "output_npz": "/content/EFGP-Eigenpro/efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs/btab_group_b_20260704_062332/paper_visualizations/usgs_prediction_error_map_rasters.npz",
+      "output_metrics_json": "/content/EFGP-Eigenpro/efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs/btab_group_b_20260704_062332/paper_visualizations/usgs_prediction_error_map_metrics.json",
+      "png": "/content/EFGP-Eigenpro/efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs/btab_group_b_20260704_062332/paper_visualizations/usgs_prediction_error_map.png",
+      "pdf": "/content/EFGP-Eigenpro/efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs/btab_group_b_20260704_062332/paper_visualizations/usgs_prediction_error_map.pdf"
+    },
+    "group_c_boxeig_parameter_sweep": {
+      "figure_name": "group_c_boxeig_parameter_sweep",
+      "available": false,
+      "reason": "no Box-EigenPro rows after group_c filtering",
+      "source_summary_files": [
+        "/content/EFGP-Eigenpro/efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs/btab_group_b_20260704_062332/master_summary.csv"
+      ]
+    }
+  }
+}
