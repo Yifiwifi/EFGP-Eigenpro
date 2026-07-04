@@ -9,7 +9,13 @@ from efgp_eigenpro_py.gpu.box_toeplitz_active_block.box_eigenpro import (
     build_box_eigenpro_preconditioner,
 )
 from efgp_eigenpro_py.gpu.box_toeplitz_active_block.config import BTABConfig
-from efgp_eigenpro_py.gpu.box_toeplitz_active_block.preconditioner import _apply_local_box_operator
+from efgp_eigenpro_py.gpu.box_toeplitz_active_block.preconditioner import (
+    _apply_local_box_operator,
+    apply_box_toeplitz_preconditioner,
+    build_box_toeplitz_preconditioner,
+)
+from efgp_eigenpro_py.gpu.contexts import GPUOperatorContext
+from efgp_eigenpro_py.gpu.v1_ops import apply_A_v1
 from efgp_eigenpro_py.gpu.v3_eigenspace import _toeplitz_submatrix_gpu
 
 
@@ -23,7 +29,8 @@ def _fake_problem(mtot: int = 7):
         has_nufft=False,
     )
     lags = np.arange(2 * mtot - 1) - (mtot - 1)
-    xtxcol = np.exp(-0.35 * np.abs(lags)).astype(np.complex128)
+    phases = np.array([0.2, 1.1, 2.4, 4.0], dtype=np.float64)
+    xtxcol = np.sum(np.exp(-1j * lags[:, None] * phases[None, :]), axis=1).astype(np.complex128)
     weights = np.array([0.1, 0.2, 1.0, 2.0, 1.0, 0.2, 0.1], dtype=np.float64)
     data_ctx = SimpleNamespace(
         xtxcol_gpu=xtxcol,
@@ -42,6 +49,30 @@ def _fake_problem(mtot: int = 7):
         diagnostic_mode="cheap",
     )
     return backend, data_ctx, cfg
+
+
+def test_toeplitz_submatrix_matches_apply_A_v1_full_grid():
+    backend, data_ctx, _ = _fake_problem()
+    reg_lambda = 0.1
+    mtot = int(data_ctx.meta["mtot"])
+    dense = _toeplitz_submatrix_gpu(
+        np,
+        data_ctx.xtxcol_gpu,
+        data_ctx.weights_gpu_flat,
+        np.arange(mtot, dtype=np.int64),
+        mtot=mtot,
+        dim=data_ctx.meta["dim"],
+    )
+    dense = dense + reg_lambda * np.eye(mtot, dtype=np.complex128)
+
+    cols = []
+    for j in range(mtot):
+        ej = np.zeros(mtot, dtype=np.complex128)
+        ej[j] = 1.0
+        cols.append(apply_A_v1(backend, data_ctx, ej, reg_lambda, GPUOperatorContext()).copy())
+    from_matvec = np.column_stack(cols)
+
+    np.testing.assert_allclose(dense, from_matvec, rtol=1e-10, atol=1e-10)
 
 
 def test_local_box_matvec_matches_dense_toeplitz_submatrix():
@@ -67,6 +98,34 @@ def test_local_box_matvec_matches_dense_toeplitz_submatrix():
     v = np.array([1.0, -0.5, 0.25], dtype=np.complex128)
     got = _apply_local_box_operator(backend, pre, reg_lambda, v)
     np.testing.assert_allclose(got, dense @ v, rtol=1e-10, atol=1e-10)
+
+
+def test_full_box_inverse_preconditions_apply_A_v1_to_identity():
+    backend, data_ctx, _ = _fake_problem()
+    reg_lambda = 0.1
+    mtot = int(data_ctx.meta["mtot"])
+    cfg = BTABConfig(
+        active_mode="topk",
+        active_topk=mtot,
+        box_budget=mtot,
+        solve_mode="exact",
+        exact_apply_mode="inverse",
+        diagnostic_mode="none",
+    )
+    pre = build_box_toeplitz_preconditioner(
+        backend,
+        data_ctx,
+        reg_lambda,
+        cfg,
+        profile_apply_components=False,
+    )
+    assert int(pre.active.box_idx.size) == mtot
+    assert int(pre.active.tail_idx.size) == 0
+
+    v = np.array([0.3, -0.2, 0.8, 1.1, -0.7, 0.4, 0.05], dtype=np.complex128)
+    Av = apply_A_v1(backend, data_ctx, v, reg_lambda, GPUOperatorContext())
+    got = apply_box_toeplitz_preconditioner(backend, pre, Av)
+    np.testing.assert_allclose(got, v, rtol=1e-10, atol=1e-10)
 
 
 def test_box_eigenpro_apply_matches_dense_formula():

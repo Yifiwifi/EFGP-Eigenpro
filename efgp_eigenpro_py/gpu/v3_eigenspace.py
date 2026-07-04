@@ -831,7 +831,8 @@ def _toeplitz_submatrix_gpu(
 ) -> Any:
     multi = _unravel_indices_np(s_idx_np, mtot, dim)
     shift = int(mtot) - 1
-    diff = multi[None, :, :] - multi[:, None, :] + shift
+    # Match apply_A_v1's convolution convention: A[i, j] uses lag i - j.
+    diff = multi[:, None, :] - multi[None, :, :] + shift
     idx = tuple(xp.asarray(diff[..., k], dtype=xp.int64) for k in range(dim))
     t = xtxcol_gpu[idx]
     ws = weights_gpu[xp.asarray(s_idx_np, dtype=xp.int64)]
@@ -893,7 +894,7 @@ def _toeplitz_cross_lift_gpu(
         rows_np = np.arange(lo, hi, dtype=np.int64)
         multi_r = _unravel_indices_np(rows_np, mtot, dim)
 
-        diff = multi_s[None, :, :] - multi_r[:, None, :] + shift
+        diff = multi_r[:, None, :] - multi_s[None, :, :] + shift
         idx = tuple(xp.asarray(diff[..., k], dtype=xp.int64) for k in range(dim))
         t = xtxcol_gpu[idx]
         wr = weights_gpu[lo:hi]
