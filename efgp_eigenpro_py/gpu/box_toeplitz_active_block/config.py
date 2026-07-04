@@ -296,6 +296,7 @@ def resolve_btab_experiment_route(
         ]
         eig_q = [16,32,64,128, 192,256]
         box_budget = 80000
+        exact_apply_mode = "inverse"
         resolved_route = route
         route_preset = {
             "dataset_stems": [
