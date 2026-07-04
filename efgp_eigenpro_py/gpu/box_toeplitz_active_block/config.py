@@ -288,7 +288,7 @@ def resolve_btab_experiment_route(
         # for SE kernel, M=1225
         # Keep this route separate from the exact-inverse sweep.
         topk = [512,1024]
-        inverse = [512,1024]
+        inverse = [512,1024, 1225]
         boxeig = [
             (256, 64),
             (512, 128),

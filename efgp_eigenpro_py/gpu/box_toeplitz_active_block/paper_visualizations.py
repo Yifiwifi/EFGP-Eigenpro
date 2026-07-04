@@ -205,8 +205,8 @@ def _save_figure(fig: Any, out_dir: Path, stem: str) -> dict[str, str]:
     out_dir.mkdir(parents=True, exist_ok=True)
     png = out_dir / f"{stem}.png"
     pdf = out_dir / f"{stem}.pdf"
-    fig.savefig(pdf, bbox_inches="tight")
-    fig.savefig(png, dpi=300, bbox_inches="tight")
+    fig.savefig(pdf, bbox_inches="tight", pad_inches=0.05)
+    fig.savefig(png, dpi=300, bbox_inches="tight", pad_inches=0.05)
     return {"png": str(png), "pdf": str(pdf)}
 
 
@@ -220,14 +220,14 @@ def _import_pyplot() -> Any:
         {
             "figure.dpi": 120,
             "savefig.dpi": 300,
-            "font.size": 9,
-            "axes.labelsize": 9,
-            "axes.titlesize": 9,
-            "xtick.labelsize": 8,
-            "ytick.labelsize": 8,
-            "legend.fontsize": 8,
+            "font.size": 8,
+            "axes.labelsize": 8,
+            "axes.titlesize": 8.5,
+            "xtick.labelsize": 7.5,
+            "ytick.labelsize": 7.5,
+            "legend.fontsize": 7,
             "axes.linewidth": 0.8,
-            "lines.linewidth": 1.35,
+            "lines.linewidth": 1.25,
             "pdf.fonttype": 42,
             "ps.fonttype": 42,
         }
@@ -289,14 +289,16 @@ def _double_col_size(height: float = 2.4) -> tuple[float, float]:
 
 def _panel_label(ax: Any, label: str) -> None:
     ax.text(
-        -0.16,
-        1.06,
+        0.02,
+        0.98,
         label,
         transform=ax.transAxes,
         fontsize=9,
         fontweight="bold",
         va="top",
         ha="left",
+        bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75, "pad": 1.5},
+        zorder=20,
     )
 
 
@@ -349,30 +351,30 @@ def _plot_active_score_profiles(ax: Any, profiles: list[dict[str, Any]]) -> None
     for profile in profiles:
         family = str(profile["kernel_family"])
         style = PROFILE_STYLES.get(family, {"color": BLACK, "linestyle": "-", "linewidth": 1.25})
+        if family.lower() in {"se", "squared_exponential", "rbf", "gaussian"}:
+            label = r"SE, $M=1225$"
+        else:
+            label = r"Matern $3/2$, $M=35721$"
         ax.plot(
             profile["rank"],
             profile["cumulative_mass"],
-            label=f"{profile['label']}",
+            label=label,
             **style,
         )
-    for s_act in (512, 1024, 2048):
-        ax.axvline(s_act, color=GRAY, linestyle=":", linewidth=0.8)
-        ax.text(
+    for i, s_act in enumerate((512, 1024, 2048)):
+        ax.axvline(
             s_act,
-            0.04,
-            f"top-k={s_act}",
-            rotation=90,
-            va="bottom",
-            ha="right",
             color=GRAY,
-            fontsize=7,
+            linestyle=":",
+            linewidth=0.8,
+            label="candidate top-k: 512, 1024, 2048" if i == 0 else None,
         )
     ax.set_xscale("log")
     ax.set_ylim(0.0, 1.02)
     ax.set_xlabel("top-k Fourier modes")
     ax.set_ylabel("cumulative mass")
     ax.grid(True, which="both", alpha=0.22, linewidth=0.5)
-    ax.legend(frameon=False, loc="lower right")
+    ax.legend(frameon=False, loc="lower right", fontsize=6.2, handlelength=1.5, labelspacing=0.28)
 
 
 def make_active_score_mass_figure(
@@ -498,9 +500,9 @@ def _plot_raw_spectrum(ax: Any, raw: np.ndarray) -> None:
 def _plot_corrected_spectrum(ax: Any, pre: np.ndarray, *, q: int | None = None) -> None:
     clipped = np.maximum(np.asarray(pre, dtype=np.float64), 1e-8)
     ax.semilogy(np.arange(1, clipped.size + 1), clipped, color=RED, linewidth=1.2)
-    ax.axhline(1.0, color=GRAY, linestyle=":", linewidth=0.9, label="flattened level")
+    ax.axhline(1.0, color=GRAY, linestyle=":", linewidth=0.9)
     if q is not None and int(q) > 0:
-        ax.axvline(int(q), color=GRAY, linestyle="--", linewidth=0.9, label="rank cutoff")
+        ax.axvline(int(q), color=GRAY, linestyle="--", linewidth=0.9)
     pos = clipped[np.isfinite(clipped) & (clipped > 0)]
     if pos.size:
         ymin = max(1e-8, 10.0 ** np.floor(np.log10(float(np.min(pos)))))
@@ -511,7 +513,27 @@ def _plot_corrected_spectrum(ax: Any, pre: np.ndarray, *, q: int | None = None) 
     ax.set_xlabel("rank")
     ax.set_ylabel(r"eig. of $P_B A_{BB}$")
     ax.grid(True, which="both", alpha=0.22, linewidth=0.5)
-    ax.legend(frameon=False, loc="best")
+    ax.text(
+        0.60,
+        0.86,
+        "flattened level",
+        transform=ax.transAxes,
+        fontsize=6.8,
+        color=GRAY,
+        ha="left",
+        va="center",
+    )
+    if q is not None and int(q) > 0:
+        ax.text(
+            0.08,
+            0.18,
+            r"$q$",
+            transform=ax.transAxes,
+            fontsize=7,
+            color=GRAY,
+            ha="left",
+            va="center",
+        )
 
 
 def make_active_window_spectrum_figure(
@@ -552,7 +574,8 @@ def make_mechanism_diagnostics_figure(
     spectrum_csv = out_dir / "figure1_mechanism_spectrum.csv"
     _write_csv(active_csv, active_rows)
     _write_csv(spectrum_csv, spectrum["rows"])
-    fig, axes = plt.subplots(1, 3, figsize=_double_col_size(2.2), constrained_layout=True)
+    fig, axes = plt.subplots(1, 3, figsize=(7.2, 2.65), constrained_layout=False)
+    fig.subplots_adjust(left=0.07, right=0.985, top=0.83, bottom=0.20, wspace=0.35)
     _plot_active_score_profiles(axes[0], profiles)
     axes[0].set_title("Active-score mass")
     _panel_label(axes[0], "(a)")
@@ -1043,7 +1066,8 @@ def _boxeig_sweep_tables(
 
 def _plot_boxeig_sweep_rows(plot_rows: list[dict[str, Any]], out_dir: Path, *, stem: str) -> dict[str, str]:
     plt = _import_pyplot()
-    fig, axes = plt.subplots(1, 2, figsize=_double_col_size(2.45), constrained_layout=True)
+    fig, axes = plt.subplots(1, 2, figsize=(7.4, 3.05), constrained_layout=False)
+    fig.subplots_adjust(left=0.08, right=0.78, top=0.82, bottom=0.18, wspace=0.28)
     box_rows = [row for row in plot_rows if str(row.get("row_type", "")) == "boxeig"]
     baseline_rows = [row for row in plot_rows if str(row.get("row_type", "")) == "baseline"]
     box_sizes = sorted(set(_to_int(row.get("btab_box_size"), 0) for row in box_rows if _to_int(row.get("btab_box_size"), 0) > 0))
@@ -1077,16 +1101,16 @@ def _plot_boxeig_sweep_rows(plot_rows: list[dict[str, Any]], out_dir: Path, *, s
         best = min(best_candidates, key=lambda row: _to_float(row.get("time_total")))
         q_best = _to_int(best.get("btab_eig_q"), 0)
         axes[0].scatter([q_best], [_to_float(best.get("iters"))], marker="*", s=75, color=BLACK, zorder=5)
-        axes[1].scatter([q_best], [_to_float(best.get("time_total"))], marker="*", s=75, color=BLACK, zorder=5, label="best total time")
+        axes[1].scatter([q_best], [_to_float(best.get("time_total"))], marker="*", s=75, color=BLACK, zorder=5, label="best")
 
     for base in baseline_rows:
         label = str(base.get("baseline_label", "baseline"))
         available = _to_bool(base.get("available", False))
         display_label = label
         if label == "Global EigenPro-style PCG":
-            display_label = "best global EigenPro-style PCG"
+            display_label = "global EP-style"
         elif label == "Active inverse":
-            display_label = "Exact active-block solve"
+            display_label = "exact block"
         style = METHOD_STYLES.get(display_label, METHOD_STYLES.get(label, {"color": GRAY, "linestyle": ":", "linewidth": 1.0}))
         if available:
             baseline_iters = _to_float(base.get("iters"))
@@ -1098,7 +1122,7 @@ def _plot_boxeig_sweep_rows(plot_rows: list[dict[str, Any]], out_dir: Path, *, s
         elif label == "Active inverse":
             baseline_iters = _to_float(base.get("iters"))
             baseline_time = _to_float(base.get("time_total"))
-            fail_label = "exact active solve (not converged)"
+            fail_label = "exact block, not conv."
             if math.isfinite(baseline_iters) and marker_x > 0:
                 axes[0].scatter(
                     [marker_x],
@@ -1123,7 +1147,7 @@ def _plot_boxeig_sweep_rows(plot_rows: list[dict[str, Any]], out_dir: Path, *, s
                 )
 
     axes[0].set_xlabel("spectral rank q")
-    axes[0].set_ylabel("PCG iterations (log scale)")
+    axes[0].set_ylabel("PCG iterations")
     axes[0].set_yscale("log")
     axes[0].set_title("Iterations")
     axes[0].grid(True, which="both", alpha=0.22, linewidth=0.5)
@@ -1133,7 +1157,7 @@ def _plot_boxeig_sweep_rows(plot_rows: list[dict[str, Any]], out_dir: Path, *, s
     axes[1].set_title("Total time")
     axes[1].grid(True, alpha=0.22, linewidth=0.5)
     _panel_label(axes[1], "(b)")
-    fig.suptitle(r"Matérn USGS, $N=3\times 10^8$, $M=35721$", fontsize=9)
+    fig.suptitle(r"Matern USGS, $N=3\times 10^8$, $M=35721$", fontsize=9)
     handles: list[Any] = []
     labels: list[str] = []
     for ax in axes:
@@ -1143,7 +1167,17 @@ def _plot_boxeig_sweep_rows(plot_rows: list[dict[str, Any]], out_dir: Path, *, s
                 handles.append(handle)
                 labels.append(text)
     if handles:
-        fig.legend(handles, labels, frameon=False, loc="lower center", bbox_to_anchor=(0.5, -0.08), ncol=3)
+        fig.legend(
+            handles,
+            labels,
+            frameon=False,
+            loc="center left",
+            bbox_to_anchor=(0.80, 0.50),
+            ncol=1,
+            handlelength=1.8,
+            labelspacing=0.45,
+            borderaxespad=0.0,
+        )
     paths = _save_figure(fig, out_dir, stem)
     plt.close(fig)
     return paths
@@ -1690,7 +1724,8 @@ def _rerender_mechanism_from_saved(out_dir: Path, active_csv: Path, spectrum_csv
         raise ValueError(f"No active-score profiles could be read from {active_csv}")
     if raw.size == 0 or corrected.size == 0:
         raise ValueError(f"No raw/corrected spectrum could be read from {spectrum_csv}")
-    fig, axes = plt.subplots(1, 3, figsize=_double_col_size(2.2), constrained_layout=True)
+    fig, axes = plt.subplots(1, 3, figsize=(7.2, 2.65), constrained_layout=False)
+    fig.subplots_adjust(left=0.07, right=0.985, top=0.83, bottom=0.20, wspace=0.35)
     _plot_active_score_profiles(axes[0], profiles)
     axes[0].set_title("Active-score mass")
     _panel_label(axes[0], "(a)")
