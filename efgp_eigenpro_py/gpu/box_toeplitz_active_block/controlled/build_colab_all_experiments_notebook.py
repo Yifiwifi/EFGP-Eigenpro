@@ -686,6 +686,7 @@ def build_notebook() -> dict:
             CONTROLLED_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
             RUNTIME_CONFIG_ROOT.mkdir(parents=True, exist_ok=True)
             expected_controlled_case_count = 0
+            selected_case_records = []
 
             selected_profiles = []
             if RUN_CG_SCREEN_10M: selected_profiles.append("screen_10m")
@@ -722,6 +723,14 @@ def build_notebook() -> dict:
                 runtime_path = RUNTIME_CONFIG_ROOT / f"{profile_name}.json"
                 runtime_path.write_text(json.dumps(runtime_suite, indent=2), encoding="utf-8")
                 output_root = CONTROLLED_OUTPUT_ROOT / profile_name
+                for case in cases:
+                    selected_case_records.append({
+                        "output_group": profile_name,
+                        "suite_profile": profile_name,
+                        "case_id": case["id"],
+                        "run_dir": output_root / case["id"],
+                        "scale_role": case.get("scale_role"),
+                    })
                 run_cmd([
                     sys.executable, "-m",
                     "efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.suite",
@@ -763,7 +772,16 @@ def build_notebook() -> dict:
                 runtime_path = RUNTIME_CONFIG_ROOT / f"{label}.json"
                 runtime_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
                 output_root = CONTROLLED_OUTPUT_ROOT / label
-                expected_controlled_case_count += len(payload["profiles"][profile_name]["cases"])
+                extra_cases = payload["profiles"][profile_name]["cases"]
+                expected_controlled_case_count += len(extra_cases)
+                for case in extra_cases:
+                    selected_case_records.append({
+                        "output_group": label,
+                        "suite_profile": profile_name,
+                        "case_id": case["id"],
+                        "run_dir": output_root / case["id"],
+                        "scale_role": case.get("scale_role"),
+                    })
                 run_cmd([
                     sys.executable, "-m",
                     "efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.suite",
@@ -788,20 +806,48 @@ def build_notebook() -> dict:
     cells.append(
         _code(
             r"""
-            controlled_manifests = sorted(CONTROLLED_OUTPUT_ROOT.rglob("system_manifest.json"))
+            expected_controlled_case_count = len(selected_case_records)
+            selected_run_dirs = {
+                Path(record["run_dir"]).resolve() for record in selected_case_records
+            }
+            discovered_run_dirs = {
+                path.parent.resolve()
+                for path in CONTROLLED_OUTPUT_ROOT.rglob("system_manifest.json")
+            }
+            ignored_stale_dirs = sorted(discovered_run_dirs - selected_run_dirs, key=str)
             audit_rows = []
-            for manifest_path in controlled_manifests:
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                config_path = manifest_path.with_name("experiment_config.json")
-                complete_path = manifest_path.with_name("run_complete.json")
-                summary_path = manifest_path.with_name("matched_summary.csv")
-                config = json.loads(config_path.read_text(encoding="utf-8"))
+            for record in selected_case_records:
+                run_dir = Path(record["run_dir"]).resolve()
+                manifest_path = run_dir / "system_manifest.json"
+                config_path = run_dir / "experiment_config.json"
+                complete_path = run_dir / "run_complete.json"
+                summary_path = run_dir / "matched_summary.csv"
                 problems = []
-                if not manifest.get("system_unchanged"): problems.append("system changed")
-                if manifest.get("nufft_backend_resolved") != "cufinufft": problems.append("backend fallback")
-                if manifest.get("nufft_stage") != "cufinufft": problems.append("NUFFT stage is not GPU")
-                if manifest.get("precision_mode") != "fp64": problems.append("not fp64")
-                if not config.get("strict_gpu_eig"): problems.append("strict_gpu_eig false")
+                warnings = []
+                manifest = {}
+                config = {}
+                if not manifest_path.is_file():
+                    problems.append("missing system_manifest.json")
+                else:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    if not manifest.get("system_unchanged"): problems.append("system changed")
+                    if manifest.get("nufft_backend_resolved") != "cufinufft": problems.append("backend fallback")
+                    if manifest.get("nufft_stage") != "cufinufft": problems.append("NUFFT stage is not GPU")
+                    if manifest.get("precision_mode") != "fp64": problems.append("not fp64")
+                    missing_component_hashes = [
+                        field for field in ("weights_sha256", "gf_sha256", "rhs_sha256")
+                        if not manifest.get(field)
+                    ]
+                    if missing_component_hashes:
+                        warnings.append(
+                            "legacy manifest lacks component hashes: "
+                            + ", ".join(missing_component_hashes)
+                        )
+                if not config_path.is_file():
+                    problems.append("missing experiment_config.json")
+                else:
+                    config = json.loads(config_path.read_text(encoding="utf-8"))
+                    if not config.get("strict_gpu_eig"): problems.append("strict_gpu_eig false")
                 if not complete_path.is_file(): problems.append("missing run_complete.json")
                 if not summary_path.is_file():
                     problems.append("missing matched_summary.csv")
@@ -809,7 +855,7 @@ def build_notebook() -> dict:
                     matched = pd.read_csv(summary_path)
                     required_columns = {
                         "method", "measured_repeats", "converged_repeats",
-                        "performance_claim_eligible", "true_relres_max",
+                        "performance_claim_eligible", "true_relres_max", "cold_speedup_median",
                     }
                     if not required_columns.issubset(matched.columns):
                         problems.append("matched summary lacks eligibility columns")
@@ -820,20 +866,58 @@ def build_notebook() -> dict:
                             matched["measured_repeats"].astype(int).eq(expected_repeats)
                             & matched["converged_repeats"].astype(int).eq(expected_repeats)
                         )
-                        if not bool((eligible & five_of_five).all()):
-                            bad_methods = matched.loc[~(eligible & five_of_five), "method"].astype(str).tolist()
+                        true_relres_ok = pd.to_numeric(
+                            matched["true_relres_max"], errors="coerce"
+                        ).le(float(config.get("tol", 1e-7)))
+                        claim_ok = eligible & five_of_five & true_relres_ok
+                        if not bool(claim_ok.all()):
+                            bad_methods = matched.loc[~claim_ok, "method"].astype(str).tolist()
                             problems.append(f"ineligible/nonconverged methods: {bad_methods}")
+                        cg = matched.loc[matched["method"].astype(str).eq("cg")]
+                        cg_speed = pd.to_numeric(cg.get("cold_speedup_median"), errors="coerce")
+                        if len(cg) != 1 or not bool((cg_speed - 1.0).abs().le(1e-12).all()):
+                            problems.append("CG cold speedup is not exactly one")
+                        if {"build_seconds_median", "build_seconds_max"}.issubset(matched.columns):
+                            build_median = pd.to_numeric(matched["build_seconds_median"], errors="coerce")
+                            build_max = pd.to_numeric(matched["build_seconds_max"], errors="coerce")
+                            jitter = build_median.gt(0.01) & build_max.gt(1.5 * build_median)
+                            if bool(jitter.any()):
+                                warnings.append(
+                                    "build-time spikes: "
+                                    + ", ".join(matched.loc[jitter, "method"].astype(str).tolist())
+                                )
                 audit_rows.append({
-                    "case": manifest_path.parent.name,
+                    "output_group": record["output_group"],
+                    "suite_profile": record["suite_profile"],
+                    "case": record["case_id"],
                     "N": manifest.get("n_train"),
                     "system_id": manifest.get("system_id"),
+                    "weights_sha256": manifest.get("weights_sha256"),
+                    "gf_sha256": manifest.get("gf_sha256"),
+                    "rhs_sha256": manifest.get("rhs_sha256"),
+                    "warning": "; ".join(warnings),
                     "status": "PASS" if not problems else "FAIL: " + "; ".join(problems),
                 })
-            controlled_artifact_audit = pd.DataFrame(audit_rows)
+            controlled_artifact_audit = pd.DataFrame(
+                audit_rows,
+                columns=[
+                    "output_group", "suite_profile", "case", "N", "system_id",
+                    "weights_sha256", "gf_sha256", "rhs_sha256", "warning", "status",
+                ],
+            )
+            CONTROLLED_AUDIT_PATH = DRIVE_RUN_ROOT / "controlled_artifact_audit.csv"
+            controlled_artifact_audit.to_csv(CONTROLLED_AUDIT_PATH, index=False)
+            ignored_controlled_artifacts = pd.DataFrame({
+                "ignored_stale_run_dir": [str(path) for path in ignored_stale_dirs]
+            })
+            IGNORED_ARTIFACTS_PATH = DRIVE_RUN_ROOT / "ignored_stale_controlled_artifacts.csv"
+            ignored_controlled_artifacts.to_csv(IGNORED_ARTIFACTS_PATH, index=False)
             display(controlled_artifact_audit)
-            if expected_controlled_case_count and len(controlled_artifact_audit) < expected_controlled_case_count:
+            if ignored_stale_dirs:
+                print(f"Ignored {len(ignored_stale_dirs)} stale/non-selected controlled run directories.")
+            if len(controlled_artifact_audit) != expected_controlled_case_count:
                 raise RuntimeError(
-                    f"Expected at least {expected_controlled_case_count} controlled cases, "
+                    f"Expected exactly {expected_controlled_case_count} controlled cases, "
                     f"but found {len(controlled_artifact_audit)} manifests."
                 )
             if not controlled_artifact_audit.empty and not controlled_artifact_audit["status"].eq("PASS").all():
@@ -854,17 +938,53 @@ def build_notebook() -> dict:
         _code(
             r"""
             prediction_outputs = []
+            expected_prediction_case_count = 0
             if RUN_PREDICTION_AUDIT:
-                for config_path in sorted(CONTROLLED_OUTPUT_ROOT.rglob("experiment_config.json")):
-                    manifest_path = config_path.with_name("system_manifest.json")
+                if not selected_case_records:
+                    raise RuntimeError(
+                        "RUN_PREDICTION_AUDIT requires at least one selected controlled profile in this invocation."
+                    )
+                prediction_targets = []
+                for record in selected_case_records:
+                    config_path = Path(record["run_dir"]) / "experiment_config.json"
+                    manifest_path = Path(record["run_dir"]) / "system_manifest.json"
                     if not manifest_path.is_file():
-                        continue
+                        raise RuntimeError(f"Prediction target lacks manifest: {record['run_dir']}")
                     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
                     n_train = int(manifest["n_train"])
                     if n_train > int(PREDICTION_AUDIT_MAX_TRAIN_N):
                         continue
+                    prediction_targets.append((record, config_path, manifest))
+                expected_prediction_case_count = len(prediction_targets)
+                if expected_prediction_case_count == 0:
+                    raise RuntimeError(
+                        "No selected controlled case is within PREDICTION_AUDIT_MAX_TRAIN_N."
+                    )
+                for record, config_path, manifest in prediction_targets:
                     audit_out = config_path.parent / "prediction_audit"
                     if (audit_out / "prediction_audit.json").is_file():
+                        existing = json.loads(
+                            (audit_out / "prediction_audit.json").read_text(encoding="utf-8")
+                        )
+                        current_config_sha = hashlib.sha256(config_path.read_bytes()).hexdigest()
+                        if existing.get("config_source_sha256") != current_config_sha:
+                            raise RuntimeError(
+                                f"Stale prediction audit for {record['case_id']}; change RUN_TAG or remove only that audit."
+                            )
+                        if existing.get("dataset_content_index_sha256") != manifest.get("dataset_content_index_sha256"):
+                            raise RuntimeError(
+                                f"Prediction audit data mismatch for {record['case_id']}; change RUN_TAG."
+                            )
+                        audit_source_sha = existing.get("source_bundle_sha256")
+                        timing_source_sha = manifest.get("source_bundle_sha256")
+                        if (
+                            audit_source_sha is not None
+                            and timing_source_sha is not None
+                            and audit_source_sha != timing_source_sha
+                        ):
+                            raise RuntimeError(
+                                f"Prediction audit source mismatch for {record['case_id']}; change RUN_TAG."
+                            )
                         print("Prediction audit already exists; skipping", config_path.parent.name)
                         prediction_outputs.append(audit_out)
                         continue
@@ -887,33 +1007,168 @@ def build_notebook() -> dict:
             r"""
             # D. 统一结果索引与图
 
-            统一索引只负责查找和展示，不跨 protocol 计算 speedup。Controlled 表的 `cold_speedup_median` 是 selection/build+solve、排除公共 Fourier setup；`shared_fourier_setup_plus_method_speedup_median` 才是把公共 setup 加回两边后的比值。
+            统一索引只负责查找和展示，不跨 protocol 计算 speedup。每行保留 `output_group/case_id`、科学配置哈希、数据与源码哈希；历史 profile 可以共存在 catalog 中，但作图必须按 profile 隔离。Controlled 表的 `cold_speedup_median` 是 selection/build+solve、排除公共 Fourier setup；`shared_fourier_setup_plus_method_speedup_median` 才是把公共 setup 加回两边后的比值。
+
+            `paper_10m` 是固定规模的方法比较，单独画带范围的分组图和速度–内存 Pareto 图；三种 `scale_*` protocol 各自分图。旧的 `controlled_scale_speedup.png` 会被标记为 deprecated，不再作为论文证据。
             """
         )
     )
     cells.append(
         _code(
             r"""
+            import re
+
+            def dataset_family_label(stem):
+                text = str(stem or "")
+                lower = text.lower()
+                if "synthetic_true_func_2d" in lower:
+                    return "Synthetic"
+                if "winnebago" in lower:
+                    return "Winnebago"
+                if "usgs_ept_wi_2county_1_b23" in lower:
+                    return "Manitowoc"
+                return text
+
+            CONFIG_INDEX_FIELDS = (
+                "kernel_family", "lengthscale", "nu", "variance", "reg_lambda",
+                "fourier_eps", "nufft_tol", "l2_scaled", "tol", "maxiter",
+                "precision", "subset_mode", "subset_seed", "score_tau", "box_budget",
+                "inverse_max_size", "rank", "nystrom_rank", "rpcholesky_rank",
+                "eig_tol", "eig_maxiter", "measured_repeats", "warmup_repeats",
+                "method_order_seed", "eig_seed", "nystrom_seed", "rpcholesky_seed",
+                "precompute_chunk_size", "strict_gpu_eig",
+            )
+            SYSTEM_COMPONENT_FIELDS = ("weights_sha256", "gf_sha256", "rhs_sha256")
+
+            def dataset_series_id(stem):
+                return re.sub(r"_n(?:train)?\d+$", "", str(stem or ""), flags=re.IGNORECASE)
+            selected_record_by_dir = {
+                str(Path(record["run_dir"]).resolve()): record
+                for record in selected_case_records
+            }
             result_frames = []
+            controlled_frames = []
             for summary_path in sorted(CONTROLLED_OUTPUT_ROOT.rglob("matched_summary.csv")):
                 frame = pd.read_csv(summary_path)
+                run_dir = summary_path.parent.resolve()
                 manifest = json.loads(summary_path.with_name("system_manifest.json").read_text(encoding="utf-8"))
+                config_path = summary_path.with_name("experiment_config.json")
+                config = json.loads(config_path.read_text(encoding="utf-8"))
+                relative_parts = run_dir.relative_to(CONTROLLED_OUTPUT_ROOT.resolve()).parts
+                output_group = relative_parts[0] if relative_parts else "unknown"
+                selected_record = selected_record_by_dir.get(str(run_dir))
                 frame["protocol_family"] = "controlled_fixed_system"
                 frame["evidence_role"] = "paired_scale_or_replication"
                 frame["timing_scope"] = "selection/build + solve; shared Fourier setup excluded from cold columns"
-                frame["case"] = summary_path.parent.name
+                frame["output_group"] = output_group
+                frame["suite_profile"] = (
+                    selected_record.get("suite_profile") if selected_record else output_group
+                )
+                frame["case"] = run_dir.name
+                frame["case_id"] = run_dir.name
+                frame["run_dir"] = str(run_dir)
+                frame["selected_in_this_invocation"] = selected_record is not None
+                frame["scale_role"] = selected_record.get("scale_role") if selected_record else None
                 frame["dataset_stem"] = manifest.get("dataset_stem")
+                frame["dataset_family"] = dataset_family_label(manifest.get("dataset_stem"))
+                frame["dataset_series_id"] = dataset_series_id(manifest.get("dataset_stem"))
                 frame["N"] = manifest.get("n_train")
                 frame["system_id"] = manifest.get("system_id")
+                for field in SYSTEM_COMPONENT_FIELDS:
+                    frame[field] = manifest.get(field)
+                frame["config_sha256"] = hashlib.sha256(config_path.read_bytes()).hexdigest()
+                frame["source_bundle_sha256"] = manifest.get("source_bundle_sha256")
+                frame["dataset_content_index_sha256"] = manifest.get("dataset_content_index_sha256")
+                frame["dataset_metadata_sha256"] = manifest.get("dataset_metadata_sha256")
+                frame["nufft_backend_resolved"] = manifest.get("nufft_backend_resolved")
+                frame["nufft_stage"] = manifest.get("nufft_stage")
+                frame["precision_mode"] = manifest.get("precision_mode")
+                for field in CONFIG_INDEX_FIELDS:
+                    frame[f"cfg_{field}"] = config.get(field)
+                scientific_config = {field: config.get(field) for field in CONFIG_INDEX_FIELDS}
+                frame["scientific_config_id"] = hashlib.sha256(
+                    json.dumps(scientific_config, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                ).hexdigest()
+                expected_repeats = int(config.get("measured_repeats", 5))
+                eligible = frame["performance_claim_eligible"].astype(str).str.lower().eq("true")
+                artifact_eligible = bool(
+                    manifest.get("system_unchanged")
+                    and manifest.get("nufft_backend_resolved") == "cufinufft"
+                    and manifest.get("nufft_stage") == "cufinufft"
+                    and manifest.get("precision_mode") == "fp64"
+                    and config.get("strict_gpu_eig")
+                    and summary_path.with_name("run_complete.json").is_file()
+                )
+                frame["artifact_eligible"] = artifact_eligible
+                frame["claim_eligible"] = (
+                    eligible
+                    & artifact_eligible
+                    & pd.to_numeric(frame["measured_repeats"], errors="coerce").eq(expected_repeats)
+                    & pd.to_numeric(frame["converged_repeats"], errors="coerce").eq(expected_repeats)
+                    & pd.to_numeric(frame["true_relres_max"], errors="coerce").le(float(config.get("tol", 1e-7)))
+                )
+                controlled_frames.append(frame)
                 result_frames.append(frame)
 
             for audit_path in sorted(CONTROLLED_OUTPUT_ROOT.rglob("prediction_audit.csv")):
                 frame = pd.read_csv(audit_path)
+                run_dir = audit_path.parent.parent.resolve()
+                manifest = json.loads((run_dir / "system_manifest.json").read_text(encoding="utf-8"))
+                audit_payload_path = audit_path.with_suffix(".json")
+                audit_payload = (
+                    json.loads(audit_payload_path.read_text(encoding="utf-8"))
+                    if audit_payload_path.is_file() else {}
+                )
+                relative_parts = run_dir.relative_to(CONTROLLED_OUTPUT_ROOT.resolve()).parts
+                output_group = relative_parts[0] if relative_parts else "unknown"
+                selected_record = selected_record_by_dir.get(str(run_dir))
+                frame["audit_system_id"] = frame["system_id"]
+                frame["timing_system_id"] = manifest.get("system_id")
+                for field in SYSTEM_COMPONENT_FIELDS:
+                    frame[f"audit_{field}"] = audit_payload.get(field)
+                    frame[f"timing_{field}"] = manifest.get(field)
+                frame["audit_rebuilt_system"] = True
                 frame["protocol_family"] = "prediction_audit"
                 frame["evidence_role"] = "accuracy_only"
                 frame["timing_scope"] = "excluded from all speed claims"
-                frame["case"] = audit_path.parent.parent.name
+                frame["output_group"] = output_group
+                frame["suite_profile"] = (
+                    selected_record.get("suite_profile") if selected_record else output_group
+                )
+                frame["case"] = run_dir.name
+                frame["case_id"] = run_dir.name
+                frame["run_dir"] = str(run_dir)
+                frame["selected_in_this_invocation"] = selected_record is not None
+                frame["dataset_stem"] = manifest.get("dataset_stem")
+                frame["dataset_family"] = dataset_family_label(manifest.get("dataset_stem"))
+                frame["dataset_series_id"] = dataset_series_id(manifest.get("dataset_stem"))
+                frame["N"] = manifest.get("n_train")
                 result_frames.append(frame)
+
+            controlled_catalog = (
+                pd.concat(controlled_frames, ignore_index=True, sort=False)
+                if controlled_frames else pd.DataFrame()
+            )
+            if not controlled_catalog.empty:
+                duplicate_key = ["output_group", "case_id", "method"]
+                duplicated = controlled_catalog.duplicated(duplicate_key, keep=False)
+                if bool(duplicated.any()):
+                    raise RuntimeError(
+                        "Duplicate controlled summary rows:\n"
+                        + controlled_catalog.loc[duplicated, duplicate_key].to_string(index=False)
+                    )
+            SELECTED_CONTROLLED_INDEX_PATH = DRIVE_RUN_ROOT / "selected_controlled_index.csv"
+            selected_controlled = (
+                controlled_catalog.loc[controlled_catalog["selected_in_this_invocation"]].copy()
+                if not controlled_catalog.empty else pd.DataFrame()
+            )
+            selected_controlled.to_csv(SELECTED_CONTROLLED_INDEX_PATH, index=False)
+            INELIGIBLE_INDEX_PATH = DRIVE_RUN_ROOT / "controlled_ineligible_rows.csv"
+            ineligible_controlled = (
+                controlled_catalog.loc[~controlled_catalog["claim_eligible"]].copy()
+                if not controlled_catalog.empty else pd.DataFrame()
+            )
+            ineligible_controlled.to_csv(INELIGIBLE_INDEX_PATH, index=False)
 
             if not legacy_all.empty:
                 result_frames.append(legacy_all)
@@ -929,24 +1184,300 @@ def build_notebook() -> dict:
         _code(
             r"""
             import matplotlib.pyplot as plt
-            controlled_plot = all_experiments[
-                all_experiments.get("protocol_family", pd.Series(dtype=str)).eq("controlled_fixed_system")
-            ].copy() if not all_experiments.empty else pd.DataFrame()
-            if not controlled_plot.empty and {"N", "cold_speedup_median", "method"}.issubset(controlled_plot.columns):
-                fig, ax = plt.subplots(figsize=(9, 5))
-                for (dataset, method), group in controlled_plot.dropna(subset=["cold_speedup_median"]).groupby(["dataset_stem", "method"]):
-                    group = group.sort_values("N")
-                    ax.plot(group["N"], group["cold_speedup_median"], marker="o", label=f"{dataset} | {method}")
-                ax.set_xscale("log")
-                ax.axhline(1.0, color="black", lw=1)
-                ax.set_xlabel("training rows N")
+            import numpy as np
+            from matplotlib.lines import Line2D
+
+            METHOD_ORDER = ["cg", "jacobi", "default", "full-eig", "nystrom", "rpcholesky"]
+            METHOD_COLORS = {
+                "cg": "#4C78A8",
+                "jacobi": "#9D9D9D",
+                "default": "#E45756",
+                "full-eig": "#72B7B2",
+                "nystrom": "#54A24B",
+                "rpcholesky": "#B279A2",
+            }
+            DATASET_ORDER = ["Manitowoc", "Winnebago", "Synthetic"]
+            GENERATED_PLOT_PATHS = []
+
+            def assert_cg_reference_one(frame, *, context):
+                cg = frame.loc[frame["method"].astype(str).eq("cg")]
+                values = pd.to_numeric(cg["cold_speedup_median"], errors="coerce").to_numpy(float)
+                if values.size == 0 or not np.isfinite(values).all() or not np.allclose(
+                    values, 1.0, rtol=0.0, atol=1e-12
+                ):
+                    raise RuntimeError(f"{context}: CG cold speedup must be exactly one; got {values}")
+
+            controlled_plot = controlled_catalog.copy()
+            if not controlled_plot.empty:
+                controlled_plot = controlled_plot.loc[controlled_plot["claim_eligible"]].copy()
+
+            # paper_10m is a method comparison at one N, not a scale curve.
+            paper_plot = (
+                controlled_plot.loc[
+                    controlled_plot["output_group"].eq("paper_10m")
+                    & pd.to_numeric(controlled_plot["N"], errors="coerce").eq(10_000_000)
+                ].copy()
+                if not controlled_plot.empty else pd.DataFrame()
+            )
+            if not paper_plot.empty:
+                assert_cg_reference_one(paper_plot, context="paper_10m")
+                paper_key = ["dataset_family", "method"]
+                if bool(paper_plot.duplicated(paper_key, keep=False).any()):
+                    raise RuntimeError("paper_10m has duplicate dataset/method rows; refusing to aggregate them.")
+                dataset_order = [name for name in DATASET_ORDER if name in set(paper_plot["dataset_family"])]
+                dataset_order += sorted(set(paper_plot["dataset_family"]) - set(dataset_order))
+                x = np.arange(len(dataset_order), dtype=float)
+                width = 0.13
+                fig, ax = plt.subplots(figsize=(11.5, 6.2))
+                for method_index, method in enumerate(METHOD_ORDER):
+                    rows = paper_plot.loc[paper_plot["method"].eq(method)].set_index("dataset_family")
+                    if rows.empty:
+                        continue
+                    values = np.asarray([
+                        float(rows.loc[name, "cold_speedup_median"]) if name in rows.index else np.nan
+                        for name in dataset_order
+                    ])
+                    mins = np.asarray([
+                        float(rows.loc[name, "cold_speedup_min"]) if name in rows.index else np.nan
+                        for name in dataset_order
+                    ])
+                    maxs = np.asarray([
+                        float(rows.loc[name, "cold_speedup_max"]) if name in rows.index else np.nan
+                        for name in dataset_order
+                    ])
+                    positions = x + (method_index - (len(METHOD_ORDER) - 1) / 2) * width
+                    yerr = np.vstack([
+                        np.nan_to_num(np.maximum(values - mins, 0.0)),
+                        np.nan_to_num(np.maximum(maxs - values, 0.0)),
+                    ])
+                    bars = ax.bar(
+                        positions, values, width=width, color=METHOD_COLORS[method], label=method,
+                        yerr=yerr, capsize=2, linewidth=0.4, edgecolor="white",
+                    )
+                    for bar, value in zip(bars, values):
+                        if np.isfinite(value):
+                            ax.text(
+                                bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.12,
+                                f"{value:.2f}", ha="center", va="bottom", fontsize=7, rotation=90,
+                            )
+                ax.axhline(1.0, color="black", lw=1, ls="--")
+                ax.set_xticks(x, dataset_order)
                 ax.set_ylabel("paired cold speedup over CG")
-                ax.grid(True, alpha=.25)
-                ax.legend(fontsize=7, bbox_to_anchor=(1.02, 1), loc="upper left")
+                ax.set_title("Controlled 10M: selection/build + solve (median; whiskers=min–max)")
+                ax.grid(axis="y", alpha=.25)
+                ax.legend(ncol=3, frameon=False, loc="upper left")
                 fig.tight_layout()
-                plot_path = DRIVE_RUN_ROOT / "controlled_scale_speedup.png"
-                fig.savefig(plot_path, dpi=180, bbox_inches="tight")
+                paper_plot_path = DRIVE_RUN_ROOT / "controlled_10m_method_speedup.png"
+                fig.savefig(paper_plot_path, dpi=180, bbox_inches="tight")
+                GENERATED_PLOT_PATHS.append(paper_plot_path)
                 plt.show()
+                PAPER_10M_SUMMARY_PATH = DRIVE_RUN_ROOT / "controlled_10m_method_summary.csv"
+                paper_plot.sort_values(["dataset_family", "method"]).to_csv(
+                    PAPER_10M_SUMMARY_PATH, index=False
+                )
+                display(paper_plot[[
+                    "dataset_family", "method", "cold_speedup_median", "cold_speedup_min",
+                    "cold_speedup_max", "shared_fourier_setup_plus_method_speedup_median",
+                    "iterations_median", "build_plus_solve_seconds_median",
+                    "preconditioner_storage_bytes", "claim_eligible",
+                ]].sort_values(["dataset_family", "method"]))
+
+                # The active-box method is memory-capped; show the speed-memory trade-off explicitly.
+                pareto = paper_plot.loc[
+                    paper_plot["method"].ne("cg")
+                    & pd.to_numeric(paper_plot["preconditioner_storage_bytes"], errors="coerce").gt(0)
+                ].copy()
+                if not pareto.empty:
+                    fig, axes = plt.subplots(
+                        1, len(dataset_order), figsize=(5.0 * len(dataset_order), 4.5), squeeze=False,
+                        sharey=True,
+                    )
+                    for ax, dataset in zip(axes[0], dataset_order):
+                        subset = pareto.loc[pareto["dataset_family"].eq(dataset)]
+                        for _, row in subset.iterrows():
+                            memory_mib = float(row["preconditioner_storage_bytes"]) / 2**20
+                            speedup = float(row["cold_speedup_median"])
+                            method = str(row["method"])
+                            ax.scatter(memory_mib, speedup, s=60, color=METHOD_COLORS.get(method, "black"))
+                            ax.annotate(method, (memory_mib, speedup), xytext=(4, 4),
+                                        textcoords="offset points", fontsize=8)
+                        ax.axhline(1.0, color="black", lw=1, ls="--")
+                        ax.set_xscale("log")
+                        ax.set_title(dataset)
+                        ax.set_xlabel("preconditioner storage (MiB, log scale)")
+                        ax.grid(True, alpha=.25)
+                    axes[0][0].set_ylabel("paired cold speedup over CG")
+                    fig.suptitle("Controlled 10M speed-memory trade-off", y=1.02)
+                    fig.tight_layout()
+                    pareto_path = DRIVE_RUN_ROOT / "controlled_10m_speed_memory_pareto.png"
+                    fig.savefig(pareto_path, dpi=180, bbox_inches="tight")
+                    GENERATED_PLOT_PATHS.append(pareto_path)
+                    plt.show()
+
+            # One-at-a-time robustness scan: lambda varies at ell=0.1, and ell varies at lambda=0.1.
+            oat_plot = (
+                controlled_plot.loc[controlled_plot["output_group"].eq("winnebago_oat_n10m")].copy()
+                if not controlled_plot.empty else pd.DataFrame()
+            )
+            if not oat_plot.empty:
+                assert_cg_reference_one(oat_plot, context="winnebago_oat_n10m")
+                oat_key = ["case_id", "method"]
+                if bool(oat_plot.duplicated(oat_key, keep=False).any()):
+                    raise RuntimeError("winnebago_oat_n10m has duplicate case/method rows.")
+                OAT_SUMMARY_PATH = DRIVE_RUN_ROOT / "winnebago_oat_10m_summary.csv"
+                oat_plot.sort_values(["cfg_reg_lambda", "cfg_lengthscale", "method"]).to_csv(
+                    OAT_SUMMARY_PATH, index=False
+                )
+                oat_methods = [method for method in ("cg", "default", "full-eig")
+                               if method in set(oat_plot["method"])]
+                sweep_specs = [
+                    ("cfg_reg_lambda", "regularization λ", "cfg_lengthscale", 0.1),
+                    ("cfg_lengthscale", "lengthscale ℓ", "cfg_reg_lambda", 0.1),
+                ]
+                fig, axes = plt.subplots(2, 2, figsize=(11.5, 8.2), squeeze=False)
+                for column, (x_field, x_label, fixed_field, fixed_value) in enumerate(sweep_specs):
+                    sweep = oat_plot.loc[
+                        np.isclose(
+                            pd.to_numeric(oat_plot[fixed_field], errors="coerce"),
+                            fixed_value, rtol=0.0, atol=1e-15,
+                        )
+                    ].copy()
+                    ax_speed = axes[0][column]
+                    ax_memory = axes[1][column]
+                    for method in oat_methods:
+                        group = sweep.loc[sweep["method"].eq(method)].sort_values(x_field)
+                        if group.empty:
+                            continue
+                        x_values = pd.to_numeric(group[x_field], errors="raise").to_numpy(float)
+                        y_values = pd.to_numeric(group["cold_speedup_median"], errors="raise").to_numpy(float)
+                        lower = np.maximum(
+                            y_values - pd.to_numeric(group["cold_speedup_min"], errors="raise").to_numpy(float),
+                            0.0,
+                        )
+                        upper = np.maximum(
+                            pd.to_numeric(group["cold_speedup_max"], errors="raise").to_numpy(float) - y_values,
+                            0.0,
+                        )
+                        ax_speed.errorbar(
+                            x_values, y_values, yerr=np.vstack([lower, upper]), marker="o", capsize=3,
+                            color=METHOD_COLORS[method], label=method,
+                        )
+                        memory = pd.to_numeric(
+                            group["preconditioner_storage_bytes"], errors="coerce"
+                        ).to_numpy(float) / 2**20
+                        finite_memory = np.isfinite(memory) & (memory > 0)
+                        if finite_memory.any():
+                            ax_memory.plot(
+                                x_values[finite_memory], memory[finite_memory], marker="o",
+                                color=METHOD_COLORS[method], label=method,
+                            )
+                    for ax in (ax_speed, ax_memory):
+                        ax.set_xscale("log")
+                        ax.set_xlabel(x_label)
+                        ax.grid(True, alpha=.25)
+                    ax_speed.axhline(1.0, color="black", lw=1, ls="--")
+                    ax_speed.set_ylabel("paired cold speedup over CG")
+                    ax_speed.set_title(f"fixed {fixed_field.replace('cfg_', '')}={fixed_value:g}")
+                    ax_memory.set_yscale("log")
+                    ax_memory.set_ylabel("preconditioner storage (MiB, log scale)")
+                axes[0][0].legend(frameon=False)
+                axes[1][0].legend(frameon=False)
+                fig.suptitle("Winnebago 10M one-at-a-time robustness", y=1.01)
+                fig.tight_layout()
+                oat_plot_path = DRIVE_RUN_ROOT / "winnebago_oat_10m_speed_memory.png"
+                fig.savefig(oat_plot_path, dpi=180, bbox_inches="tight")
+                GENERATED_PLOT_PATHS.append(oat_plot_path)
+                plt.show()
+
+            # Scale protocols remain separate: never connect archived exact, development master,
+            # Manitowoc master, OAT, or paper_10m rows into one curve.
+            SCALE_OUTPUT_GROUPS = {
+                "scale_archived_exact", "scale_development_masters", "scale_manitowoc_master"
+            }
+            scale_plot = (
+                controlled_plot.loc[controlled_plot["output_group"].isin(SCALE_OUTPUT_GROUPS)].copy()
+                if not controlled_plot.empty else pd.DataFrame()
+            )
+            for output_group, profile_frame in scale_plot.groupby("output_group", sort=True):
+                assert_cg_reference_one(profile_frame, context=output_group)
+                profile_sources = profile_frame["source_bundle_sha256"].dropna().astype(str)
+                if len(profile_sources) != len(profile_frame) or profile_sources.nunique() != 1:
+                    raise RuntimeError(f"{output_group} mixes or lacks source bundles.")
+                families = [name for name in DATASET_ORDER if name in set(profile_frame["dataset_family"])]
+                families += sorted(set(profile_frame["dataset_family"]) - set(families))
+                fig, axes = plt.subplots(
+                    1, len(families), figsize=(5.2 * len(families), 4.6), squeeze=False, sharey=True,
+                )
+                for ax, family in zip(axes[0], families):
+                    family_frame = profile_frame.loc[profile_frame["dataset_family"].eq(family)]
+                    series_values = family_frame["dataset_series_id"].dropna().astype(str)
+                    if (
+                        len(series_values) != len(family_frame)
+                        or not bool(series_values.str.len().gt(0).all())
+                        or series_values.nunique() != 1
+                    ):
+                        raise RuntimeError(
+                            f"{output_group}/{family} mixes or lacks dataset series."
+                        )
+                    data_fields = [
+                        "N", "dataset_stem", "dataset_content_index_sha256",
+                        "dataset_metadata_sha256",
+                    ]
+                    case_data = family_frame[data_fields].drop_duplicates()
+                    if bool(case_data[data_fields].isna().any().any()):
+                        raise RuntimeError(f"{output_group}/{family} lacks dataset provenance.")
+                    if bool(pd.to_numeric(case_data["N"], errors="coerce").duplicated().any()):
+                        raise RuntimeError(
+                            f"{output_group}/{family} has multiple data artifacts for one N."
+                        )
+                    if output_group in {"scale_development_masters", "scale_manitowoc_master"}:
+                        for field in (
+                            "dataset_stem", "dataset_content_index_sha256", "dataset_metadata_sha256"
+                        ):
+                            if case_data[field].astype(str).nunique() != 1:
+                                raise RuntimeError(
+                                    f"{output_group}/{family} does not reuse one master {field}."
+                                )
+                    for method in METHOD_ORDER:
+                        group = family_frame.loc[family_frame["method"].eq(method)].sort_values("N")
+                        if group.empty:
+                            continue
+                        if group["scientific_config_id"].nunique(dropna=False) != 1:
+                            raise RuntimeError(
+                                f"{output_group}/{family}/{method} mixes scientific configurations."
+                            )
+                        if bool(pd.to_numeric(group["N"], errors="coerce").duplicated().any()):
+                            raise RuntimeError(f"{output_group}/{family}/{method} has duplicate N values.")
+                        x_values = pd.to_numeric(group["N"], errors="raise").to_numpy(float)
+                        y_values = pd.to_numeric(group["cold_speedup_median"], errors="raise").to_numpy(float)
+                        linestyle = "-" if np.unique(x_values).size >= 2 else "None"
+                        ax.plot(
+                            x_values, y_values, marker="o", ls=linestyle,
+                            color=METHOD_COLORS.get(method), label=method,
+                        )
+                    ax.set_xscale("log")
+                    ax.axhline(1.0, color="black", lw=1, ls="--")
+                    ax.set_title(family)
+                    ax.set_xlabel("training rows N")
+                    ax.grid(True, alpha=.25)
+                axes[0][0].set_ylabel("paired cold speedup over CG")
+                handles = [
+                    Line2D([0], [0], marker="o", color=METHOD_COLORS[m], label=m)
+                    for m in METHOD_ORDER if m in set(profile_frame["method"])
+                ]
+                fig.legend(handles=handles, ncol=min(3, len(handles)), frameon=False,
+                           loc="upper center", bbox_to_anchor=(0.5, 1.04))
+                fig.suptitle(f"Controlled scale: {output_group}", y=1.11)
+                fig.tight_layout()
+                scale_plot_path = DRIVE_RUN_ROOT / f"{output_group}_cold_speedup.png"
+                fig.savefig(scale_plot_path, dpi=180, bbox_inches="tight")
+                GENERATED_PLOT_PATHS.append(scale_plot_path)
+                plt.show()
+
+            deprecated_plot = DRIVE_RUN_ROOT / "controlled_scale_speedup.png"
+            if deprecated_plot.is_file():
+                print("Deprecated ambiguous plot remains on Drive but is excluded:", deprecated_plot)
+            print("Generated plot paths:", [str(path) for path in GENERATED_PLOT_PATHS])
             """
         )
     )
@@ -974,13 +1505,27 @@ def build_notebook() -> dict:
                 "legacy_groups": list(RUN_LEGACY_GROUPS),
                 "controlled_profiles": selected_profiles,
                 "controlled_case_count": int(len(controlled_artifact_audit)),
+                "expected_controlled_case_count": int(expected_controlled_case_count),
+                "selected_controlled_cases": [
+                    {
+                        **{key: value for key, value in record.items() if key != "run_dir"},
+                        "run_dir": str(record["run_dir"]),
+                    }
+                    for record in selected_case_records
+                ],
+                "ignored_stale_controlled_run_count": int(len(ignored_stale_dirs)),
                 "all_controlled_artifacts_pass": (
                     None if expected_controlled_case_count == 0 else bool(
-                        len(controlled_artifact_audit) >= expected_controlled_case_count
+                        len(controlled_artifact_audit) == expected_controlled_case_count
                         and controlled_artifact_audit["status"].eq("PASS").all()
                     )
                 ),
                 "unified_index": str(INDEX_PATH),
+                "selected_controlled_index": str(SELECTED_CONTROLLED_INDEX_PATH),
+                "controlled_artifact_audit": str(CONTROLLED_AUDIT_PATH),
+                "controlled_ineligible_rows": str(INELIGIBLE_INDEX_PATH),
+                "generated_plots": [str(path) for path in GENERATED_PLOT_PATHS],
+                "expected_prediction_case_count": int(expected_prediction_case_count),
             }
             legacy_complete = all(
                 (DRIVE_RUN_ROOT / "legacy_archived_pipeline" / group / "_SUCCESS.json").is_file()
@@ -989,11 +1534,18 @@ def build_notebook() -> dict:
             controlled_complete = (
                 expected_controlled_case_count == 0
                 or (
-                    len(controlled_artifact_audit) >= expected_controlled_case_count
+                    len(controlled_artifact_audit) == expected_controlled_case_count
                     and controlled_artifact_audit["status"].eq("PASS").all()
                 )
             )
-            prediction_complete = (not RUN_PREDICTION_AUDIT) or bool(prediction_outputs)
+            prediction_complete = (
+                not RUN_PREDICTION_AUDIT
+                or (
+                    expected_prediction_case_count > 0
+                    and len(prediction_outputs) == expected_prediction_case_count
+                    and all((Path(path) / "prediction_audit.json").is_file() for path in prediction_outputs)
+                )
+            )
             workload_requested = bool(
                 RUN_LEGACY_GROUPS or selected_profiles or extra_suites or RUN_PREDICTION_AUDIT
             )

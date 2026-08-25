@@ -7,8 +7,10 @@ import json
 import math
 import os
 import subprocess
+import sys
 import tempfile
 import time
+import traceback
 import warnings
 import zipfile
 from dataclasses import asdict, dataclass, replace
@@ -247,6 +249,21 @@ def system_fingerprint(data_ctx: Any, reg_lambda: float) -> str:
     _hash_array(hasher, "rhs", data_ctx.rhs_gpu)
     hasher.update(np.asarray([float(reg_lambda)], dtype=np.float64).tobytes())
     return hasher.hexdigest()
+
+
+def system_component_fingerprints(data_ctx: Any) -> dict[str, str]:
+    """Hash each fixed-system component separately for cross-run provenance."""
+    components = {
+        "weights_sha256": ("weights", data_ctx.weights_gpu_flat),
+        "gf_sha256": ("gf", data_ctx.gf_gpu),
+        "rhs_sha256": ("rhs", data_ctx.rhs_gpu),
+    }
+    fingerprints: dict[str, str] = {}
+    for field, (name, value) in components.items():
+        hasher = hashlib.sha256()
+        _hash_array(hasher, name, value)
+        fingerprints[field] = hasher.hexdigest()
+    return fingerprints
 
 
 def _box_fingerprint(active: BoxActiveSet) -> str:
@@ -544,6 +561,7 @@ def prepare_shared_system(cfg: ControlledConfig) -> PreparedSystem:
         data_ctx.meta["complex_dtype"] = "complex64"
     rhs_gpu = backend.xp.asarray(data_ctx.rhs_gpu, dtype=solve_dtype)
     system_id = system_fingerprint(data_ctx, float(cfg.reg_lambda))
+    component_fingerprints = system_component_fingerprints(data_ctx)
 
     cp = backend.xp
     runtime_version = None
@@ -562,6 +580,7 @@ def prepare_shared_system(cfg: ControlledConfig) -> PreparedSystem:
 
     manifest = {
         "system_id": system_id,
+        **component_fingerprints,
         "dataset_stem": cfg.dataset_stem,
         "dataset_dir": str(Path(dataset["path"]).parent),
         "dataset_path": dataset["path"],
@@ -1213,6 +1232,7 @@ def run_one_method(
         "rank": spec.rank,
         "status": "running",
     }
+    method_stage = "preconditioner_build"
     try:
         if spec.kind == "cg":
             precond, precond_data, build_diag = None, None, {}
@@ -1256,12 +1276,14 @@ def run_one_method(
                 profile_components=False,
             )
 
+        method_stage = "solve"
         (beta_gpu, iterations, recursive_relres, solve_stats), solve_seconds = _timed(
             backend,
             _solve,
         )
         beta_saved = backend.xp.asarray(beta_gpu).copy()
         _sync_device(backend)
+        method_stage = "true_residual"
         true_relres = _true_residual(system, cfg, beta_saved)
         beta_host = np.ascontiguousarray(_asnumpy(beta_saved))
         row.update(
@@ -1283,11 +1305,14 @@ def run_one_method(
         del precond_data
         return row, beta_host
     except Exception as exc:
+        failure_traceback = traceback.format_exc()
         row.update(
             {
                 "status": "error",
+                "error_stage": method_stage,
                 "error_type": type(exc).__name__,
                 "error_message": str(exc),
+                "traceback": failure_traceback,
                 "build_seconds": float(row.get("build_seconds", math.nan)),
                 "solve_seconds": math.nan,
                 "build_plus_solve_seconds": math.nan,
@@ -1295,6 +1320,16 @@ def run_one_method(
                 "recursive_relres": math.nan,
                 "iterations": -1,
             }
+        )
+        solver_breakdown = getattr(exc, "diagnostics", None)
+        if isinstance(solver_breakdown, dict):
+            row["solver_breakdown"] = dict(solver_breakdown)
+        print(
+            f"[controlled-method] ERROR method={spec.label!r} "
+            f"repeat={repeat_idx} stage={method_stage}: "
+            f"{type(exc).__name__}: {exc}\n{failure_traceback}",
+            file=sys.stderr,
+            flush=True,
         )
         return row, None
 
@@ -1612,118 +1647,151 @@ def _post_diagnostics(
     for spec in diagnostic_specs:
         if spec.kind not in {"active-inverse", "active-eig", "full-eig"}:
             continue
-        try:
-            (apply_preconditioner, pre, build_diag), build_seconds = _timed(
-                system.backend,
-                lambda spec=spec: _build_preconditioner(system, cfg, spec),
-            )
-        except Exception as exc:
-            diagnostics.append(
-                {
-                    "system_id": system.system_id,
-                    "method": spec.label,
-                    "method_kind": spec.kind,
-                    "result_role": spec.result_role,
-                    "diagnostic_status": "skipped",
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc),
-                }
-            )
-            continue
-        route = "inverse" if spec.kind == "active-inverse" else "boxeig"
-        diag = run_btab_post_diagnostics(
-            system.backend,
-            system.data_ctx,
-            float(system.reg_lambda),
-            pre,
-            route=route,
-            mode=mode,
-            tol=float(cfg.diagnostic_tol),
-            power_iter=int(cfg.diagnostic_power_iter),
-        )
         record: dict[str, Any] = {
             "system_id": system.system_id,
             "method": spec.label,
             "method_kind": spec.kind,
             "result_role": spec.result_role,
-            "diagnostic_build_seconds": float(build_seconds),
-            **build_diag,
-            **diag,
         }
-        solve_ctx = _fresh_operator_context(system, cfg)
-        matvec = _matvec_closure(system, solve_ctx)
-
-        def _solve_diagnostic() -> tuple[Any, int, float, dict[str, Any]]:
-            return pcg_solve_gpu(
+        diagnostic_stage = "preconditioner_build"
+        try:
+            (apply_preconditioner, pre, build_diag), build_seconds = _timed(
                 system.backend,
-                matvec,
-                apply_preconditioner,
-                system.rhs_gpu,
-                solve_ctx,
-                float(cfg.tol),
-                int(cfg.maxiter),
-                return_stats=True,
-                work_prefix=f"diagnostic_{spec.label.replace('-', '_')}",
-                profile_components=False,
+                lambda spec=spec: _build_preconditioner(system, cfg, spec),
             )
-
-        (beta_diag, diag_iterations, diag_relres, diag_solve_stats), diag_solve_seconds = _timed(
-            system.backend,
-            _solve_diagnostic,
-        )
-        record.update(
-            {
-                "diagnostic_status": "ok",
-                "diagnostic_pcg_status": str(diag_solve_stats.get("status", "ok")),
-                "diagnostic_pcg_iterations": int(diag_iterations),
-                "diagnostic_pcg_recursive_relres": float(diag_relres),
-                "diagnostic_pcg_true_relres": _true_residual(system, cfg, beta_diag),
-                "diagnostic_pcg_solve_seconds": float(diag_solve_seconds),
-            }
-        )
-        delta = float(record.get("epsilon_T", math.nan))
-        gamma_key = "eta_inv" if route == "inverse" else "eta_eig"
-        gamma = float(record.get(gamma_key, math.nan))
-        epsilon_ok = bool(record.get("epsilon_T_norm_stabilized", False))
-        gamma_ok = bool(record.get("eta_inv_sq_norm_stabilized", False))
-        if route == "inverse" and not (epsilon_ok and gamma_ok):
-            record["bound_status"] = "heuristic_norm_estimator_unstabilized"
-        elif route == "inverse" and math.isfinite(delta) and math.isfinite(gamma):
-            lower = 1.0 - delta - gamma
-            upper = 1.0 + delta + gamma
-            record["bound_lower"] = lower
-            record["bound_upper"] = upper
-            record["condition_bound"] = upper / lower if lower > 0.0 else math.nan
-            record["bound_status"] = (
-                "estimated_informative_not_certified"
-                if lower > 0.0
-                else "estimated_not_informative"
-            )
-        elif route == "boxeig":
-            record["bound_status"] = "mu_B_minus_not_estimated"
-
-        if spec.kind == "full-eig":
-            leverage = _asnumpy(
-                system.backend.xp.sum(system.backend.xp.abs(pre.eig_U_gpu) ** 2, axis=1)
-            ).astype(np.float64, copy=False)
-            score_box = np.asarray(rule.active.box_idx, dtype=np.int64)
-            capture = float(np.sum(leverage[score_box]) / max(int(pre.eig_U_gpu.shape[1]), 1))
-            rho = np.asarray(rule.active.rho, dtype=np.float64)
             record.update(
                 {
-                    "score_box_size": int(score_box.size),
-                    "score_box_fraction": float(score_box.size / leverage.size),
-                    "score_box_leverage_capture": capture,
-                    "score_mass_capture": float(np.sum(rho[score_box]) / max(np.sum(rho), 1e-300)),
+                    "diagnostic_build_seconds": float(build_seconds),
+                    **build_diag,
                 }
             )
-            arrays["dominant_subspace_leverage"] = leverage.reshape(
-                (int(system.manifest["mtot"]),) * int(system.manifest["dim"])
+            route = "inverse" if spec.kind == "active-inverse" else "boxeig"
+            diagnostic_stage = "operator_diagnostics"
+            diag = run_btab_post_diagnostics(
+                system.backend,
+                system.data_ctx,
+                float(system.reg_lambda),
+                pre,
+                route=route,
+                mode=mode,
+                tol=float(cfg.diagnostic_tol),
+                power_iter=int(cfg.diagnostic_power_iter),
             )
-            arrays["score_rho"] = rho.reshape(
-                (int(system.manifest["mtot"]),) * int(system.manifest["dim"])
+            record.update(diag)
+            solve_ctx = _fresh_operator_context(system, cfg)
+            matvec = _matvec_closure(system, solve_ctx)
+
+            def _solve_diagnostic() -> tuple[Any, int, float, dict[str, Any]]:
+                return pcg_solve_gpu(
+                    system.backend,
+                    matvec,
+                    apply_preconditioner,
+                    system.rhs_gpu,
+                    solve_ctx,
+                    float(cfg.tol),
+                    int(cfg.maxiter),
+                    return_stats=True,
+                    work_prefix=f"diagnostic_{spec.label.replace('-', '_')}",
+                    profile_components=False,
+                )
+
+            diagnostic_stage = "diagnostic_pcg"
+            (
+                (beta_diag, diag_iterations, diag_relres, diag_solve_stats),
+                diag_solve_seconds,
+            ) = _timed(
+                system.backend,
+                _solve_diagnostic,
             )
-            arrays["score_box_indices"] = score_box
+            record.update(
+                {
+                    "diagnostic_pcg_status": str(
+                        diag_solve_stats.get("status", "ok")
+                    ),
+                    "diagnostic_pcg_iterations": int(diag_iterations),
+                    "diagnostic_pcg_recursive_relres": float(diag_relres),
+                    "diagnostic_pcg_solve_seconds": float(diag_solve_seconds),
+                }
+            )
+            diagnostic_stage = "diagnostic_true_residual"
+            diag_true_relres = _true_residual(system, cfg, beta_diag)
+            record["diagnostic_pcg_true_relres"] = float(diag_true_relres)
+            diagnostic_stage = "diagnostic_postprocess"
+            delta = float(record.get("epsilon_T", math.nan))
+            gamma_key = "eta_inv" if route == "inverse" else "eta_eig"
+            gamma = float(record.get(gamma_key, math.nan))
+            epsilon_ok = bool(record.get("epsilon_T_norm_stabilized", False))
+            gamma_ok = bool(record.get("eta_inv_sq_norm_stabilized", False))
+            if route == "inverse" and not (epsilon_ok and gamma_ok):
+                record["bound_status"] = "heuristic_norm_estimator_unstabilized"
+            elif route == "inverse" and math.isfinite(delta) and math.isfinite(gamma):
+                lower = 1.0 - delta - gamma
+                upper = 1.0 + delta + gamma
+                record["bound_lower"] = lower
+                record["bound_upper"] = upper
+                record["condition_bound"] = upper / lower if lower > 0.0 else math.nan
+                record["bound_status"] = (
+                    "estimated_informative_not_certified"
+                    if lower > 0.0
+                    else "estimated_not_informative"
+                )
+            elif route == "boxeig":
+                record["bound_status"] = "mu_B_minus_not_estimated"
+
+            if spec.kind == "full-eig":
+                leverage = _asnumpy(
+                    system.backend.xp.sum(
+                        system.backend.xp.abs(pre.eig_U_gpu) ** 2,
+                        axis=1,
+                    )
+                ).astype(np.float64, copy=False)
+                score_box = np.asarray(rule.active.box_idx, dtype=np.int64)
+                capture = float(
+                    np.sum(leverage[score_box])
+                    / max(int(pre.eig_U_gpu.shape[1]), 1)
+                )
+                rho = np.asarray(rule.active.rho, dtype=np.float64)
+                record.update(
+                    {
+                        "score_box_size": int(score_box.size),
+                        "score_box_fraction": float(score_box.size / leverage.size),
+                        "score_box_leverage_capture": capture,
+                        "score_mass_capture": float(
+                            np.sum(rho[score_box]) / max(np.sum(rho), 1e-300)
+                        ),
+                    }
+                )
+                arrays["dominant_subspace_leverage"] = leverage.reshape(
+                    (int(system.manifest["mtot"]),) * int(system.manifest["dim"])
+                )
+                arrays["score_rho"] = rho.reshape(
+                    (int(system.manifest["mtot"]),) * int(system.manifest["dim"])
+                )
+                arrays["score_box_indices"] = score_box
+            record["diagnostic_status"] = "ok"
+        except Exception as exc:
+            failure_traceback = traceback.format_exc()
+            record.update(
+                {
+                    "diagnostic_status": "error",
+                    "diagnostic_error_stage": diagnostic_stage,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "traceback": failure_traceback,
+                }
+            )
+            if diagnostic_stage == "diagnostic_pcg":
+                record["diagnostic_pcg_status"] = "error"
+            solver_breakdown = getattr(exc, "diagnostics", None)
+            if isinstance(solver_breakdown, dict):
+                record["solver_breakdown"] = dict(solver_breakdown)
+            print(
+                f"[post-diagnostics] ERROR method={spec.label!r} "
+                f"stage={diagnostic_stage}: {type(exc).__name__}: {exc}\n"
+                f"{failure_traceback}",
+                file=sys.stderr,
+                flush=True,
+            )
         diagnostics.append(record)
     return diagnostics, arrays
 

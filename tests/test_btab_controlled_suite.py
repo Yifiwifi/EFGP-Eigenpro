@@ -5,6 +5,14 @@ import zipfile
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
+from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled import (
+    suite as suite_module,
+)
+from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.benchmark import (
+    ControlledConfig,
+)
 from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.suite import (
     _complete_run,
     build_suite_plan,
@@ -321,3 +329,91 @@ def test_resume_requires_matching_config_source_and_repeat_count(tmp_path) -> No
         expected_dataset_content_index_sha256="frozen-data",
         expected_dataset_metadata_sha256="frozen-metadata",
     )
+
+
+@pytest.mark.parametrize(
+    ("failure_stage", "expected_message"),
+    [
+        ("experiment", "experiment exploded"),
+        ("artifact_validation", "wrote N=999, expected 7"),
+    ],
+)
+def test_run_suite_records_case_traceback_and_returns_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure_stage: str,
+    expected_message: str,
+) -> None:
+    output_root = tmp_path / "suite-output"
+    run_dir = output_root / "case-a"
+    config = ControlledConfig(output_dir=str(run_dir))
+    validation = {
+        "case_id": "case-a",
+        "dataset_stem": "fixture",
+        "task_type": "fixture_regression",
+        "scale_role": "test",
+        "n_train": 7,
+        "dataset_content_index_sha256": "content-sha",
+        "dataset_metadata_sha256": "metadata-sha",
+    }
+
+    monkeypatch.setattr(
+        suite_module,
+        "build_suite_plan",
+        lambda *args, **kwargs: [(validation, config)],
+    )
+    monkeypatch.setattr(
+        suite_module,
+        "_source_manifest",
+        lambda: {"source_bundle_sha256": "source-sha"},
+    )
+
+    def fake_run_controlled_experiment(supplied_config):
+        assert supplied_config is config
+        if failure_stage == "experiment":
+            raise RuntimeError("experiment exploded")
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "system_manifest.json").write_text(
+            json.dumps({"n_train": 999}),
+            encoding="utf-8",
+        )
+        return run_dir
+
+    monkeypatch.setattr(
+        suite_module,
+        "run_controlled_experiment",
+        fake_run_controlled_experiment,
+    )
+
+    result, had_failure = suite_module.run_suite(
+        {},
+        profile_name="fixture-profile",
+        dataset_dir_override="",
+        output_root=output_root,
+        execute=True,
+        resume=False,
+        nufft_backend_override="",
+        strict_gpu_eig=False,
+    )
+
+    assert result == output_root
+    assert had_failure is True
+    status_rows = json.loads(
+        (output_root / "suite_status.json").read_text(encoding="utf-8")
+    )
+    assert len(status_rows) == 1
+    failed = status_rows[0]
+    assert failed["case_id"] == "case-a"
+    assert failed["status"] == "error"
+    assert failed["error_type"] == "RuntimeError"
+    assert expected_message in failed["error_message"]
+    assert "Traceback (most recent call last):" in failed["traceback"]
+    assert "RuntimeError" in failed["traceback"]
+    assert expected_message in failed["traceback"]
+
+    captured = capsys.readouterr()
+    console = captured.out + captured.err
+    assert "case-a" in console
+    assert "RuntimeError" in console
+    assert expected_message in console

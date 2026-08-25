@@ -312,10 +312,15 @@ def run_prediction_audit(
         "schema_version": 1,
         "audit_role": "prediction accuracy only; no solve or prediction speed claim",
         "system_id": system.system_id,
+        "weights_sha256": system.manifest.get("weights_sha256"),
+        "gf_sha256": system.manifest.get("gf_sha256"),
+        "rhs_sha256": system.manifest.get("rhs_sha256"),
         "system_unchanged": True,
         "dataset": str(system.manifest.get("dataset_stem", cfg.dataset_stem)),
         "dataset_path": str(dataset_path),
+        "source_bundle_sha256": system.manifest.get("source_bundle_sha256"),
         "dataset_content_index_sha256": system.manifest.get("dataset_content_index_sha256"),
+        "dataset_metadata_sha256": system.manifest.get("dataset_metadata_sha256"),
         "config_source": str(config_source_path) if config_source_path else None,
         "config_source_sha256": (
             hashlib.sha256(config_source_path.read_bytes()).hexdigest()

@@ -5,6 +5,9 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled import (
+    benchmark as benchmark_module,
+)
 from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.benchmark import (
     ControlledConfig,
     PreparedSystem,
@@ -15,6 +18,7 @@ from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.benchmark import 
     resolve_method_specs,
     resolve_score_box_rule,
     summarize_rows,
+    system_component_fingerprints,
     system_fingerprint,
 )
 
@@ -97,6 +101,28 @@ def test_system_fingerprint_detects_rhs_change() -> None:
     system.data_ctx.rhs_gpu[0] += 1.0
     after = system_fingerprint(system.data_ctx, system.reg_lambda)
     assert before != after
+
+
+@pytest.mark.parametrize(
+    ("attribute", "changed_field"),
+    [
+        ("weights_gpu_flat", "weights_sha256"),
+        ("gf_gpu", "gf_sha256"),
+        ("rhs_gpu", "rhs_sha256"),
+    ],
+)
+def test_system_component_fingerprints_localize_array_change(
+    attribute: str,
+    changed_field: str,
+) -> None:
+    system = _fake_system()
+    before = system_component_fingerprints(system.data_ctx)
+    changed = np.asarray(getattr(system.data_ctx, attribute)).copy()
+    changed.reshape(-1)[0] += 1.0
+    setattr(system.data_ctx, attribute, changed)
+    after = system_component_fingerprints(system.data_ctx)
+
+    assert {field for field in before if before[field] != after[field]} == {changed_field}
 
 
 def test_empty_score_box_makes_default_fall_back_to_jacobi() -> None:
@@ -312,3 +338,80 @@ def test_pairwise_reports_crossover_for_higher_build_lower_solve() -> None:
     assert comparison["crossover_status"] == "candidate_higher_build_lower_solve"
     assert comparison["cold_to_reuse_crossover_rhs"] == pytest.approx(2.0)
     assert np.isnan(comparison["candidate_faster_through_rhs"])
+
+
+def test_post_diagnostics_records_pcg_error_and_continues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    system = _fake_system()
+    cfg = ControlledConfig(post_diagnostic_mode="cheap")
+    specs = [
+        benchmark_module.MethodSpec(label="bad-pcg", kind="active-eig"),
+        benchmark_module.MethodSpec(label="good-pcg", kind="active-eig"),
+    ]
+    pcg_calls: list[str] = []
+
+    def fake_build_preconditioner(supplied_system, supplied_cfg, spec):
+        del supplied_system, supplied_cfg
+        return (
+            lambda vector, out: None,
+            SimpleNamespace(),
+            {"preconditioner_probe": spec.label},
+        )
+
+    def fake_pcg_solve(*args, **kwargs):
+        del args
+        work_prefix = str(kwargs["work_prefix"])
+        pcg_calls.append(work_prefix)
+        if "bad_pcg" in work_prefix:
+            raise RuntimeError(
+                "PCG denominator is non-positive or non-finite (denom=nan)"
+            )
+        return (
+            np.zeros_like(system.rhs_gpu),
+            3,
+            1e-9,
+            {"status": "converged"},
+        )
+
+    monkeypatch.setattr(
+        benchmark_module,
+        "_build_preconditioner",
+        fake_build_preconditioner,
+    )
+    monkeypatch.setattr(
+        benchmark_module,
+        "run_btab_post_diagnostics",
+        lambda *args, **kwargs: {"epsilon_T": 0.1, "eta_eig": 0.2},
+    )
+    monkeypatch.setattr(benchmark_module, "pcg_solve_gpu", fake_pcg_solve)
+    monkeypatch.setattr(
+        benchmark_module,
+        "_true_residual",
+        lambda supplied_system, supplied_cfg, beta: 1e-9,
+    )
+
+    rows, arrays = benchmark_module._post_diagnostics(
+        system,
+        cfg,
+        specs,
+        SimpleNamespace(),
+    )
+
+    assert [row["method"] for row in rows] == ["bad-pcg", "good-pcg"]
+    assert len(pcg_calls) == 2
+    assert arrays == {}
+
+    failed, succeeded = rows
+    assert failed["preconditioner_probe"] == "bad-pcg"
+    assert failed["diagnostic_status"] == "error"
+    assert failed["diagnostic_pcg_status"] == "error"
+    assert failed["diagnostic_error_stage"] == "diagnostic_pcg"
+    assert failed["error_type"] == "RuntimeError"
+    assert "denom=nan" in failed["error_message"]
+    assert "Traceback (most recent call last):" in failed["traceback"]
+    assert "RuntimeError" in failed["traceback"]
+
+    assert succeeded["preconditioner_probe"] == "good-pcg"
+    assert succeeded["diagnostic_status"] == "ok"
+    assert succeeded["diagnostic_pcg_status"] == "converged"

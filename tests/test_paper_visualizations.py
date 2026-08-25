@@ -4,6 +4,7 @@ import csv
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from efgp_eigenpro_py.gpu.box_toeplitz_active_block.config import BTABExperimentConfig
 from efgp_eigenpro_py.gpu.box_toeplitz_active_block.paper_visualizations import (
@@ -12,7 +13,11 @@ from efgp_eigenpro_py.gpu.box_toeplitz_active_block.paper_visualizations import 
     make_group_c_boxeig_parameter_sweep_figure,
     rerender_paper_visualizations_from_saved_data,
 )
-from efgp_eigenpro_py.gpu.iterative_solvers import cg_solve_gpu, pcg_solve_gpu
+from efgp_eigenpro_py.gpu.iterative_solvers import (
+    PCGBreakdownError,
+    cg_solve_gpu,
+    pcg_solve_gpu,
+)
 
 
 def _backend():
@@ -85,6 +90,39 @@ def test_pcg_trace_callback_records_initial_and_final():
     assert trace[0][0] == 0
     assert trace[-1][0] == it
     assert trace[-1][1] <= trace[0][1]
+
+
+def test_pcg_nan_breakdown_carries_structured_state_snapshot():
+    backend = _backend()
+    b = np.array([1.0, 2.0, 1.0], dtype=np.float64)
+
+    def matvec(v, out):
+        out[...] = v
+
+    def nonfinite_precond(_v, out):
+        out.fill(np.nan)
+
+    with pytest.raises(PCGBreakdownError, match="classification=state_nonfinite") as caught:
+        pcg_solve_gpu(
+            backend,
+            matvec,
+            nonfinite_precond,
+            b,
+            SimpleNamespace(),
+            1e-12,
+            20,
+        )
+
+    snapshot = caught.value.diagnostics
+    assert snapshot["solver"] == "pcg"
+    assert snapshot["breakdown_stage"] == "pAp"
+    assert snapshot["classification"] == "state_nonfinite"
+    assert snapshot["iteration"] == 1
+    assert snapshot["r_finite"]
+    assert not snapshot["z_finite"]
+    assert not snapshot["p_finite"]
+    assert not snapshot["Ap_finite"]
+    assert "does not establish that A is non-SPD" in str(caught.value)
 
 
 def test_active_score_visualization_writes_artifacts(tmp_path):

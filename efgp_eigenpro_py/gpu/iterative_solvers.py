@@ -5,6 +5,14 @@ import time
 from typing import Any, Callable, Optional
 
 
+class PCGBreakdownError(RuntimeError):
+    """PCG failure with a JSON-serializable snapshot of the Krylov state."""
+
+    def __init__(self, message: str, diagnostics: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.diagnostics = diagnostics
+
+
 def _sync_device(xp: Any) -> None:
     cuda = getattr(xp, "cuda", None)
     if cuda is not None:
@@ -17,6 +25,60 @@ def _ensure_workspace_vector(op_ctx: Any, xp: Any, name: str, size: int, dtype: 
         buf = xp.empty((int(size),), dtype=dtype)
         setattr(op_ctx, name, buf)
     return buf
+
+
+def _pcg_breakdown_snapshot(
+    backend: Any,
+    *,
+    iteration: int,
+    rzold: float,
+    p_ap: Any,
+    denominator: float,
+    relative_residual: float,
+    tol: float,
+    spd_guard: bool,
+    vectors: tuple[tuple[str, Any], ...],
+) -> dict[str, Any]:
+    """Collect failure-only telemetry without adding work to successful iterations."""
+
+    xp = backend.xp
+    snapshot: dict[str, Any] = {
+        "solver": "pcg",
+        "breakdown_stage": "pAp",
+        "iteration": int(iteration),
+        "rzold": float(rzold),
+        "pAp_real": float(denominator),
+        "relative_residual": float(relative_residual),
+        "tol": float(tol),
+        "spd_guard": bool(spd_guard),
+    }
+    try:
+        snapshot["pAp_imag"] = float(xp.imag(p_ap))
+    except Exception:
+        snapshot["pAp_imag"] = float("nan")
+    for name, vector in vectors:
+        try:
+            snapshot[f"{name}_finite"] = bool(xp.all(xp.isfinite(vector)))
+        except Exception:
+            snapshot[f"{name}_finite"] = False
+        try:
+            snapshot[f"{name}_norm"] = float(backend.linalg.norm(vector))
+        except Exception:
+            snapshot[f"{name}_norm"] = float("nan")
+    scalar_finite = all(
+        math.isfinite(float(snapshot[key]))
+        for key in ("rzold", "pAp_real", "pAp_imag", "relative_residual")
+    )
+    vector_finite = all(
+        bool(snapshot[f"{name}_finite"])
+        for name in ("x", "r", "z", "p", "Ap")
+    )
+    snapshot["classification"] = (
+        "nonpositive_curvature"
+        if scalar_finite and vector_finite and denominator <= 0.0
+        else "state_nonfinite"
+    )
+    return snapshot
 
 
 def cg_solve_gpu(
@@ -309,18 +371,39 @@ def pcg_solve_gpu(
             if ratio > max_imag_ratio:
                 max_imag_ratio = ratio
         if denom <= 0.0 or not math.isfinite(denom):
-            if spd_guard:
-                raise RuntimeError(
-                    f"PCG denominator is non-positive or non-finite (denom={denom}). "
-                    "A may be non-SPD numerically."
-                )
             rel_now = float(backend.linalg.norm(r) / norm_b)
+            breakdown = _pcg_breakdown_snapshot(
+                backend,
+                iteration=it,
+                rzold=rzold,
+                p_ap=pAp,
+                denominator=denom,
+                relative_residual=rel_now,
+                tol=tol,
+                spd_guard=spd_guard,
+                vectors=(("x", x), ("r", r), ("z", z), ("p", p), ("Ap", Ap)),
+            )
+            if spd_guard:
+                inference = (
+                    "finite p and Ap encountered non-positive curvature"
+                    if breakdown["classification"] == "nonpositive_curvature"
+                    else "the Krylov state is non-finite; this does not establish that A is non-SPD"
+                )
+                raise PCGBreakdownError(
+                    f"PCG denominator is non-positive or non-finite (denom={denom}). "
+                    f"classification={breakdown['classification']}, iteration={it}, "
+                    f"rzold={rzold}, pAp_imag={breakdown['pAp_imag']}, "
+                    f"relres={rel_now:.6e}; {inference}.",
+                    breakdown,
+                )
             if rel_now <= tol:
                 status = "converged_spsd_breakdown"
                 break
-            raise RuntimeError(
+            raise PCGBreakdownError(
                 f"deflated PCG breakdown (denom={denom}) but residual not converged "
-                f"(rel={rel_now:.3e} > tol={tol:.3e}). Projector/recovery may be wrong."
+                f"(rel={rel_now:.3e} > tol={tol:.3e}). Projector/recovery may be wrong; "
+                f"classification={breakdown['classification']}.",
+                breakdown,
             )
         alpha = rzold / denom
         x += alpha * p

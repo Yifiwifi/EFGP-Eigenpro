@@ -22,7 +22,14 @@ def _numpy_system() -> SimpleNamespace:
         reg_lambda=0.1,
         setup_seconds=0.0,
         system_id="fixed-system",
-        manifest={"dataset_stem": "tiny"},
+        manifest={
+            "dataset_stem": "tiny",
+            "weights_sha256": "weights-hash",
+            "gf_sha256": "gf-hash",
+            "rhs_sha256": "rhs-hash",
+            "source_bundle_sha256": "source-hash",
+            "dataset_metadata_sha256": "metadata-hash",
+        },
     )
 
 
@@ -194,7 +201,12 @@ def test_prediction_audit_runs_warmup_and_one_audit_solve_and_writes_rows(
     ]
     assert predict_chunk_sizes == [2, 2, 1, 2, 2, 1]
     payload = json.loads((output_dir / "prediction_audit.json").read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 1
     assert payload["system_unchanged"] is True
+    assert payload["weights_sha256"] == "weights-hash"
+    assert payload["gf_sha256"] == "gf-hash"
+    assert payload["rhs_sha256"] == "rhs-hash"
+    assert payload["source_bundle_sha256"] == "source-hash"
     assert payload["test_subset_policy"] == "all"
     assert len(payload["rows"]) == 2
     assert payload["rows"][0]["method"] == "cg"

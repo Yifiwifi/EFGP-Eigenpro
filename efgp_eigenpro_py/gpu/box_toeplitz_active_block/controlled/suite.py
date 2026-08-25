@@ -4,6 +4,8 @@ import argparse
 import csv
 import hashlib
 import json
+import sys
+import traceback
 import zipfile
 from dataclasses import asdict, fields
 from datetime import datetime
@@ -501,6 +503,38 @@ def _write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
             )
 
 
+def _write_json_atomic(path: Path, payload: Any) -> None:
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(
+        json.dumps(
+            _sanitize_json(payload),
+            indent=2,
+            ensure_ascii=False,
+            allow_nan=False,
+        ),
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def _write_rows_atomic(path: Path, rows: list[dict[str, Any]]) -> None:
+    temporary = path.with_name(f".{path.name}.tmp")
+    _write_rows(temporary, rows)
+    temporary.replace(path)
+
+
+def _write_suite_checkpoint(
+    output_root: Path,
+    status_rows: list[dict[str, Any]],
+    index_rows: list[dict[str, Any]],
+) -> None:
+    """Atomically replace suite state so interrupted runs cannot expose stale status."""
+    _write_json_atomic(output_root / "suite_status.json", status_rows)
+    _write_json_atomic(output_root / "suite_index.json", index_rows)
+    _write_rows_atomic(output_root / "suite_status.csv", status_rows)
+    _write_rows_atomic(output_root / "suite_index.csv", index_rows)
+
+
 def run_suite(
     suite: dict[str, Any],
     *,
@@ -535,10 +569,7 @@ def run_suite(
                 "nufft_backend": config.nufft_backend,
             }
         )
-    (output_root / "suite_plan.json").write_text(
-        json.dumps(_sanitize_json(plan_rows), indent=2, ensure_ascii=False, allow_nan=False),
-        encoding="utf-8",
-    )
+    _write_json_atomic(output_root / "suite_plan.json", plan_rows)
     if not execute:
         return output_root, False
 
@@ -546,79 +577,188 @@ def run_suite(
     status_rows: list[dict[str, Any]] = []
     index_rows: list[dict[str, Any]] = []
     had_failure = False
-    for validation, config in plan:
+    _write_suite_checkpoint(output_root, status_rows, index_rows)
+    for case_index, (validation, config) in enumerate(plan, start=1):
         case_id = str(validation["case_id"])
         run_dir = Path(config.output_dir)
-        if resume and _complete_run(
-            run_dir,
-            int(validation["n_train"]),
-            expected_config=config,
-            expected_source_sha256=expected_source_sha256,
-            expected_dataset_content_index_sha256=str(
-                validation["dataset_content_index_sha256"]
-            ),
-            expected_dataset_metadata_sha256=str(
-                validation["dataset_metadata_sha256"]
-            ),
-        ):
-            status = "resumed_existing"
-        else:
-            try:
+        started_utc = datetime.now().astimezone().isoformat()
+        status_rows.append(
+            {
+                **validation,
+                "status": "running",
+                "case_index": int(case_index),
+                "case_count": int(len(plan)),
+                "started_utc": started_utc,
+                "run_dir": str(run_dir),
+            }
+        )
+        _write_suite_checkpoint(output_root, status_rows, index_rows)
+        print(
+            f"[suite] START case {case_index}/{len(plan)}: {case_id} "
+            f"(N={validation['n_train']}, methods={list(config.methods)})",
+            flush=True,
+        )
+        case_stage = "resume_check"
+        try:
+            resumed = resume and _complete_run(
+                run_dir,
+                int(validation["n_train"]),
+                expected_config=config,
+                expected_source_sha256=expected_source_sha256,
+                expected_dataset_content_index_sha256=str(
+                    validation["dataset_content_index_sha256"]
+                ),
+                expected_dataset_metadata_sha256=str(
+                    validation["dataset_metadata_sha256"]
+                ),
+            )
+            if resumed:
+                status = "resumed_existing"
+            else:
+                case_stage = "experiment"
                 run_controlled_experiment(config)
                 status = "completed"
-            except Exception as exc:
-                had_failure = True
-                status_rows.append(
+
+            case_stage = "artifact_validation"
+            manifest = json.loads(
+                (run_dir / "system_manifest.json").read_text(encoding="utf-8")
+            )
+            if int(manifest.get("n_train", -1)) != int(validation["n_train"]):
+                raise RuntimeError(
+                    f"case {case_id!r} wrote N={manifest.get('n_train')}, "
+                    f"expected {validation['n_train']}."
+                )
+            summaries = json.loads(
+                (run_dir / "matched_summary.json").read_text(encoding="utf-8")
+            )
+            ineligible_details = [
+                {
+                    key: row.get(key)
+                    for key in (
+                        "method",
+                        "method_kind",
+                        "measured_repeats",
+                        "converged_repeats",
+                        "iterations_max",
+                        "true_relres_max",
+                    )
+                }
+                for row in summaries
+                if not bool(row.get("performance_claim_eligible"))
+            ]
+            ineligible = [str(row.get("method")) for row in ineligible_details]
+
+            diagnostic_errors: list[dict[str, Any]] = []
+            diagnostics_path = run_dir / "post_diagnostics.json"
+            if diagnostics_path.is_file():
+                diagnostic_rows = json.loads(
+                    diagnostics_path.read_text(encoding="utf-8")
+                )
+                diagnostic_errors = [
                     {
-                        **validation,
-                        "status": "error",
-                        "error_type": type(exc).__name__,
-                        "error_message": str(exc),
+                        key: row.get(key)
+                        for key in (
+                            "method",
+                            "method_kind",
+                            "diagnostic_error_stage",
+                            "error_type",
+                            "error_message",
+                        )
+                    }
+                    for row in diagnostic_rows
+                    if str(row.get("diagnostic_status", "")).lower()
+                    not in {"", "ok"}
+                ]
+
+            status_row: dict[str, Any] = {
+                **validation,
+                "status": status,
+                "case_index": int(case_index),
+                "case_count": int(len(plan)),
+                "started_utc": started_utc,
+                "finished_utc": datetime.now().astimezone().isoformat(),
+                "run_dir": str(run_dir),
+            }
+            if ineligible:
+                had_failure = True
+                status_row["ineligible_methods"] = ineligible
+                status_row["ineligible_method_details"] = ineligible_details
+                print(
+                    f"[suite] INELIGIBLE case={case_id!r}: "
+                    f"{json.dumps(ineligible_details, ensure_ascii=False)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            if diagnostic_errors:
+                had_failure = True
+                status_row["diagnostic_errors"] = diagnostic_errors
+                status_row["post_diagnostics_path"] = str(diagnostics_path)
+                print(
+                    f"[suite] DIAGNOSTIC ERROR case={case_id!r}: "
+                    f"{json.dumps(diagnostic_errors, ensure_ascii=False)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            if ineligible and diagnostic_errors:
+                status_row["status"] = (
+                    f"{status}_with_ineligible_methods_and_diagnostic_errors"
+                )
+            elif ineligible:
+                status_row["status"] = f"{status}_with_ineligible_methods"
+            elif diagnostic_errors:
+                status_row["status"] = f"{status}_with_diagnostic_errors"
+            status_rows[-1] = status_row
+
+            for summary in summaries:
+                index_rows.append(
+                    {
+                        "case_id": case_id,
+                        "dataset_stem": validation["dataset_stem"],
+                        "task_type": validation["task_type"],
+                        "scale_role": validation["scale_role"],
+                        "n_train": validation["n_train"],
+                        "M": manifest.get("M"),
+                        "system_id": manifest.get("system_id"),
                         "run_dir": str(run_dir),
+                        **summary,
                     }
                 )
-                continue
-        manifest = json.loads((run_dir / "system_manifest.json").read_text(encoding="utf-8"))
-        if int(manifest.get("n_train", -1)) != int(validation["n_train"]):
-            raise RuntimeError(
-                f"case {case_id!r} wrote N={manifest.get('n_train')}, "
-                f"expected {validation['n_train']}."
+            _write_suite_checkpoint(output_root, status_rows, index_rows)
+            print(
+                f"[suite] END case {case_index}/{len(plan)}: {case_id} "
+                f"status={status_row['status']}",
+                flush=True,
             )
-        summaries = json.loads((run_dir / "matched_summary.json").read_text(encoding="utf-8"))
-        ineligible = [
-            str(row.get("method"))
-            for row in summaries
-            if not bool(row.get("performance_claim_eligible"))
-        ]
-        if ineligible:
+        except Exception as exc:
             had_failure = True
-            status = f"{status}_with_ineligible_methods"
-        status_rows.append({**validation, "status": status, "run_dir": str(run_dir)})
-        for summary in summaries:
-            index_rows.append(
-                {
-                    "case_id": case_id,
-                    "dataset_stem": validation["dataset_stem"],
-                    "task_type": validation["task_type"],
-                    "scale_role": validation["scale_role"],
-                    "n_train": validation["n_train"],
-                    "M": manifest.get("M"),
-                    "system_id": manifest.get("system_id"),
-                    "run_dir": str(run_dir),
-                    **summary,
-                }
+            failure_traceback = traceback.format_exc()
+            error_row: dict[str, Any] = {
+                **validation,
+                "status": "error",
+                "case_index": int(case_index),
+                "case_count": int(len(plan)),
+                "started_utc": started_utc,
+                "finished_utc": datetime.now().astimezone().isoformat(),
+                "error_stage": case_stage,
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+                "traceback": failure_traceback,
+                "run_dir": str(run_dir),
+            }
+            solver_breakdown = getattr(exc, "diagnostics", None)
+            if isinstance(solver_breakdown, dict):
+                error_row["solver_breakdown"] = dict(solver_breakdown)
+            status_rows[-1] = error_row
+            _write_suite_checkpoint(output_root, status_rows, index_rows)
+            print(
+                f"[suite] ERROR case {case_index}/{len(plan)}: {case_id} "
+                f"stage={case_stage}: {type(exc).__name__}: {exc}\n"
+                f"{failure_traceback}",
+                file=sys.stderr,
+                flush=True,
             )
 
-    (output_root / "suite_status.json").write_text(
-        json.dumps(_sanitize_json(status_rows), indent=2, ensure_ascii=False, allow_nan=False),
-        encoding="utf-8",
-    )
-    (output_root / "suite_index.json").write_text(
-        json.dumps(_sanitize_json(index_rows), indent=2, ensure_ascii=False, allow_nan=False),
-        encoding="utf-8",
-    )
-    _write_rows(output_root / "suite_status.csv", status_rows)
-    _write_rows(output_root / "suite_index.csv", index_rows)
+    _write_suite_checkpoint(output_root, status_rows, index_rows)
     return output_root, had_failure
 
 
