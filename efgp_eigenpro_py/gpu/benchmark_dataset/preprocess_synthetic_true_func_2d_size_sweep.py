@@ -4,15 +4,26 @@ import argparse
 import json
 from pathlib import Path
 
-from preprocess_synthetic_true_func_2d import (
-    DEFAULT_N_TEST,
-    DEFAULT_NOISE,
-    DEFAULT_SEED_TEST,
-    DEFAULT_SEED_TRAIN,
-    _default_dataset_stem,
-    _default_output_paths,
-    build_synthetic_dataset,
-)
+try:
+    from .preprocess_synthetic_true_func_2d import (
+        DEFAULT_N_TEST,
+        DEFAULT_NOISE,
+        DEFAULT_SEED_TEST,
+        DEFAULT_SEED_TRAIN,
+        _default_dataset_stem,
+        _default_output_paths,
+        build_synthetic_dataset,
+    )
+except ImportError:  # Direct ``python path/to/script.py`` execution.
+    from preprocess_synthetic_true_func_2d import (
+        DEFAULT_N_TEST,
+        DEFAULT_NOISE,
+        DEFAULT_SEED_TEST,
+        DEFAULT_SEED_TRAIN,
+        _default_dataset_stem,
+        _default_output_paths,
+        build_synthetic_dataset,
+    )
 
 
 DEFAULT_N_TRAIN_LIST = [
@@ -62,7 +73,22 @@ def main() -> None:
     parser.add_argument("--noise", type=float, default=DEFAULT_NOISE)
     parser.add_argument("--seed-train", type=int, default=DEFAULT_SEED_TRAIN)
     parser.add_argument("--seed-test", type=int, default=DEFAULT_SEED_TEST)
+    parser.add_argument(
+        "--chunk-rows",
+        type=int,
+        default=1_000_000,
+        help="Streaming generation chunk; archived-paper reconstruction uses 5000000.",
+    )
     parser.add_argument("--dataset-stem-prefix", type=str, default="synthetic_true_func_2d")
+    parser.add_argument(
+        "--size-token",
+        choices=("n", "ntrain"),
+        default="n",
+        help=(
+            "Filename token before the row count. Use ntrain with noise=0.3 to "
+            "reconstruct the archived-paper Synthetic artifact family."
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument(
         "--continue-on-error",
@@ -82,7 +108,7 @@ def main() -> None:
     failures: list[dict] = []
 
     for n_train in n_train_list:
-        dataset_stem = f"{dataset_stem_prefix}_n{int(n_train)}"
+        dataset_stem = f"{dataset_stem_prefix}_{args.size_token}{int(n_train)}"
         output_npz = output_dir / f"{dataset_stem}.npz"
         output_json = output_dir / f"{dataset_stem}.json"
         print("=" * 100)
@@ -97,6 +123,7 @@ def main() -> None:
                 noise=float(args.noise),
                 seed_train=int(args.seed_train),
                 seed_test=int(args.seed_test),
+                chunk_rows=int(args.chunk_rows),
             )
             row = {
                 "dataset_stem": dataset_stem,
@@ -123,12 +150,14 @@ def main() -> None:
 
     batch_summary = {
         "dataset_stem_prefix": dataset_stem_prefix,
+        "size_token": str(args.size_token),
         "output_dir": str(output_dir),
         "n_train_list": [int(v) for v in n_train_list],
         "n_test": int(round(int(n_train_list[0]) * 0.25)),
         "noise": float(args.noise),
         "seed_train": int(args.seed_train),
         "seed_test": int(args.seed_test),
+        "chunk_rows": int(args.chunk_rows),
         "generated": summary_rows,
         "failures": failures,
     }

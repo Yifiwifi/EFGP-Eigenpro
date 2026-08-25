@@ -43,16 +43,34 @@ class DiagnosticCounter:
         }
 
 
+@dataclass(frozen=True)
+class HermitianNormEstimate:
+    value: float
+    stabilized: bool
+    iterations: int
+    relative_change: float
+    starts: int
+    stabilized_starts: int
+    estimate_min: float
+    estimate_max: float
+
+    def as_dict(self, prefix: str) -> dict[str, Any]:
+        return {
+            f"{prefix}_norm_estimator": "multistart_power_on_squared_hermitian",
+            f"{prefix}_norm_stabilized": bool(self.stabilized),
+            f"{prefix}_norm_iterations": int(self.iterations),
+            f"{prefix}_norm_relative_change": float(self.relative_change),
+            f"{prefix}_norm_starts": int(self.starts),
+            f"{prefix}_norm_stabilized_starts": int(self.stabilized_starts),
+            f"{prefix}_norm_estimate_min": float(self.estimate_min),
+            f"{prefix}_norm_estimate_max": float(self.estimate_max),
+        }
+
+
 def _xp_asnumpy(arr: Any) -> np.ndarray:
     if hasattr(arr, "get"):
         return np.asarray(arr.get())
     return np.asarray(arr)
-
-
-def _scalar_float(x: Any) -> float:
-    if hasattr(x, "item"):
-        return float(x.item())
-    return float(x)
 
 
 def _tail_arrays(precond_data: Any) -> tuple[Any, Any, Any]:
@@ -140,39 +158,110 @@ def _estimate_hermitian_norm_power(
     tol: float,
     maxiter: int,
     counter: DiagnosticCounter,
-) -> float:
-    del tol
+) -> HermitianNormEstimate:
+    """Heuristically estimate ``||H||_2`` by multistart power iteration on ``H^2``.
+
+    Using the Rayleigh quotient of ``H`` can cancel when the two spectral ends
+    have similar magnitude and opposite signs.  Iterating with ``H^2`` instead
+    targets the largest squared eigenvalue and uses ``||H x||`` as the norm
+    estimate.  Multiple complex-Gaussian starts reduce the chance of missing a
+    dominant eigendirection.  Stabilization only describes the observed iterate
+    sequence; it is not a certificate that the global spectral end was found.
+    """
     n = int(n)
+    if not math.isfinite(float(tol)) or float(tol) <= 0.0:
+        raise ValueError("Hermitian norm tolerance must be finite and positive.")
+    if int(maxiter) <= 0:
+        raise ValueError("Hermitian norm maxiter must be positive.")
     if n <= 0:
-        return 0.0
+        return HermitianNormEstimate(0.0, True, 0, 0.0, 0, 0, 0.0, 0.0)
     xp = backend.xp
-    try:
-        rng = xp.random.RandomState(17)
-        x = rng.standard_normal((n,)).astype(xp.float64)
-    except Exception:
-        x = xp.asarray(np.random.default_rng(17).standard_normal(n), dtype=xp.float64)
-    x = xp.asarray(x, dtype=xp.complex128)
-    norm = float(xp.linalg.norm(x))
-    if norm == 0.0:
-        return 0.0
-    x = x / norm
-    last = 0.0
-    for _ in range(max(1, int(maxiter))):
-        y = matvec(x)
-        yn = float(xp.linalg.norm(y))
-        counter.n_power_iter += 1
-        if not math.isfinite(yn) or yn == 0.0:
-            return 0.0
-        x = y / yn
-        last = yn
-    y = matvec(x)
-    backend_linalg = getattr(backend, "linalg", None)
-    if backend_linalg is not None and hasattr(backend_linalg, "vdot"):
-        val = backend_linalg.vdot(x, y)
-    else:
-        val = xp.vdot(x, y)
-    ray = abs(complex(_scalar_float(xp.real(val)), _scalar_float(xp.imag(val))))
-    return float(ray if math.isfinite(ray) else last)
+    n_starts = 4
+    min_iterations = min(5, int(maxiter))
+    target_tol = max(float(tol), float(np.finfo(np.float64).eps))
+    estimates: list[float] = []
+    changes: list[float] = []
+    stabilized: list[bool] = []
+    iterations: list[int] = []
+    for start_idx in range(n_starts):
+        seed = 17 + 104729 * start_idx
+        try:
+            rng = xp.random.RandomState(int(seed))
+            real = rng.standard_normal((n,)).astype(xp.float64)
+            imag = rng.standard_normal((n,)).astype(xp.float64)
+        except Exception:
+            rng_np = np.random.default_rng(int(seed))
+            real = xp.asarray(rng_np.standard_normal(n), dtype=xp.float64)
+            imag = xp.asarray(rng_np.standard_normal(n), dtype=xp.float64)
+        x = xp.asarray((real + 1j * imag) / math.sqrt(2.0), dtype=xp.complex128)
+        norm = float(xp.linalg.norm(x))
+        if not math.isfinite(norm) or norm == 0.0:
+            estimates.append(0.0)
+            changes.append(math.inf)
+            stabilized.append(False)
+            iterations.append(0)
+            continue
+        x = x / norm
+        last = math.nan
+        relative_change = math.inf
+        stable_count = 0
+        value = 0.0
+        completed = 0
+        is_stable = False
+        for iteration in range(int(maxiter)):
+            y = matvec(x)
+            value = float(xp.linalg.norm(y))
+            z = matvec(y)
+            zn = float(xp.linalg.norm(z))
+            counter.n_power_iter += 1
+            completed = iteration + 1
+            if not math.isfinite(value) or not math.isfinite(zn):
+                value = math.nan
+                break
+            if value == 0.0 or zn == 0.0:
+                value = 0.0
+                relative_change = 0.0
+                break
+            if math.isfinite(last):
+                relative_change = abs(value - last) / max(abs(value), 1e-300)
+                if relative_change <= target_tol:
+                    stable_count += 1
+                else:
+                    stable_count = 0
+            x = z / zn
+            last = value
+            if completed >= min_iterations and stable_count >= 2:
+                is_stable = True
+                break
+        estimates.append(float(value))
+        changes.append(float(relative_change))
+        stabilized.append(bool(is_stable))
+        iterations.append(int(completed))
+
+    finite_indices = [idx for idx, value in enumerate(estimates) if math.isfinite(value)]
+    if not finite_indices:
+        return HermitianNormEstimate(
+            math.nan,
+            False,
+            int(sum(iterations)),
+            math.inf,
+            n_starts,
+            int(sum(stabilized)),
+            math.nan,
+            math.nan,
+        )
+    winner = max(finite_indices, key=lambda idx: estimates[idx])
+    finite_estimates = [estimates[idx] for idx in finite_indices]
+    return HermitianNormEstimate(
+        float(estimates[winner]),
+        bool(all(stabilized)),
+        int(sum(iterations)),
+        float(changes[winner]),
+        int(n_starts),
+        int(sum(stabilized)),
+        float(min(finite_estimates)),
+        float(max(finite_estimates)),
+    )
 
 
 def _apply_A_ST(
@@ -251,13 +340,13 @@ def _epsilon_T(
     *,
     tol: float,
     maxiter: int,
-) -> float:
+) -> HermitianNormEstimate:
     xp = backend.xp
     tail_idx = precond_data.tail_idx_gpu
     Lambda_T = precond_data.diag_A_gpu[tail_idx]
     nT = int(tail_idx.size)
     if nT <= 0:
-        return 0.0
+        return HermitianNormEstimate(0.0, True, 0, 0.0, 0, 0, 0.0, 0.0)
     inv_sqrt = 1.0 / xp.sqrt(Lambda_T)
     M = int(precond_data.diag_A_gpu.size)
 
@@ -289,12 +378,13 @@ def _eta_inv(
     *,
     tol: float,
     maxiter: int,
-) -> tuple[float, float]:
+) -> tuple[float, float, HermitianNormEstimate]:
     xp = backend.xp
     Lambda_T = precond_data.diag_A_gpu[precond_data.tail_idx_gpu]
     nT = int(precond_data.tail_idx_gpu.size)
     if nT <= 0:
-        return 0.0, 0.0
+        estimate = HermitianNormEstimate(0.0, True, 0, 0.0, 0, 0, 0.0, 0.0)
+        return 0.0, 0.0, estimate
     inv_sqrt = 1.0 / xp.sqrt(Lambda_T)
 
     def _mv(zT: Any) -> Any:
@@ -305,7 +395,7 @@ def _eta_inv(
         uT = _apply_A_TS(backend, precond_data, apply_A, xS)
         return inv_sqrt * uT
 
-    eta_sq = _estimate_hermitian_norm_power(
+    estimate = _estimate_hermitian_norm_power(
         backend,
         _mv,
         nT,
@@ -313,7 +403,8 @@ def _eta_inv(
         maxiter=maxiter,
         counter=counter,
     )
-    return float(math.sqrt(max(eta_sq, 0.0))), float(eta_sq)
+    eta_sq = float(estimate.value)
+    return float(math.sqrt(max(eta_sq, 0.0))), eta_sq, estimate
 
 
 def _eta_eig(
@@ -324,12 +415,13 @@ def _eta_eig(
     *,
     tol: float,
     maxiter: int,
-) -> tuple[float, float]:
+) -> tuple[float, float, HermitianNormEstimate]:
     xp = backend.xp
     Lambda_T = precond_data.diag_A_gpu[precond_data.tail_idx_gpu]
     nT = int(precond_data.tail_idx_gpu.size)
     if nT <= 0:
-        return 0.0, 0.0
+        estimate = HermitianNormEstimate(0.0, True, 0, 0.0, 0, 0, 0.0, 0.0)
+        return 0.0, 0.0, estimate
     inv_sqrt = 1.0 / xp.sqrt(Lambda_T)
 
     def _mv(zT: Any) -> Any:
@@ -341,7 +433,7 @@ def _eta_eig(
         uT = _apply_A_TS(backend, precond_data, apply_A, xS)
         return inv_sqrt * uT
 
-    eta_sq = _estimate_hermitian_norm_power(
+    estimate = _estimate_hermitian_norm_power(
         backend,
         _mv,
         nT,
@@ -349,7 +441,8 @@ def _eta_eig(
         maxiter=maxiter,
         counter=counter,
     )
-    return float(math.sqrt(max(eta_sq, 0.0))), float(eta_sq)
+    eta_sq = float(estimate.value)
+    return float(math.sqrt(max(eta_sq, 0.0))), eta_sq, estimate
 
 
 def run_btab_post_diagnostics(
@@ -399,7 +492,7 @@ def run_btab_post_diagnostics(
 
     if mode_key == "full":
         apply_A = _make_counted_A_apply(backend, data_ctx, float(reg_lambda), counter)
-        out["epsilon_T"] = _epsilon_T(
+        epsilon_estimate = _epsilon_T(
             backend,
             precond_data,
             apply_A,
@@ -407,6 +500,8 @@ def run_btab_post_diagnostics(
             tol=float(tol),
             maxiter=int(power_iter),
         )
+        out["epsilon_T"] = float(epsilon_estimate.value)
+        out.update(epsilon_estimate.as_dict("epsilon_T"))
         if route == "inverse":
             inv_apply = _make_A_SS_inv_apply(backend, precond_data, counter)
             if inv_apply is None:
@@ -414,7 +509,7 @@ def run_btab_post_diagnostics(
                 out["eta_inv_sq"] = float("nan")
                 out["eta_inv_status"] = "skipped_no_exact_inverse"
             else:
-                eta, eta_sq = _eta_inv(
+                eta, eta_sq, eta_estimate = _eta_inv(
                     backend,
                     precond_data,
                     apply_A,
@@ -425,9 +520,10 @@ def run_btab_post_diagnostics(
                 )
                 out["eta_inv"] = float(eta)
                 out["eta_inv_sq"] = float(eta_sq)
-                out["eta_inv_status"] = "ok"
+                out["eta_inv_status"] = "stabilized" if eta_estimate.stabilized else "unstabilized"
+                out.update(eta_estimate.as_dict("eta_inv_sq"))
         elif route == "boxeig":
-            eta, eta_sq = _eta_eig(
+            eta, eta_sq, eta_estimate = _eta_eig(
                 backend,
                 precond_data,
                 apply_A,
@@ -437,6 +533,8 @@ def run_btab_post_diagnostics(
             )
             out["eta_eig"] = float(eta)
             out["eta_eig_sq"] = float(eta_sq)
+            out["eta_eig_status"] = "stabilized" if eta_estimate.stabilized else "unstabilized"
+            out.update(eta_estimate.as_dict("eta_eig_sq"))
 
     out.update(counter.as_dict())
     t1 = _now_synced(backend)

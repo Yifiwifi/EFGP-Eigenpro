@@ -43,7 +43,7 @@ def select_active_indices(
     if mode_key == "tau":
         if tau is None:
             raise ValueError("active_tau is required when active_mode='tau'.")
-        return np.flatnonzero(rho >= float(tau)).astype(np.int64, copy=False)
+        return np.flatnonzero(rho > float(tau)).astype(np.int64, copy=False)
     raise ValueError(f"unknown active_mode={mode!r}; expected 'topk' or 'tau'.")
 
 

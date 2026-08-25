@@ -2,8 +2,19 @@
 efgp_eigenpro_py/gpu/benchmark dataset/household_power_consumption.txt
 # benchmark processed large arrays
 efgp_eigenpro_py/gpu/benchmark_dataset/processed/*.npz
+efgp_eigenpro_py/gpu/benchmark_dataset/processed/GeoLife_Beijing_GPS_altitude_regression_ntrain*.json
+efgp_eigenpro_py/gpu/benchmark_dataset/processed/GeoLife_Beijing_GPS_altitude_regression_size_sweep_summary.json
+efgp_eigenpro_py/gpu/benchmark_dataset/processed/_tmp_mur_pilot*/
 
 efgp_eigenpro_py/gpu/benchmark_dataset/raw/USGS_LPC_IL_Winnebago_2018/*.laz
+efgp_eigenpro_py/gpu/benchmark_dataset/raw/GeoLife_User_Guide_1.3.pdf
+efgp_eigenpro_py/gpu/benchmark_dataset/raw/_tmp_mur_pilot_cache/
+efgp_eigenpro_py/gpu/benchmark_dataset/raw/_tmp_mur_pilot_stride4_cache/
+efgp_eigenpro_py/gpu/box_toeplitz_active_block/controlled/outputs/
+
+# local Google Drive upload staging (multi-GB hard links and manifests)
+/colab_drive_upload/
+/colab_drive_upload_ready/
 
 # archives
 *.zip

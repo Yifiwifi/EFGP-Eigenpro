@@ -1,0 +1,16 @@
+# Colab runtime for the GPU experiment notebook.
+# Install exactly one CuPy wheel matching the runtime CUDA version.
+cupy-cuda12x
+cufinufft>=2.4,<3
+
+numpy>=1.23,<3
+scipy>=1.10,<2
+finufft>=2.3,<3
+psutil>=5.9,<8
+pandas
+matplotlib
+
+# Only needed when rebuilding EPT/USGS datasets inside Colab.
+pyproj>=3.6,<4
+laspy
+lazrs

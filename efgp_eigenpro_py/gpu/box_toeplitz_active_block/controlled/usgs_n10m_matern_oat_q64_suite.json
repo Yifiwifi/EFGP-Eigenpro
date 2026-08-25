@@ -1,0 +1,91 @@
+{
+  "base": {
+    "dataset_dir": "",
+    "subset_seed": 0,
+    "kernel_family": "matern",
+    "lengthscale": 0.1,
+    "nu": 1.5,
+    "variance": 1.0,
+    "reg_lambda": 0.1,
+    "fourier_eps": 1e-5,
+    "nufft_tol": 1e-10,
+    "l2_scaled": true,
+    "tol": 1e-7,
+    "maxiter": 20000,
+    "precision": "fp64",
+    "allow_near_epsilon_tol": false,
+    "methods": ["cg", "default", "full-eig"],
+    "score_tau": 1.0,
+    "box_budget": 2601,
+    "inverse_max_size": 1024,
+    "rank": 64,
+    "nystrom_rank": 64,
+    "rpcholesky_rank": 64,
+    "eig_tol": 0.001,
+    "eig_maxiter": 1280,
+    "measured_repeats": 5,
+    "warmup_repeats": 1,
+    "method_order_seed": 20260823,
+    "eig_seed": 0,
+    "nystrom_seed": 17,
+    "rpcholesky_seed": 23,
+    "nufft_backend": "none",
+    "precompute_chunk_size": 1000000,
+    "post_diagnostic_mode": "cheap",
+    "diagnostic_tol": 0.01,
+    "diagnostic_power_iter": 30,
+    "diagnostic_topk": [],
+    "strict_gpu_eig": true,
+    "output_dir": ""
+  },
+  "profiles": {
+    "oat": {
+      "cases": [
+        {
+          "id": "reference_lambda0p1_ell0p1",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "expected_n_train": 10000000,
+          "n_train": 0,
+          "scale_role": "reference",
+          "note": "OAT reference: lambda=0.1, ell=0.1"
+        },
+        {
+          "id": "lambda0p01_ell0p1",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "expected_n_train": 10000000,
+          "n_train": 0,
+          "reg_lambda": 0.01,
+          "scale_role": "regularization_sensitivity",
+          "note": "OAT lambda change only"
+        },
+        {
+          "id": "lambda1_ell0p1",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "expected_n_train": 10000000,
+          "n_train": 0,
+          "reg_lambda": 1.0,
+          "scale_role": "regularization_sensitivity",
+          "note": "OAT lambda change only"
+        },
+        {
+          "id": "lambda0p1_ell0p05",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "expected_n_train": 10000000,
+          "n_train": 0,
+          "lengthscale": 0.05,
+          "scale_role": "lengthscale_sensitivity",
+          "note": "OAT lengthscale change only"
+        },
+        {
+          "id": "lambda0p1_ell0p2",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "expected_n_train": 10000000,
+          "n_train": 0,
+          "lengthscale": 0.2,
+          "scale_role": "lengthscale_sensitivity",
+          "note": "OAT lengthscale change only"
+        }
+      ]
+    }
+  }
+}

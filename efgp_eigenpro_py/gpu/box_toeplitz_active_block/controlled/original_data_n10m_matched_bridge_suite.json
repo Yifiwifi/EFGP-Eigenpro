@@ -1,0 +1,95 @@
+{
+  "base": {
+    "dataset_dir": "",
+    "subset_seed": 0,
+    "kernel_family": "matern",
+    "lengthscale": 0.1,
+    "nu": 1.5,
+    "variance": 1.0,
+    "reg_lambda": 0.1,
+    "fourier_eps": 1e-5,
+    "nufft_tol": 1e-10,
+    "l2_scaled": true,
+    "tol": 1e-7,
+    "maxiter": 20000,
+    "precision": "fp64",
+    "allow_near_epsilon_tol": false,
+    "methods": [
+      "cg",
+      "jacobi",
+      "active-inverse",
+      "active-eig",
+      "full-eig",
+      "nystrom",
+      "rpcholesky"
+    ],
+    "score_tau": 1.0,
+    "box_budget": 2601,
+    "inverse_max_size": 2601,
+    "rank": 128,
+    "nystrom_rank": 128,
+    "rpcholesky_rank": 128,
+    "eig_tol": 0.001,
+    "eig_maxiter": 1280,
+    "measured_repeats": 5,
+    "warmup_repeats": 1,
+    "method_order_seed": 20260823,
+    "eig_seed": 0,
+    "nystrom_seed": 17,
+    "rpcholesky_seed": 23,
+    "nufft_backend": "none",
+    "precompute_chunk_size": 1000000,
+    "post_diagnostic_mode": "cheap",
+    "diagnostic_tol": 0.01,
+    "diagnostic_power_iter": 30,
+    "diagnostic_topk": [],
+    "strict_gpu_eig": true,
+    "output_dir": ""
+  },
+  "profiles": {
+    "bridge": {
+      "cases": [
+        {
+          "id": "synthetic_matern",
+          "dataset_stem": "synthetic_true_func_2d_n10000000",
+          "expected_n_train": 10000000,
+          "n_train": 0,
+          "scale_role": "matched_matern_bridge",
+          "note": "Original synthetic data, Matérn-3/2 bridge at q=128"
+        },
+        {
+          "id": "usgs_matern",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "expected_n_train": 10000000,
+          "n_train": 0,
+          "scale_role": "matched_matern_bridge",
+          "note": "Original USGS data, Matérn-3/2 bridge at q=128"
+        },
+        {
+          "id": "synthetic_se",
+          "dataset_stem": "synthetic_true_func_2d_n10000000",
+          "expected_n_train": 10000000,
+          "n_train": 0,
+          "kernel_family": "se",
+          "box_budget": 1225,
+          "inverse_max_size": 1225,
+          "maxiter": 8000,
+          "scale_role": "matched_se_control",
+          "note": "Original synthetic data, small-M SE control"
+        },
+        {
+          "id": "usgs_se",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "expected_n_train": 10000000,
+          "n_train": 0,
+          "kernel_family": "se",
+          "box_budget": 1225,
+          "inverse_max_size": 1225,
+          "maxiter": 20000,
+          "scale_role": "matched_se_control",
+          "note": "Original USGS data, small-M SE control"
+        }
+      ]
+    }
+  }
+}
