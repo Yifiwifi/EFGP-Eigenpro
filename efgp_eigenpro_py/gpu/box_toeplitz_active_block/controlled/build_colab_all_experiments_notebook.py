@@ -1398,7 +1398,11 @@ def build_notebook() -> dict:
                 controlled_plot.loc[controlled_plot["output_group"].isin(SCALE_OUTPUT_GROUPS)].copy()
                 if not controlled_plot.empty else pd.DataFrame()
             )
-            for output_group, profile_frame in scale_plot.groupby("output_group", sort=True):
+            scale_profiles = (
+                scale_plot.groupby("output_group", sort=True)
+                if not scale_plot.empty else ()
+            )
+            for output_group, profile_frame in scale_profiles:
                 assert_cg_reference_one(profile_frame, context=output_group)
                 profile_sources = profile_frame["source_bundle_sha256"].dropna().astype(str)
                 if len(profile_sources) != len(profile_frame) or profile_sources.nunique() != 1:

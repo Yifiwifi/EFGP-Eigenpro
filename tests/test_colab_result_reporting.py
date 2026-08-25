@@ -217,6 +217,25 @@ def _execute_reporting_cells(controlled_root: Path, output_root: Path) -> tuple[
     return namespace, _cell_source(notebook, "METHOD_ORDER = [")
 
 
+def test_plot_cell_skips_when_no_controlled_rows_are_available(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controlled_root = tmp_path / "controlled_fixed_system"
+    output_root = tmp_path / "report"
+    output_root.mkdir()
+    namespace, plot_source = _execute_reporting_cells(controlled_root, output_root)
+
+    import matplotlib.pyplot as plt
+
+    monkeypatch.setattr(plt, "show", lambda: None)
+    exec(compile(plot_source, "plot-cell", "exec"), namespace)
+
+    assert namespace["controlled_plot"].empty
+    assert namespace["scale_plot"].empty
+    assert namespace["GENERATED_PLOT_PATHS"] == []
+
+
 def test_scale_plot_accepts_one_archived_series_with_exact_per_n_artifacts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
