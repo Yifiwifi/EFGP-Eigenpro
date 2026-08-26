@@ -423,6 +423,19 @@ negative controls.
   audited residual, full-test RMSE and ratio to CG, chunk size, and audit-only
   solve/prediction seconds.
 
+The controlled-suite CLI uses distinct terminal exit codes:
+
+- `0`: every selected case and method is performance-claim eligible.
+- `2`: all selected cases wrote complete artifacts, but at least one method is
+  ineligible or a post diagnostic failed. This is a scientific result; inspect
+  `suite_status.json` and `controlled_ineligible_rows.csv`.
+- `1`: configuration, data validation, or case execution failed. Case-level
+  tracebacks remain in `suite_status.json` when the suite reached execution.
+
+The Colab campaign accepts exit code `2`, records it, and continues independent
+jobs. Exit code `1` is also isolated at the job level so later independent jobs
+can finish, but the final campaign manifest is not verified.
+
 `preconditioner_storage_bytes` sums arrays retained by the built operation. It
 is not a CUDA allocator peak; temporary eigensolver/SVD workspaces require a
 separate peak-memory profiler if that quantity is needed in a paper table.

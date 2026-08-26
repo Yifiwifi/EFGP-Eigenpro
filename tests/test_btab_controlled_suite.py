@@ -417,3 +417,44 @@ def test_run_suite_records_case_traceback_and_returns_failure(
     assert "case-a" in console
     assert "RuntimeError" in console
     assert expected_message in console
+
+
+@pytest.mark.parametrize(
+    ("statuses", "had_failure", "expected"),
+    [
+        ([{"status": "completed"}], False, suite_module.SUITE_EXIT_OK),
+        (
+            [{"status": "completed_with_ineligible_methods"}],
+            True,
+            suite_module.SUITE_EXIT_SCIENTIFIC_FAILURE,
+        ),
+        (
+            [{"status": "completed_with_diagnostic_errors"}],
+            True,
+            suite_module.SUITE_EXIT_SCIENTIFIC_FAILURE,
+        ),
+        ([{"status": "error"}], True, suite_module.SUITE_EXIT_EXECUTION_ERROR),
+        ([{"status": "running"}], True, suite_module.SUITE_EXIT_EXECUTION_ERROR),
+    ],
+)
+def test_suite_exit_code_distinguishes_scientific_and_execution_failures(
+    tmp_path: Path,
+    statuses: list[dict[str, str]],
+    had_failure: bool,
+    expected: int,
+) -> None:
+    (tmp_path / "suite_status.json").write_text(
+        json.dumps(statuses),
+        encoding="utf-8",
+    )
+    assert suite_module._suite_exit_code(
+        tmp_path,
+        had_failure=had_failure,
+    ) == expected
+
+
+def test_suite_exit_code_treats_missing_status_as_execution_error(tmp_path: Path) -> None:
+    assert suite_module._suite_exit_code(
+        tmp_path,
+        had_failure=True,
+    ) == suite_module.SUITE_EXIT_EXECUTION_ERROR

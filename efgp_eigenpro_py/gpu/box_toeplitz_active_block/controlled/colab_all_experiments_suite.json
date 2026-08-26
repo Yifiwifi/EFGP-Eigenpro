@@ -50,6 +50,7 @@
       "cases": [
         {
           "id": "screen_synthetic_archived_n10m",
+          "dataset_family": "Synthetic",
           "dataset_stem": "synthetic_true_func_2d_ntrain10000000",
           "n_train": 0,
           "subset_mode": "prefix",
@@ -58,6 +59,7 @@
         },
         {
           "id": "screen_winnebago_n10m",
+          "dataset_family": "Winnebago",
           "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
           "n_train": 0,
           "subset_mode": "prefix",
@@ -66,6 +68,7 @@
         },
         {
           "id": "screen_manitowoc_n10m",
+          "dataset_family": "Manitowoc",
           "dataset_stem": "USGS_EPT_WI_2County_1_B23_full_workunit_ground_elevation_n10000000",
           "n_train": 0,
           "subset_mode": "prefix",
@@ -78,6 +81,7 @@
       "cases": [
         {
           "id": "synthetic_archived_artifact_n10m_matern",
+          "dataset_family": "Synthetic",
           "dataset_stem": "synthetic_true_func_2d_ntrain10000000",
           "n_train": 0,
           "subset_mode": "prefix",
@@ -86,6 +90,7 @@
         },
         {
           "id": "winnebago_n10m_matern",
+          "dataset_family": "Winnebago",
           "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
           "n_train": 0,
           "subset_mode": "prefix",
@@ -94,11 +99,49 @@
         },
         {
           "id": "manitowoc_n10m_matern",
+          "dataset_family": "Manitowoc",
           "dataset_stem": "USGS_EPT_WI_2County_1_B23_full_workunit_ground_elevation_n10000000",
           "n_train": 0,
           "subset_mode": "prefix",
           "expected_n_train": 10000000,
           "scale_role": "independent-acquisition replication"
+        }
+      ]
+    },
+    "winnebago_box_budget_n10m": {
+      "overrides": {
+        "methods": ["cg", "default", "full-eig"]
+      },
+      "cases": [
+        {
+          "id": "winnebago_box_budget_4096_n10m",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "n_train": 0,
+          "subset_mode": "prefix",
+          "box_budget": 4096,
+          "expected_n_train": 10000000,
+          "scale_role": "fixed-system active-box memory-budget ablation"
+        },
+        {
+          "id": "winnebago_box_budget_8192_n10m",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "n_train": 0,
+          "subset_mode": "prefix",
+          "box_budget": 8192,
+          "expected_n_train": 10000000,
+          "scale_role": "fixed-system active-box memory-budget ablation"
+        },
+        {
+          "id": "winnebago_box_budget_16384_n10m",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "n_train": 0,
+          "subset_mode": "prefix",
+          "box_budget": 16384,
+          "expected_n_train": 10000000,
+          "scale_role": "fixed-system active-box memory-budget ablation"
         }
       ]
     },
@@ -109,6 +152,7 @@
       "cases": [
         {
           "id": "synthetic_master_prefix_n10m",
+          "dataset_family": "Synthetic",
           "dataset_stem": "synthetic_true_func_2d_n300000000",
           "n_train": 10000000,
           "expected_n_train": 10000000,
@@ -116,6 +160,7 @@
         },
         {
           "id": "synthetic_master_prefix_n30m",
+          "dataset_family": "Synthetic",
           "dataset_stem": "synthetic_true_func_2d_n300000000",
           "n_train": 30000000,
           "expected_n_train": 30000000,
@@ -123,6 +168,7 @@
         },
         {
           "id": "synthetic_master_prefix_n100m",
+          "dataset_family": "Synthetic",
           "dataset_stem": "synthetic_true_func_2d_n300000000",
           "n_train": 100000000,
           "methods": ["cg", "default", "full-eig", "nystrom", "rpcholesky"],
@@ -131,6 +177,7 @@
         },
         {
           "id": "synthetic_master_prefix_n300m",
+          "dataset_family": "Synthetic",
           "dataset_stem": "synthetic_true_func_2d_n300000000",
           "n_train": 300000000,
           "methods": ["cg", "default", "full-eig"],
@@ -139,6 +186,7 @@
         },
         {
           "id": "winnebago_master_prefix_n10m",
+          "dataset_family": "Winnebago",
           "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain300000000",
           "n_train": 10000000,
           "expected_n_train": 10000000,
@@ -146,6 +194,7 @@
         },
         {
           "id": "winnebago_master_prefix_n30m",
+          "dataset_family": "Winnebago",
           "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain300000000",
           "n_train": 30000000,
           "expected_n_train": 30000000,
@@ -153,6 +202,7 @@
         },
         {
           "id": "winnebago_master_prefix_n100m",
+          "dataset_family": "Winnebago",
           "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain300000000",
           "n_train": 100000000,
           "methods": ["cg", "default", "full-eig", "nystrom", "rpcholesky"],
@@ -161,6 +211,7 @@
         },
         {
           "id": "winnebago_master_prefix_n300m",
+          "dataset_family": "Winnebago",
           "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain300000000",
           "n_train": 300000000,
           "methods": ["cg", "default", "full-eig"],
@@ -176,6 +227,7 @@
       "cases": [
         {
           "id": "synthetic_archived_exact_n10m",
+          "dataset_family": "Synthetic",
           "dataset_stem": "synthetic_true_func_2d_ntrain10000000",
           "n_train": 0,
           "expected_n_train": 10000000,
@@ -183,6 +235,7 @@
         },
         {
           "id": "synthetic_archived_exact_n30m",
+          "dataset_family": "Synthetic",
           "dataset_stem": "synthetic_true_func_2d_ntrain30000000",
           "n_train": 0,
           "expected_n_train": 30000000,
@@ -190,6 +243,7 @@
         },
         {
           "id": "synthetic_archived_exact_n100m",
+          "dataset_family": "Synthetic",
           "dataset_stem": "synthetic_true_func_2d_ntrain100000000",
           "n_train": 0,
           "methods": ["cg", "default", "full-eig", "nystrom", "rpcholesky"],
@@ -198,6 +252,7 @@
         },
         {
           "id": "synthetic_archived_exact_n300m",
+          "dataset_family": "Synthetic",
           "dataset_stem": "synthetic_true_func_2d_ntrain300000000",
           "n_train": 0,
           "methods": ["cg", "default", "full-eig"],
@@ -206,6 +261,7 @@
         },
         {
           "id": "winnebago_archived_exact_n10m",
+          "dataset_family": "Winnebago",
           "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
           "n_train": 0,
           "expected_n_train": 10000000,
@@ -213,6 +269,7 @@
         },
         {
           "id": "winnebago_archived_exact_n30m",
+          "dataset_family": "Winnebago",
           "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain30000000",
           "n_train": 0,
           "expected_n_train": 30000000,
@@ -220,6 +277,7 @@
         },
         {
           "id": "winnebago_archived_exact_n100m",
+          "dataset_family": "Winnebago",
           "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain100000000",
           "n_train": 0,
           "methods": ["cg", "default", "full-eig", "nystrom", "rpcholesky"],
@@ -228,6 +286,7 @@
         },
         {
           "id": "winnebago_archived_exact_n300m",
+          "dataset_family": "Winnebago",
           "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain300000000",
           "n_train": 0,
           "methods": ["cg", "default", "full-eig"],
@@ -243,6 +302,7 @@
       "cases": [
         {
           "id": "manitowoc_master_prefix_n10m",
+          "dataset_family": "Manitowoc",
           "dataset_stem": "USGS_EPT_WI_2County_1_B23_full_workunit_ground_elevation_n300000000",
           "n_train": 10000000,
           "expected_n_train": 10000000,
@@ -250,6 +310,7 @@
         },
         {
           "id": "manitowoc_master_prefix_n30m",
+          "dataset_family": "Manitowoc",
           "dataset_stem": "USGS_EPT_WI_2County_1_B23_full_workunit_ground_elevation_n300000000",
           "n_train": 30000000,
           "expected_n_train": 30000000,
@@ -257,6 +318,7 @@
         },
         {
           "id": "manitowoc_master_prefix_n100m",
+          "dataset_family": "Manitowoc",
           "dataset_stem": "USGS_EPT_WI_2County_1_B23_full_workunit_ground_elevation_n300000000",
           "n_train": 100000000,
           "methods": ["cg", "default", "full-eig", "nystrom", "rpcholesky"],
@@ -265,6 +327,7 @@
         },
         {
           "id": "manitowoc_master_prefix_n300m",
+          "dataset_family": "Manitowoc",
           "dataset_stem": "USGS_EPT_WI_2County_1_B23_full_workunit_ground_elevation_n300000000",
           "n_train": 300000000,
           "methods": ["cg", "default", "full-eig"],
@@ -280,12 +343,14 @@
       "cases": [
         {
           "id": "winnebago_oat_ref_lam0p1_ell0p1",
+          "dataset_family": "Winnebago",
           "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
           "n_train": 0,
           "expected_n_train": 10000000
         },
         {
           "id": "winnebago_oat_lam0p01",
+          "dataset_family": "Winnebago",
           "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
           "n_train": 0,
           "reg_lambda": 0.01,
@@ -293,6 +358,7 @@
         },
         {
           "id": "winnebago_oat_lam1",
+          "dataset_family": "Winnebago",
           "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
           "n_train": 0,
           "reg_lambda": 1.0,
@@ -300,6 +366,7 @@
         },
         {
           "id": "winnebago_oat_ell0p05",
+          "dataset_family": "Winnebago",
           "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
           "n_train": 0,
           "lengthscale": 0.05,
@@ -307,6 +374,7 @@
         },
         {
           "id": "winnebago_oat_ell0p2",
+          "dataset_family": "Winnebago",
           "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
           "n_train": 0,
           "lengthscale": 0.2,

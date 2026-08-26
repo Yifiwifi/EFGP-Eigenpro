@@ -27,6 +27,7 @@ _DEFAULT_SUITE_CONFIG = _HERE / "three_dataset_suite.json"
 _CASE_METADATA_KEYS = {
     "id",
     "dataset_alias",
+    "dataset_family",
     "expected_n_train",
     "scale_role",
     "note",
@@ -299,6 +300,7 @@ def validate_suite_case(
     return {
         "case_id": str(case["id"]),
         "dataset_alias": alias_name,
+        "dataset_family": str(case.get("dataset_family", "")),
         "dataset_stem": stem,
         "dataset_path": str(npz_path),
         "dataset_file_size_bytes": int(npz_path.stat().st_size),
@@ -713,6 +715,7 @@ def run_suite(
                 index_rows.append(
                     {
                         "case_id": case_id,
+                        "dataset_family": validation.get("dataset_family", ""),
                         "dataset_stem": validation["dataset_stem"],
                         "task_type": validation["task_type"],
                         "scale_role": validation["scale_role"],
@@ -791,6 +794,40 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+SUITE_EXIT_OK = 0
+SUITE_EXIT_EXECUTION_ERROR = 1
+SUITE_EXIT_SCIENTIFIC_FAILURE = 2
+
+
+def _suite_exit_code(output_root: Path, *, had_failure: bool) -> int:
+    """Classify a completed suite without conflating scientific and runtime failures.
+
+    A controlled case can finish writing all required artifacts while one method is
+    ineligible or a post diagnostic fails.  That is a scientific result, not an
+    orchestration crash.  Case/config/data errors remain hard execution failures.
+    """
+
+    if not had_failure:
+        return SUITE_EXIT_OK
+
+    status_path = output_root / "suite_status.json"
+    if not status_path.is_file():
+        return SUITE_EXIT_EXECUTION_ERROR
+    try:
+        status_rows = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return SUITE_EXIT_EXECUTION_ERROR
+    if not isinstance(status_rows, list) or not status_rows:
+        return SUITE_EXIT_EXECUTION_ERROR
+
+    terminal_statuses = [str(row.get("status", "")) for row in status_rows]
+    if any(status == "error" for status in terminal_statuses):
+        return SUITE_EXIT_EXECUTION_ERROR
+    if any(status in {"", "running"} for status in terminal_statuses):
+        return SUITE_EXIT_EXECUTION_ERROR
+    return SUITE_EXIT_SCIENTIFIC_FAILURE
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     suite = load_suite_config(args.config)
@@ -810,7 +847,7 @@ def main(argv: list[str] | None = None) -> int:
         strict_gpu_eig=bool(args.strict_gpu_eig),
     )
     print(f"Wrote controlled-suite files to {result}")
-    return 1 if failed else 0
+    return _suite_exit_code(result, had_failure=failed)
 
 
 if __name__ == "__main__":

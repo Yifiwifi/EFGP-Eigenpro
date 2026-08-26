@@ -38,6 +38,9 @@ def _write_case(
     content_sha256: str = "content",
     metadata_sha256: str = "metadata",
     include_component_hashes: bool = True,
+    box_budget: int = 8192,
+    box_size: int = 8099,
+    system_id: str | None = None,
 ) -> None:
     run_dir.mkdir(parents=True)
     config = {
@@ -55,7 +58,7 @@ def _write_case(
         "subset_mode": "prefix",
         "subset_seed": 0,
         "score_tau": 1.0,
-        "box_budget": 8192,
+        "box_budget": box_budget,
         "inverse_max_size": 1024,
         "rank": 256,
         "nystrom_rank": 256,
@@ -68,7 +71,7 @@ def _write_case(
         "strict_gpu_eig": True,
     }
     manifest = {
-        "system_id": hashlib.sha256(str(run_dir).encode()).hexdigest(),
+        "system_id": system_id or hashlib.sha256(str(run_dir).encode()).hexdigest(),
         "dataset_stem": dataset_stem,
         "n_train": n_train,
         "system_unchanged": True,
@@ -98,6 +101,7 @@ def _write_case(
         "build_seconds_median": 0.0,
         "build_seconds_max": 0.0,
         "preconditioner_storage_bytes": None,
+        "box_size": box_size,
     }
     rows = [
         {**common, "method": "cg", "cold_speedup_median": 1.0},
@@ -327,3 +331,38 @@ def test_scale_plot_rejects_mixed_dataset_series(
     monkeypatch.setattr(plt, "show", lambda: None)
     with pytest.raises(RuntimeError, match="mixes or lacks dataset series"):
         exec(compile(plot_source, "plot-cell", "exec"), namespace)
+
+
+def test_box_budget_report_checks_fixed_system_and_writes_plot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controlled_root = tmp_path / "controlled_fixed_system"
+    budget_root = controlled_root / "winnebago_box_budget_n10m"
+    stem = "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000"
+    for budget, actual_size, speedup in [
+        (4096, 4000, 2.4),
+        (8192, 8099, 3.0),
+        (16384, 16000, 3.2),
+    ]:
+        _write_case(
+            budget_root / f"winnebago_box_budget_{budget}_n10m",
+            dataset_stem=stem,
+            n_train=10_000_000,
+            speedup=speedup,
+            box_budget=budget,
+            box_size=actual_size,
+            system_id="shared-fixed-system",
+        )
+    output_root = tmp_path / "report"
+    output_root.mkdir()
+    namespace, plot_source = _execute_reporting_cells(controlled_root, output_root)
+
+    import matplotlib.pyplot as plt
+
+    monkeypatch.setattr(plt, "show", lambda: None)
+    exec(compile(plot_source, "plot-cell", "exec"), namespace)
+    assert namespace["BOX_BUDGET_SYSTEM_MATCH"] is True
+    assert (output_root / "winnebago_box_budget_10m.png").is_file()
+    summary = pd.read_csv(output_root / "winnebago_box_budget_10m_summary.csv")
+    assert set(summary["cfg_box_budget"]) == {4096, 8192, 16384}

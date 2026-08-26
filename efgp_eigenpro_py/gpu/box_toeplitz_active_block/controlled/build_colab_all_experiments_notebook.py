@@ -53,7 +53,7 @@ def build_notebook() -> dict:
             | `controlled_fixed_system` | 所有方法共享同一个哈希 (A\beta=b)，1 warm-up + 5 paired repeats | 方法间严格配对加速、构造/求解/存储权衡 |
             | `prediction_audit` | 另建固定系统，仅验证 test RMSE | 解与预测等价性；其中时间不进入 speedup claim |
 
-            使用方式：先选择 Colab 的 **GPU + High-RAM** runtime，再按顺序执行。所有重计算开关默认关闭，避免误触发 300M。建议先完成 10M smoke/center，再逐个启用 30M、100M、300M；每个 controlled case 通过 `suite --resume` 独立检查点恢复。
+            使用方式：选择 Colab 的 **A100 GPU + High-RAM** runtime，然后点击 **运行时 → 全部运行**。默认的 `RUN_ALL_FORMAL_EXPERIMENTS=True` 会自动完成 smoke、10M 主实验、prediction audit、OAT、box-budget 消融、Synthetic nested-prefix 10M–300M，以及 Winnebago archived-exact 10M–300M。每个规模是独立 job；失败会结构化记录并隔离，不会用 `CalledProcessError` 阻断后续实验。
 
             参考并保留了 `boxeig_inverse_diagnostics_experiment.ipynb` 中最关键的 direct/binned precompute policy；统一结果区重新整理 legacy、controlled 和 audit 三种 schema。
             """
@@ -62,46 +62,59 @@ def build_notebook() -> dict:
     cells.append(
         _code(
             r"""
-            # ==================== 用户总开关：只改这一格 ====================
+            # ==================== 一键正式实验：通常无需修改 ====================
             from pathlib import Path
 
             REPO_URL = "https://github.com/Yifiwifi/EFGP-Eigenpro.git"
-            REPO_REF = "main"  # 正式运行前建议改成已 push 的 commit SHA
+            REPO_REF = "codex/colab-all-experiments"
             LOCAL_REPO = Path("/content/EFGP-Eigenpro")
 
             DRIVE_PROJECT_ROOT = Path("/content/drive/MyDrive/EFGP_Colab")
             DRIVE_DATA_ROOT = DRIVE_PROJECT_ROOT / "data_bundle"
-            RUN_TAG = "paper_colab_20260824"  # 协议或代码改变时换一个 tag；同 tag 用于断点续跑
-            DRIVE_RUN_ROOT = DRIVE_PROJECT_ROOT / "runs" / RUN_TAG
+            RUN_TAG_PREFIX = "paper_one_click"
+            # checkout 后自动使用 paper_one_click_<git sha>，同一代码自动 resume，
+            # 新代码自动进入新目录，不会覆盖旧证据。
+            RUN_TAG = None
+            DRIVE_RUN_ROOT = None
             LOCAL_DATA_DIR = Path("/content/efgp_data")
 
-            # 从 drive_manifest.json 选择数据。下方会根据实验开关自动补齐必需 bundle；
-            # 这里只放希望额外缓存到本地 SSD 的 bundle。
-            DATA_BUNDLES = ["controlled_10m"]
-            CACHE_DATA_LOCALLY = True       # 正式计时推荐 True，避免 Drive FUSE 进入 timing
-            VERIFY_FULL_SHA256 = False      # 首次上传后设 True；11GB 全校验会花几分钟
+            RUN_ALL_FORMAL_EXPERIMENTS = True
+            FORMAL_SCALE_SIZES = [10_000_000, 30_000_000, 100_000_000, 300_000_000]
 
-            # 原 notebook 的完整 exploratory pipeline；可选 group_a/group_b/group_c。
+            # 从 drive_manifest.json 自动选择正式 campaign 所需数据。
+            DATA_BUNDLES = []
+            CACHE_DATA_LOCALLY = True       # 正式计时推荐 True，避免 Drive FUSE 进入 timing
+            VERIFY_FULL_SHA256 = False      # 完整 catalog 仅在上传变更后单独校验一次
+
+            # 一键正式 campaign 不重跑不可直接混表的 legacy exploratory groups。
             RUN_LEGACY_GROUPS = []
 
-            # Controlled 开关。
-            RUN_PLUMBING_SMOKE = False
+            # 下列变量由一键模式统一设定；False 时仍可作为 advanced/manual 模式使用。
+            RUN_PLUMBING_SMOKE = RUN_ALL_FORMAL_EXPERIMENTS
             RUN_CG_SCREEN_10M = False
-            RUN_Q256_CENTER_10M = False
-            RUN_ARCHIVED_EXACT_SCALE = False     # 原数据定义；每个 N 是独立 exact artifact
-            RUN_DEVELOPMENT_MASTER_SCALE = False  # low-noise Synthetic + raw-prefix Winnebago，新 scale protocol
-            RUN_MANITOWOC_SCALE = False           # 需要先生成 Manitowoc 300M master
-            RUN_WINNEBAGO_OAT_10M = False
+            RUN_Q256_CENTER_10M = RUN_ALL_FORMAL_EXPERIMENTS
+            RUN_BOX_BUDGET_ABLATION = RUN_ALL_FORMAL_EXPERIMENTS
+            RUN_ARCHIVED_EXACT_SCALE = RUN_ALL_FORMAL_EXPERIMENTS
+            RUN_DEVELOPMENT_MASTER_SCALE = RUN_ALL_FORMAL_EXPERIMENTS
+            RUN_MANITOWOC_SCALE = False
+            RUN_WINNEBAGO_OAT_10M = RUN_ALL_FORMAL_EXPERIMENTS
             RUN_Q128_BRIDGE = False
             RUN_SE_FULL_INVERSE_CONTROL = False
-            # 新 runtime 只开 audit 时，仍应同时保留产生相应 config 的 RUN_* 开关，
-            # 以便自动 staging 那个 profile 所需的数据 bundle；suite 会用 --resume 快速跳过已完成 case。
-            RUN_PREDICTION_AUDIT = False
+            RUN_PREDICTION_AUDIT = RUN_ALL_FORMAL_EXPERIMENTS
 
-            ACTIVE_SIZES = [10_000_000]
-            ALLOW_100M = False
-            ALLOW_300M = False
+            ACTIVE_SIZES = list(FORMAL_SCALE_SIZES) if RUN_ALL_FORMAL_EXPERIMENTS else [10_000_000]
+            ALLOW_100M = RUN_ALL_FORMAL_EXPERIMENTS
+            ALLOW_300M = RUN_ALL_FORMAL_EXPERIMENTS
             PREDICTION_AUDIT_MAX_TRAIN_N = 10_000_000
+            PREDICTION_AUDIT_PROFILES = ["paper_10m"]
+
+            # 一键模式中的 profile 级数据族过滤。尤其禁止把已知失败的
+            # Winnebago raw-prefix development cases 混入 Synthetic scale job。
+            PROFILE_DATASET_FAMILIES = {
+                "scale_development_masters": ["Synthetic"],
+                "scale_archived_exact": ["Winnebago"],
+            } if RUN_ALL_FORMAL_EXPERIMENTS else {}
+            ACTIVE_CASE_IDS = []
 
             # 缺失数据的可选生成动作；默认不执行。
             # controlled scale 缺 30/100/300M；完整 legacy groups 还需补 1/3M。
@@ -120,7 +133,8 @@ def build_notebook() -> dict:
             if RUN_MANITOWOC_SCALE:
                 required_bundles.append("manitowoc_10m")
             if any([
-                RUN_CG_SCREEN_10M, RUN_Q256_CENTER_10M, RUN_WINNEBAGO_OAT_10M,
+                RUN_CG_SCREEN_10M, RUN_Q256_CENTER_10M, RUN_BOX_BUDGET_ABLATION,
+                RUN_WINNEBAGO_OAT_10M,
                 RUN_Q128_BRIDGE, RUN_SE_FULL_INVERSE_CONTROL,
             ]):
                 required_bundles.append("controlled_10m")
@@ -167,7 +181,6 @@ def build_notebook() -> dict:
                 print("Not running in Colab; Drive mount skipped.")
 
             DRIVE_PROJECT_ROOT.mkdir(parents=True, exist_ok=True)
-            DRIVE_RUN_ROOT.mkdir(parents=True, exist_ok=True)
             LOCAL_DATA_DIR.mkdir(parents=True, exist_ok=True)
             print("Drive project:", DRIVE_PROJECT_ROOT)
             print("Local data cache:", LOCAL_DATA_DIR)
@@ -186,15 +199,19 @@ def build_notebook() -> dict:
     cells.append(
         _code(
             r"""
-            def run_cmd(args, *, cwd=None, env=None):
+            def run_cmd(args, *, cwd=None, env=None, check=True):
                 args = [str(x) for x in args]
                 print("+", " ".join(args))
-                return subprocess.run(args, cwd=cwd, env=env, check=True)
+                return subprocess.run(args, cwd=cwd, env=env, check=check)
 
             if not LOCAL_REPO.exists():
                 run_cmd(["git", "clone", REPO_URL, str(LOCAL_REPO)])
             run_cmd(["git", "fetch", "--all", "--tags"], cwd=LOCAL_REPO)
-            checkout_ref = f"origin/{REPO_REF}" if REPO_REF in {"main", "master"} else REPO_REF
+            repo_ref_text = str(REPO_REF).strip()
+            is_full_sha = len(repo_ref_text) == 40 and all(
+                char in "0123456789abcdefABCDEF" for char in repo_ref_text
+            )
+            checkout_ref = repo_ref_text if is_full_sha else f"origin/{repo_ref_text}"
             run_cmd(["git", "checkout", "--detach", checkout_ref], cwd=LOCAL_REPO)
 
             run_cmd([sys.executable, "-m", "pip", "install", "-U", "pip", "setuptools", "wheel"])
@@ -229,7 +246,12 @@ def build_notebook() -> dict:
             GIT_SHA = subprocess.check_output(
                 ["git", "rev-parse", "HEAD"], cwd=LOCAL_REPO, text=True
             ).strip()
+            RUN_TAG = f"{RUN_TAG_PREFIX}_{GIT_SHA[:12]}"
+            DRIVE_RUN_ROOT = DRIVE_PROJECT_ROOT / "runs" / RUN_TAG
+            DRIVE_RUN_ROOT.mkdir(parents=True, exist_ok=True)
             print("Pinned Git SHA:", GIT_SHA)
+            print("Automatic run tag:", RUN_TAG)
+            print("Run output root:", DRIVE_RUN_ROOT)
             """
         )
     )
@@ -279,13 +301,21 @@ def build_notebook() -> dict:
             ]))
             print(json.dumps(runtime_info, indent=2))
 
+            CAN_RUN_300M = bool(
+                gpu_total >= 30 * 2**30 and host_available >= 20 * 2**30
+            )
             if MAX_REQUESTED_N >= 100_000_000 and not ALLOW_100M:
                 raise RuntimeError("The selected workload reaches >=100M; set ALLOW_100M=True after reviewing memory.")
             if MAX_REQUESTED_N >= 300_000_000:
                 if not ALLOW_300M:
                     raise RuntimeError("300M is gated; set ALLOW_300M=True explicitly.")
-                if gpu_total < 30 * 2**30 or host_available < 20 * 2**30:
+                if not CAN_RUN_300M and not RUN_ALL_FORMAL_EXPERIMENTS:
                     raise RuntimeError("300M requires >=30 GiB GPU and >=20 GiB currently available host RAM.")
+                if not CAN_RUN_300M:
+                    print(
+                        "WARNING: 300M jobs will be marked SKIPPED_HARDWARE; "
+                        "10M/30M/100M jobs will still run."
+                    )
             """
         )
     )
@@ -478,10 +508,12 @@ def build_notebook() -> dict:
     cells.append(
         _code(
             r"""
+            SMOKE_OK = True
+            SMOKE_RETURN_CODE = None
             if RUN_PLUMBING_SMOKE:
                 smoke_stem = "USGS_EPT_WI_2County_1_B23_full_workunit_ground_elevation_n10000000"
                 smoke_out = DRIVE_RUN_ROOT / "smoke_cufinufft"
-                run_cmd([
+                smoke_result = run_cmd([
                     sys.executable, "-m",
                     "efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.benchmark",
                     "--dataset-stem", smoke_stem, "--dataset-dir", str(LOCAL_DATA_DIR),
@@ -493,7 +525,14 @@ def build_notebook() -> dict:
                     "--warmup-repeats", "1", "--measured-repeats", "5",
                     "--nufft-backend", "cufinufft", "--strict-gpu-eig",
                     "--output-dir", str(smoke_out),
-                ], cwd=LOCAL_REPO)
+                ], cwd=LOCAL_REPO, check=False)
+                SMOKE_RETURN_CODE = int(smoke_result.returncode)
+                SMOKE_OK = SMOKE_RETURN_CODE == 0
+                if not SMOKE_OK:
+                    print(
+                        f"SMOKE FAILED (return code {SMOKE_RETURN_CODE}). "
+                        "Heavy formal jobs will be recorded as SKIPPED_SMOKE_FAILED."
+                    )
             """
         )
     )
@@ -668,8 +707,9 @@ def build_notebook() -> dict:
 
             - `screen_10m`：CG-only difficulty gate，与正式表分开。
             - `paper_10m`：archived Synthetic、Winnebago、Manitowoc 三个 10M q256 center。
-            - `scale_archived_exact`：原数据定义的 10M/30M/100M/300M exact artifacts；不同 N 不宣称嵌套。
-            - `scale_development_masters`：low-noise Synthetic 与 Winnebago raw-prefix 的新规模实验，不冒充 archived artifacts。
+            - `winnebago_box_budget_n10m`：同一 10M Winnebago 系统上的 4096/8192/16384 memory-budget 消融。
+            - `scale_archived_exact`：一键模式只选择 Winnebago 原数据定义的 exact artifacts；不同 N 不宣称嵌套。
+            - `scale_development_masters`：一键模式只选择 low-noise Synthetic 的同一 300M master 前缀；已知失败的 Winnebago raw-prefix 不进入正式规模任务。
             - `scale_manitowoc_master`：需先准备 Manitowoc 300M master。
             - `winnebago_oat_n10m`：只改变一个 λ 或 ℓ，并配对比较 CG/default/full-eig。
             """
@@ -687,51 +727,227 @@ def build_notebook() -> dict:
             RUNTIME_CONFIG_ROOT.mkdir(parents=True, exist_ok=True)
             expected_controlled_case_count = 0
             selected_case_records = []
-
-            selected_profiles = []
-            if RUN_CG_SCREEN_10M: selected_profiles.append("screen_10m")
-            if RUN_Q256_CENTER_10M: selected_profiles.append("paper_10m")
-            if RUN_ARCHIVED_EXACT_SCALE: selected_profiles.append("scale_archived_exact")
-            if RUN_DEVELOPMENT_MASTER_SCALE: selected_profiles.append("scale_development_masters")
-            if RUN_MANITOWOC_SCALE: selected_profiles.append("scale_manitowoc_master")
-            if RUN_WINNEBAGO_OAT_10M: selected_profiles.append("winnebago_oat_n10m")
-
             base_suite = json.loads(SUITE_TEMPLATE.read_text(encoding="utf-8"))
             controlled_profile_outputs = []
-            for profile_name in selected_profiles:
+
+            def select_profile_cases(profile, *, sizes, families=(), case_ids=()):
+                size_set = {int(n) for n in sizes}
+                family_set = {str(name) for name in families}
+                id_set = {str(case_id) for case_id in case_ids}
+                selected = []
+                for case in profile["cases"]:
+                    if int(case["expected_n_train"]) not in size_set:
+                        continue
+                    if family_set and str(case.get("dataset_family", "")) not in family_set:
+                        continue
+                    if id_set and str(case["id"]) not in id_set:
+                        continue
+                    selected.append(case)
+                return selected
+
+            formal_jobs = []
+            if RUN_ALL_FORMAL_EXPERIMENTS:
+                formal_jobs.extend([
+                    {"job_id": "paper_10m", "profile": "paper_10m", "sizes": [10_000_000], "mandatory": True},
+                    {"job_id": "winnebago_oat_n10m", "profile": "winnebago_oat_n10m", "sizes": [10_000_000], "mandatory": True},
+                    {"job_id": "winnebago_box_budget_n10m", "profile": "winnebago_box_budget_n10m", "sizes": [10_000_000], "mandatory": True},
+                ])
+                for family, profile_name, series in [
+                    ("Synthetic", "scale_development_masters", "synthetic_nested"),
+                    ("Winnebago", "scale_archived_exact", "winnebago_exact"),
+                ]:
+                    for n_train in FORMAL_SCALE_SIZES:
+                        formal_jobs.append({
+                            "job_id": f"{series}_{n_train // 1_000_000}m",
+                            "profile": profile_name,
+                            "sizes": [int(n_train)],
+                            "families": [family],
+                            "mandatory": True,
+                            "gate_series": series,
+                            "requires_gate_n": (
+                                30_000_000 if n_train == 100_000_000
+                                else 100_000_000 if n_train == 300_000_000
+                                else None
+                            ),
+                        })
+            else:
+                manual_profiles = []
+                if RUN_CG_SCREEN_10M: manual_profiles.append("screen_10m")
+                if RUN_Q256_CENTER_10M: manual_profiles.append("paper_10m")
+                if RUN_BOX_BUDGET_ABLATION: manual_profiles.append("winnebago_box_budget_n10m")
+                if RUN_WINNEBAGO_OAT_10M: manual_profiles.append("winnebago_oat_n10m")
+                if RUN_DEVELOPMENT_MASTER_SCALE: manual_profiles.append("scale_development_masters")
+                if RUN_ARCHIVED_EXACT_SCALE: manual_profiles.append("scale_archived_exact")
+                if RUN_MANITOWOC_SCALE: manual_profiles.append("scale_manitowoc_master")
+                formal_jobs.extend({
+                    "job_id": profile_name,
+                    "profile": profile_name,
+                    "sizes": list(ACTIVE_SIZES),
+                    "families": list(PROFILE_DATASET_FAMILIES.get(profile_name, [])),
+                    "case_ids": list(ACTIVE_CASE_IDS),
+                    "mandatory": True,
+                } for profile_name in manual_profiles)
+
+            selected_profiles = list(dict.fromkeys(job["profile"] for job in formal_jobs))
+            campaign_job_rows = []
+            if RUN_PLUMBING_SMOKE:
+                campaign_job_rows.append({
+                    "job_id": "plumbing_smoke",
+                    "profile": "benchmark_smoke",
+                    "dataset_family": "Manitowoc",
+                    "n_train": 5000,
+                    "mandatory": True,
+                    "return_code": SMOKE_RETURN_CODE,
+                    "status": "PASS" if SMOKE_OK else "EXECUTION_ERROR",
+                    "reason": "" if SMOKE_OK else "smoke command returned non-zero",
+                    "case_count": 1,
+                    "elapsed_seconds": None,
+                })
+            CAMPAIGN_JOBS_CSV = DRIVE_RUN_ROOT / "campaign_jobs.csv"
+            CAMPAIGN_JOBS_JSON = DRIVE_RUN_ROOT / "campaign_jobs.json"
+
+            def write_campaign_checkpoint():
+                payload = json.dumps(campaign_job_rows, indent=2)
+                partial_json = CAMPAIGN_JOBS_JSON.with_suffix(".json.partial")
+                partial_json.write_text(payload, encoding="utf-8")
+                partial_json.replace(CAMPAIGN_JOBS_JSON)
+                frame = pd.DataFrame(campaign_job_rows)
+                partial_csv = CAMPAIGN_JOBS_CSV.with_suffix(".csv.partial")
+                frame.to_csv(partial_csv, index=False)
+                partial_csv.replace(CAMPAIGN_JOBS_CSV)
+
+            def classify_suite_invocation(return_code, status_rows, expected_case_count):
+                terminal = [str(row.get("status", "")) for row in status_rows]
+                complete_status = (
+                    len(status_rows) == int(expected_case_count)
+                    and all(status not in {"", "running"} for status in terminal)
+                )
+                hard_error = any(status == "error" for status in terminal)
+                scientific_failure = any(
+                    row.get("ineligible_methods") or row.get("diagnostic_errors")
+                    for row in status_rows
+                )
+                if not complete_status or hard_error:
+                    return "EXECUTION_ERROR", "missing/nonterminal case status or case-level error"
+                if scientific_failure or int(return_code) == 2:
+                    return "SCIENTIFIC_FAIL", "complete artifacts contain ineligible methods or diagnostic errors"
+                if int(return_code) == 0:
+                    return "PASS", ""
+                # Backward compatibility with older suite.py, which returned 1 for a
+                # complete scientific failure.
+                if int(return_code) == 1 and scientific_failure:
+                    return "SCIENTIFIC_FAIL", "legacy scientific-failure exit code"
+                return "EXECUTION_ERROR", f"unexpected suite return code {return_code}"
+
+            def scale_core_pass(case_records):
+                required = {"cg", "default", "full-eig"}
+                for record in case_records:
+                    summary_path = Path(record["run_dir"]) / "matched_summary.csv"
+                    config_path = Path(record["run_dir"]) / "experiment_config.json"
+                    if not summary_path.is_file() or not config_path.is_file():
+                        return False
+                    summary = pd.read_csv(summary_path)
+                    config = json.loads(config_path.read_text(encoding="utf-8"))
+                    core = summary.loc[summary["method"].astype(str).isin(required)].copy()
+                    if set(core["method"].astype(str)) != required:
+                        return False
+                    expected_repeats = int(config.get("measured_repeats", 5))
+                    eligible = core["performance_claim_eligible"].astype(str).str.lower().eq("true")
+                    converged = pd.to_numeric(core["converged_repeats"], errors="coerce").eq(expected_repeats)
+                    residual_ok = pd.to_numeric(core["true_relres_max"], errors="coerce").le(
+                        float(config.get("tol", 1e-7))
+                    )
+                    if not bool((eligible & converged & residual_ok).all()):
+                        return False
+                return True
+
+            gate_results = {}
+            for job in formal_jobs:
+                job_id = str(job["job_id"])
+                profile_name = str(job["profile"])
+                sizes = [int(n) for n in job["sizes"]]
+                families = list(job.get("families", PROFILE_DATASET_FAMILIES.get(profile_name, [])))
+                started = time.perf_counter()
+                base_row = {
+                    "job_id": job_id,
+                    "profile": profile_name,
+                    "dataset_family": ",".join(families),
+                    "n_train": ",".join(str(n) for n in sizes),
+                    "mandatory": bool(job.get("mandatory", True)),
+                }
+
+                skip_reason = ""
+                if not SMOKE_OK:
+                    skip_reason = "SKIPPED_SMOKE_FAILED"
+                elif 300_000_000 in sizes and not CAN_RUN_300M:
+                    skip_reason = "SKIPPED_HARDWARE"
+                required_gate_n = job.get("requires_gate_n")
+                if required_gate_n is not None:
+                    gate_key = (str(job.get("gate_series")), int(required_gate_n))
+                    if gate_results.get(gate_key) is not True:
+                        skip_reason = "SKIPPED_UPSTREAM_GATE"
+                if skip_reason:
+                    campaign_job_rows.append({
+                        **base_row, "return_code": None, "status": skip_reason,
+                        "reason": skip_reason, "case_count": 0,
+                        "elapsed_seconds": time.perf_counter() - started,
+                    })
+                    write_campaign_checkpoint()
+                    print(f"[{job_id}] {skip_reason}")
+                    continue
+
                 profile = copy.deepcopy(base_suite["profiles"][profile_name])
-                cases = [
-                    case for case in profile["cases"]
-                    if int(case["expected_n_train"]) in {int(n) for n in ACTIVE_SIZES}
-                ]
+                cases = select_profile_cases(
+                    profile,
+                    sizes=sizes,
+                    families=families,
+                    case_ids=job.get("case_ids", ()),
+                )
                 if not cases:
-                    raise RuntimeError(
-                        f"{profile_name} has no case matching ACTIVE_SIZES={ACTIVE_SIZES}; "
-                        "refusing to mark an empty selected workload complete."
-                    )
+                    campaign_job_rows.append({
+                        **base_row, "return_code": None, "status": "CONFIG_ERROR",
+                        "reason": "profile filter selected zero cases", "case_count": 0,
+                        "elapsed_seconds": time.perf_counter() - started,
+                    })
+                    write_campaign_checkpoint()
+                    print(f"[{job_id}] CONFIG_ERROR: profile filter selected zero cases")
+                    if job.get("gate_series"):
+                        gate_results[(str(job["gate_series"]), sizes[0])] = False
+                    continue
+
                 if profile_name == "scale_archived_exact":
-                    validate_archived_synthetic_inputs(
+                    synthetic_sizes = [
                         case["expected_n_train"] for case in cases
-                        if case["id"].startswith("synthetic_")
-                    )
+                        if case.get("dataset_family") == "Synthetic"
+                    ]
+                    if synthetic_sizes:
+                        validate_archived_synthetic_inputs(synthetic_sizes)
                 profile["cases"] = cases
-                expected_controlled_case_count += len(cases)
                 runtime_suite = {
                     "base": copy.deepcopy(base_suite["base"]),
                     "profiles": {profile_name: profile},
                 }
-                runtime_path = RUNTIME_CONFIG_ROOT / f"{profile_name}.json"
+                runtime_path = RUNTIME_CONFIG_ROOT / f"{job_id}.json"
                 runtime_path.write_text(json.dumps(runtime_suite, indent=2), encoding="utf-8")
-                output_root = CONTROLLED_OUTPUT_ROOT / profile_name
+                output_root = CONTROLLED_OUTPUT_ROOT / profile_name / "_jobs" / job_id
+                output_root.mkdir(parents=True, exist_ok=True)
+                job_case_records = []
                 for case in cases:
-                    selected_case_records.append({
+                    record = {
                         "output_group": profile_name,
                         "suite_profile": profile_name,
+                        "job_id": job_id,
                         "case_id": case["id"],
+                        "dataset_family": case.get("dataset_family", ""),
                         "run_dir": output_root / case["id"],
                         "scale_role": case.get("scale_role"),
-                    })
-                run_cmd([
+                        "mandatory": bool(job.get("mandatory", True)),
+                    }
+                    selected_case_records.append(record)
+                    job_case_records.append(record)
+                expected_controlled_case_count += len(cases)
+
+                completed = run_cmd([
                     sys.executable, "-m",
                     "efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.suite",
                     "--config", str(runtime_path), "--profile", profile_name,
@@ -739,9 +955,32 @@ def build_notebook() -> dict:
                     "--output-root", str(output_root),
                     "--nufft-backend", "cufinufft", "--strict-gpu-eig",
                     "--execute", "--resume",
-                ], cwd=LOCAL_REPO)
+                ], cwd=LOCAL_REPO, check=False)
+                status_path = output_root / "suite_status.json"
+                try:
+                    status_rows = json.loads(status_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    status_rows = []
+                job_status, reason = classify_suite_invocation(
+                    completed.returncode, status_rows, len(cases)
+                )
+                campaign_job_rows.append({
+                    **base_row,
+                    "return_code": int(completed.returncode),
+                    "status": job_status,
+                    "reason": reason,
+                    "case_count": len(cases),
+                    "suite_status_path": str(status_path),
+                    "elapsed_seconds": time.perf_counter() - started,
+                })
                 controlled_profile_outputs.append(output_root)
-            print("Controlled profile outputs:", controlled_profile_outputs)
+                if job.get("gate_series"):
+                    gate_results[(str(job["gate_series"]), sizes[0])] = scale_core_pass(job_case_records)
+                write_campaign_checkpoint()
+                print(f"[{job_id}] {job_status}: {reason or 'all selected cases passed'}")
+
+            print("Controlled job outputs:", [str(path) for path in controlled_profile_outputs])
+            display(pd.DataFrame(campaign_job_rows))
             """
         )
     )
@@ -889,6 +1128,8 @@ def build_notebook() -> dict:
                 audit_rows.append({
                     "output_group": record["output_group"],
                     "suite_profile": record["suite_profile"],
+                    "job_id": record.get("job_id", record["suite_profile"]),
+                    "mandatory": bool(record.get("mandatory", True)),
                     "case": record["case_id"],
                     "N": manifest.get("n_train"),
                     "system_id": manifest.get("system_id"),
@@ -901,7 +1142,7 @@ def build_notebook() -> dict:
             controlled_artifact_audit = pd.DataFrame(
                 audit_rows,
                 columns=[
-                    "output_group", "suite_profile", "case", "N", "system_id",
+                    "output_group", "suite_profile", "job_id", "mandatory", "case", "N", "system_id",
                     "weights_sha256", "gf_sha256", "rhs_sha256", "warning", "status",
                 ],
             )
@@ -916,12 +1157,16 @@ def build_notebook() -> dict:
             if ignored_stale_dirs:
                 print(f"Ignored {len(ignored_stale_dirs)} stale/non-selected controlled run directories.")
             if len(controlled_artifact_audit) != expected_controlled_case_count:
-                raise RuntimeError(
+                print(
+                    "CONTROLLED AUDIT COUNT MISMATCH: "
                     f"Expected exactly {expected_controlled_case_count} controlled cases, "
                     f"but found {len(controlled_artifact_audit)} manifests."
                 )
             if not controlled_artifact_audit.empty and not controlled_artifact_audit["status"].eq("PASS").all():
-                raise RuntimeError("Controlled artifact audit failed; do not use these timings in the paper.")
+                print(
+                    "CONTROLLED ARTIFACT AUDIT CONTAINS FAILURES. "
+                    "Failed rows remain in the diagnostic tables and are excluded from performance plots."
+                )
             """
         )
     )
@@ -940,26 +1185,26 @@ def build_notebook() -> dict:
             prediction_outputs = []
             expected_prediction_case_count = 0
             if RUN_PREDICTION_AUDIT:
-                if not selected_case_records:
-                    raise RuntimeError(
-                        "RUN_PREDICTION_AUDIT requires at least one selected controlled profile in this invocation."
-                    )
+                prediction_records = [
+                    record for record in selected_case_records
+                    if record.get("suite_profile") in set(PREDICTION_AUDIT_PROFILES)
+                ]
+                expected_prediction_case_count = len(prediction_records)
                 prediction_targets = []
-                for record in selected_case_records:
+                prediction_errors = []
+                for record in prediction_records:
                     config_path = Path(record["run_dir"]) / "experiment_config.json"
                     manifest_path = Path(record["run_dir"]) / "system_manifest.json"
-                    if not manifest_path.is_file():
-                        raise RuntimeError(f"Prediction target lacks manifest: {record['run_dir']}")
+                    if not manifest_path.is_file() or not config_path.is_file():
+                        prediction_errors.append(
+                            f"prediction target lacks config/manifest: {record['run_dir']}"
+                        )
+                        continue
                     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
                     n_train = int(manifest["n_train"])
                     if n_train > int(PREDICTION_AUDIT_MAX_TRAIN_N):
                         continue
                     prediction_targets.append((record, config_path, manifest))
-                expected_prediction_case_count = len(prediction_targets)
-                if expected_prediction_case_count == 0:
-                    raise RuntimeError(
-                        "No selected controlled case is within PREDICTION_AUDIT_MAX_TRAIN_N."
-                    )
                 for record, config_path, manifest in prediction_targets:
                     audit_out = config_path.parent / "prediction_audit"
                     if (audit_out / "prediction_audit.json").is_file():
@@ -968,13 +1213,11 @@ def build_notebook() -> dict:
                         )
                         current_config_sha = hashlib.sha256(config_path.read_bytes()).hexdigest()
                         if existing.get("config_source_sha256") != current_config_sha:
-                            raise RuntimeError(
-                                f"Stale prediction audit for {record['case_id']}; change RUN_TAG or remove only that audit."
-                            )
+                            prediction_errors.append(f"stale prediction audit: {record['case_id']}")
+                            continue
                         if existing.get("dataset_content_index_sha256") != manifest.get("dataset_content_index_sha256"):
-                            raise RuntimeError(
-                                f"Prediction audit data mismatch for {record['case_id']}; change RUN_TAG."
-                            )
+                            prediction_errors.append(f"prediction data mismatch: {record['case_id']}")
+                            continue
                         audit_source_sha = existing.get("source_bundle_sha256")
                         timing_source_sha = manifest.get("source_bundle_sha256")
                         if (
@@ -982,13 +1225,12 @@ def build_notebook() -> dict:
                             and timing_source_sha is not None
                             and audit_source_sha != timing_source_sha
                         ):
-                            raise RuntimeError(
-                                f"Prediction audit source mismatch for {record['case_id']}; change RUN_TAG."
-                            )
+                            prediction_errors.append(f"prediction source mismatch: {record['case_id']}")
+                            continue
                         print("Prediction audit already exists; skipping", config_path.parent.name)
                         prediction_outputs.append(audit_out)
                         continue
-                    run_cmd([
+                    completed = run_cmd([
                         sys.executable, "-m",
                         "efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.prediction_audit",
                         "--config", str(config_path),
@@ -996,8 +1238,31 @@ def build_notebook() -> dict:
                         "--warmup-solves", "1",
                         "--max-test", str(n_train // 4),
                         "--output-dir", str(audit_out),
-                    ], cwd=LOCAL_REPO)
-                    prediction_outputs.append(audit_out)
+                    ], cwd=LOCAL_REPO, check=False)
+                    if completed.returncode == 0 and (audit_out / "prediction_audit.json").is_file():
+                        prediction_outputs.append(audit_out)
+                    else:
+                        prediction_errors.append(
+                            f"prediction command failed for {record['case_id']} rc={completed.returncode}"
+                        )
+                prediction_status = (
+                    "PASS" if expected_prediction_case_count > 0
+                    and len(prediction_outputs) == expected_prediction_case_count
+                    and not prediction_errors else "EXECUTION_ERROR"
+                )
+                campaign_job_rows.append({
+                    "job_id": "paper_10m_prediction_audit",
+                    "profile": "prediction_audit",
+                    "dataset_family": "Synthetic,Winnebago,Manitowoc",
+                    "n_train": "10000000",
+                    "mandatory": True,
+                    "return_code": 0 if prediction_status == "PASS" else 1,
+                    "status": prediction_status,
+                    "reason": "; ".join(prediction_errors),
+                    "case_count": expected_prediction_case_count,
+                    "elapsed_seconds": None,
+                })
+                write_campaign_checkpoint()
             print("Prediction audit outputs:", prediction_outputs)
             """
         )
@@ -1151,11 +1416,14 @@ def build_notebook() -> dict:
             )
             if not controlled_catalog.empty:
                 duplicate_key = ["output_group", "case_id", "method"]
-                duplicated = controlled_catalog.duplicated(duplicate_key, keep=False)
+                selected_for_duplicate_check = controlled_catalog.loc[
+                    controlled_catalog["selected_in_this_invocation"]
+                ]
+                duplicated = selected_for_duplicate_check.duplicated(duplicate_key, keep=False)
                 if bool(duplicated.any()):
                     raise RuntimeError(
                         "Duplicate controlled summary rows:\n"
-                        + controlled_catalog.loc[duplicated, duplicate_key].to_string(index=False)
+                        + selected_for_duplicate_check.loc[duplicated, duplicate_key].to_string(index=False)
                     )
             SELECTED_CONTROLLED_INDEX_PATH = DRIVE_RUN_ROOT / "selected_controlled_index.csv"
             selected_controlled = (
@@ -1165,7 +1433,10 @@ def build_notebook() -> dict:
             selected_controlled.to_csv(SELECTED_CONTROLLED_INDEX_PATH, index=False)
             INELIGIBLE_INDEX_PATH = DRIVE_RUN_ROOT / "controlled_ineligible_rows.csv"
             ineligible_controlled = (
-                controlled_catalog.loc[~controlled_catalog["claim_eligible"]].copy()
+                controlled_catalog.loc[
+                    controlled_catalog["selected_in_this_invocation"]
+                    & ~controlled_catalog["claim_eligible"]
+                ].copy()
                 if not controlled_catalog.empty else pd.DataFrame()
             )
             ineligible_controlled.to_csv(INELIGIBLE_INDEX_PATH, index=False)
@@ -1389,6 +1660,84 @@ def build_notebook() -> dict:
                 GENERATED_PLOT_PATHS.append(oat_plot_path)
                 plt.show()
 
+            # Fixed-system active-box memory-budget ablation.
+            BOX_BUDGET_SYSTEM_MATCH = None
+            budget_plot = (
+                controlled_plot.loc[
+                    controlled_plot["output_group"].eq("winnebago_box_budget_n10m")
+                ].copy()
+                if not controlled_plot.empty else pd.DataFrame()
+            )
+            if not budget_plot.empty:
+                case_systems = budget_plot[[
+                    "case_id", "system_id", "weights_sha256", "gf_sha256", "rhs_sha256"
+                ]].drop_duplicates()
+                BOX_BUDGET_SYSTEM_MATCH = bool(
+                    len(case_systems) == 3
+                    and all(case_systems[field].notna().all() and case_systems[field].nunique() == 1
+                            for field in ("system_id", "weights_sha256", "gf_sha256", "rhs_sha256"))
+                )
+                if not BOX_BUDGET_SYSTEM_MATCH:
+                    print(
+                        "BOX-BUDGET AUDIT FAILED: the three budget cases do not share "
+                        "identical fixed-system component hashes."
+                    )
+                budget_key = ["case_id", "method"]
+                if bool(budget_plot.duplicated(budget_key, keep=False).any()):
+                    print("BOX-BUDGET AUDIT FAILED: duplicate case/method rows.")
+                    BOX_BUDGET_SYSTEM_MATCH = False
+                BOX_BUDGET_SUMMARY_PATH = DRIVE_RUN_ROOT / "winnebago_box_budget_10m_summary.csv"
+                budget_plot.sort_values(["cfg_box_budget", "method"]).to_csv(
+                    BOX_BUDGET_SUMMARY_PATH, index=False
+                )
+                default_budget = budget_plot.loc[budget_plot["method"].eq("default")].sort_values(
+                    "cfg_box_budget"
+                )
+                if not default_budget.empty:
+                    x_values = pd.to_numeric(default_budget["cfg_box_budget"], errors="raise").to_numpy(float)
+                    actual_sizes = pd.to_numeric(default_budget["box_size"], errors="coerce").to_numpy(float)
+                    fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.0))
+                    axes[0].plot(
+                        x_values,
+                        pd.to_numeric(default_budget["cold_speedup_median"], errors="raise"),
+                        marker="o", color=METHOD_COLORS["default"],
+                    )
+                    axes[0].axhline(1.0, color="black", lw=1, ls="--")
+                    axes[0].set_ylabel("paired cold speedup over CG")
+                    axes[1].plot(
+                        x_values,
+                        pd.to_numeric(default_budget["iterations_median"], errors="raise"),
+                        marker="o", color=METHOD_COLORS["default"],
+                    )
+                    axes[1].set_ylabel("median PCG iterations")
+                    axes[2].plot(
+                        x_values,
+                        pd.to_numeric(default_budget["preconditioner_storage_bytes"], errors="raise") / 2**20,
+                        marker="o", color=METHOD_COLORS["default"],
+                    )
+                    axes[2].set_ylabel("preconditioner storage (MiB)")
+                    for ax in axes:
+                        ax.set_xscale("log", base=2)
+                        ax.set_xlabel("nominal box budget")
+                        ax.grid(True, alpha=.25)
+                        ax.set_xticks(x_values, [f"{int(x):,}" for x in x_values])
+                    for x_value, actual_size in zip(x_values, actual_sizes):
+                        if np.isfinite(actual_size):
+                            axes[0].annotate(
+                                f"actual {int(actual_size):,}",
+                                (x_value, float(default_budget.loc[
+                                    pd.to_numeric(default_budget["cfg_box_budget"], errors="coerce").eq(x_value),
+                                    "cold_speedup_median",
+                                ].iloc[0])),
+                                xytext=(0, 8), textcoords="offset points", ha="center", fontsize=8,
+                            )
+                    fig.suptitle("Winnebago 10M fixed-system active-box budget ablation")
+                    fig.tight_layout()
+                    budget_plot_path = DRIVE_RUN_ROOT / "winnebago_box_budget_10m.png"
+                    fig.savefig(budget_plot_path, dpi=180, bbox_inches="tight")
+                    GENERATED_PLOT_PATHS.append(budget_plot_path)
+                    plt.show()
+
             # Scale protocols remain separate: never connect archived exact, development master,
             # Manitowoc master, OAT, or paper_10m rows into one curve.
             SCALE_OUTPUT_GROUPS = {
@@ -1508,6 +1857,9 @@ def build_notebook() -> dict:
                 "active_sizes": [int(n) for n in ACTIVE_SIZES],
                 "legacy_groups": list(RUN_LEGACY_GROUPS),
                 "controlled_profiles": selected_profiles,
+                "campaign_jobs_csv": str(CAMPAIGN_JOBS_CSV),
+                "campaign_jobs_json": str(CAMPAIGN_JOBS_JSON),
+                "campaign_jobs": campaign_job_rows,
                 "controlled_case_count": int(len(controlled_artifact_audit)),
                 "expected_controlled_case_count": int(expected_controlled_case_count),
                 "selected_controlled_cases": [
@@ -1530,6 +1882,7 @@ def build_notebook() -> dict:
                 "controlled_ineligible_rows": str(INELIGIBLE_INDEX_PATH),
                 "generated_plots": [str(path) for path in GENERATED_PLOT_PATHS],
                 "expected_prediction_case_count": int(expected_prediction_case_count),
+                "box_budget_fixed_system_match": BOX_BUDGET_SYSTEM_MATCH,
             }
             legacy_complete = all(
                 (DRIVE_RUN_ROOT / "legacy_archived_pipeline" / group / "_SUCCESS.json").is_file()
@@ -1553,14 +1906,27 @@ def build_notebook() -> dict:
             workload_requested = bool(
                 RUN_LEGACY_GROUPS or selected_profiles or extra_suites or RUN_PREDICTION_AUDIT
             )
+            mandatory_jobs = [row for row in campaign_job_rows if bool(row.get("mandatory", True))]
+            campaign_complete = bool(
+                mandatory_jobs and all(str(row.get("status")) == "PASS" for row in mandatory_jobs)
+            )
             run_verified = bool(
                 workload_requested and legacy_complete and controlled_complete
-                and prediction_complete and INDEX_PATH.is_file()
+                and prediction_complete and campaign_complete and INDEX_PATH.is_file()
+                and (BOX_BUDGET_SYSTEM_MATCH is not False)
             )
+            final_manifest["campaign_complete"] = campaign_complete
             final_manifest["run_verified"] = run_verified
             FINAL_MANIFEST_PATH = DRIVE_RUN_ROOT / "colab_run_manifest.json"
             FINAL_MANIFEST_PATH.write_text(json.dumps(final_manifest, indent=2), encoding="utf-8")
             print(json.dumps(final_manifest, indent=2))
+            if run_verified:
+                print("ONE-CLICK CAMPAIGN VERIFIED: all mandatory jobs passed.")
+            else:
+                print(
+                    "ONE-CLICK CAMPAIGN COMPLETED WITH FAILURES/SKIPS. "
+                    "See campaign_jobs.csv and controlled_artifact_audit.csv; completed results remain usable."
+                )
 
             if DISCONNECT_RUNTIME_WHEN_VERIFIED:
                 if not run_verified or not FINAL_MANIFEST_PATH.is_file():
