@@ -28,7 +28,7 @@ from ...benchmark_dataset.stored_npz import (
     load_stored_npz_prefix,
 )
 from ...backends import BackendConfig, build_gpu_backend_bundle
-from ...contexts import GPUOperatorContext, ensure_gpu_data_context
+from ...contexts import GPUDataContext, GPUOperatorContext, ensure_gpu_data_context
 from ...deflation_core import make_jacobi_precond
 from ...iterative_solvers import cg_solve_gpu, pcg_solve_gpu
 from ...v1_ops import apply_A_block_v1, apply_A_v1, gpu_precompute_v1
@@ -69,6 +69,33 @@ _VALID_METHODS = {
     "nystrom",
     "rpcholesky",
 }
+
+
+# These are exactly the ControlledConfig fields that can change the arrays
+# defining the Fourier system.  Method, timing, diagnostic, and active-box
+# settings are deliberately absent so a suite can compare them on one A,b.
+_SYSTEM_CONFIG_FIELDS = (
+    "dataset_stem",
+    "n_train",
+    "subset_seed",
+    "subset_mode",
+    "kernel_family",
+    "lengthscale",
+    "nu",
+    "variance",
+    "reg_lambda",
+    "fourier_eps",
+    "nufft_tol",
+    "l2_scaled",
+    "precision",
+    "nufft_backend",
+    "precompute_chunk_size",
+)
+
+_SYSTEM_ARTIFACT_SCHEMA_VERSION = 1
+TIMING_SYSTEM_ARTIFACT_FILENAME = "timing_system_arrays.npz"
+TIMING_SOLUTIONS_ARTIFACT_FILENAME = "timing_prediction_solutions.npz"
+TIMING_SOLUTIONS_MANIFEST_FILENAME = "timing_prediction_solutions.json"
 
 
 @dataclass(frozen=True)
@@ -200,6 +227,73 @@ def _sync_device(backend: Any) -> None:
         cuda.runtime.deviceSynchronize()
 
 
+_RUNTIME_MANIFEST_FIELDS = (
+    "device_name",
+    "device_id",
+    "supports_fp64",
+    "supports_complex128",
+    "cupy_version",
+    "cuda_runtime_version",
+    "cuda_driver_version",
+    "compute_capability",
+    "nufft_backend_resolved",
+)
+
+
+def _backend_runtime_manifest(backend: Any) -> dict[str, Any]:
+    """Describe the backend that will perform the current method timings."""
+    xp = backend.xp
+    runtime_version = None
+    driver_version = None
+    compute_capability = None
+    try:
+        runtime_version = int(xp.cuda.runtime.runtimeGetVersion())
+        driver_version = int(xp.cuda.runtime.driverGetVersion())
+        props = xp.cuda.runtime.getDeviceProperties(int(backend.device_id))
+        major = props.get("major") if isinstance(props, dict) else getattr(props, "major", None)
+        minor = props.get("minor") if isinstance(props, dict) else getattr(props, "minor", None)
+        if major is not None and minor is not None:
+            compute_capability = f"{int(major)}.{int(minor)}"
+    except Exception:
+        pass
+    manifest = {
+        "device_name": str(getattr(backend, "device_name", "unknown")),
+        "device_id": int(getattr(backend, "device_id", 0)),
+        "supports_fp64": bool(getattr(backend, "supports_fp64", True)),
+        "supports_complex128": bool(
+            getattr(backend, "supports_complex128", True)
+        ),
+        "cupy_version": str(getattr(xp, "__version__", "unknown")),
+        "cuda_runtime_version": runtime_version,
+        "cuda_driver_version": driver_version,
+        "compute_capability": compute_capability,
+        "nufft_backend_resolved": str(getattr(backend, "nufft_name", "unknown")),
+    }
+    encoded = json.dumps(
+        manifest,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    manifest["timing_runtime_sha256"] = hashlib.sha256(encoded).hexdigest()
+    return manifest
+
+
+def probe_timing_runtime(nufft_backend: str) -> dict[str, Any]:
+    """Resolve the current GPU/NUFFT runtime without constructing a data system."""
+    _ensure_writable_runtime_temp()
+    backend = build_gpu_backend_bundle(BackendConfig(nufft=str(nufft_backend)))
+    return _backend_runtime_manifest(backend)
+
+
+def _runtime_subset(manifest: dict[str, Any]) -> dict[str, Any]:
+    subset = {field: manifest.get(field) for field in _RUNTIME_MANIFEST_FIELDS}
+    if manifest.get("timing_runtime_sha256"):
+        subset["timing_runtime_sha256"] = manifest["timing_runtime_sha256"]
+    return subset
+
+
 def _ensure_writable_runtime_temp() -> str:
     """Give CUDA compilers a known writable temp directory.
 
@@ -241,22 +335,41 @@ def _hash_array(hasher: Any, name: str, value: Any) -> None:
     hasher.update(arr.view(np.uint8))
 
 
-def system_fingerprint(data_ctx: Any, reg_lambda: float) -> str:
-    """Hash exactly the arrays that define the fixed Fourier system."""
+def system_fingerprint(
+    data_ctx: Any,
+    reg_lambda: float,
+    *,
+    solve_rhs_gpu: Any | None = None,
+) -> str:
+    """Hash exactly the arrays used by the fixed Fourier solve.
+
+    ``data_ctx.rhs_gpu`` is the precompute/storage RHS.  In mixed precision the
+    solver consumes a cast copy, so callers that own a :class:`PreparedSystem`
+    must pass its ``rhs_gpu`` as ``solve_rhs_gpu``.  Keeping the optional
+    fallback preserves the small standalone helpers that operate directly on a
+    data context while ensuring the formal runner hashes the actual ``b``.
+    """
+    solve_rhs = data_ctx.rhs_gpu if solve_rhs_gpu is None else solve_rhs_gpu
     hasher = hashlib.sha256()
     _hash_array(hasher, "weights", data_ctx.weights_gpu_flat)
     _hash_array(hasher, "gf", data_ctx.gf_gpu)
-    _hash_array(hasher, "rhs", data_ctx.rhs_gpu)
+    _hash_array(hasher, "rhs", solve_rhs)
     hasher.update(np.asarray([float(reg_lambda)], dtype=np.float64).tobytes())
     return hasher.hexdigest()
 
 
-def system_component_fingerprints(data_ctx: Any) -> dict[str, str]:
-    """Hash each fixed-system component separately for cross-run provenance."""
+def system_component_fingerprints(
+    data_ctx: Any,
+    *,
+    solve_rhs_gpu: Any | None = None,
+) -> dict[str, str]:
+    """Hash fixed-system components, including the RHS actually solved."""
+    solve_rhs = data_ctx.rhs_gpu if solve_rhs_gpu is None else solve_rhs_gpu
     components = {
         "weights_sha256": ("weights", data_ctx.weights_gpu_flat),
         "gf_sha256": ("gf", data_ctx.gf_gpu),
-        "rhs_sha256": ("rhs", data_ctx.rhs_gpu),
+        "rhs_sha256": ("rhs", solve_rhs),
+        "rhs_storage_sha256": ("rhs_storage", data_ctx.rhs_gpu),
     }
     fingerprints: dict[str, str] = {}
     for field, (name, value) in components.items():
@@ -264,6 +377,402 @@ def system_component_fingerprints(data_ctx: Any) -> dict[str, str]:
         _hash_array(hasher, name, value)
         fingerprints[field] = hasher.hexdigest()
     return fingerprints
+
+
+def system_config_payload(cfg: ControlledConfig) -> dict[str, Any]:
+    """Return the canonical config subset that determines the Fourier system."""
+    payload: dict[str, Any] = {}
+    for field_name in _SYSTEM_CONFIG_FIELDS:
+        value = getattr(cfg, field_name)
+        if field_name == "n_train":
+            value = _normalize_n_train(value)
+        elif field_name == "precompute_chunk_size":
+            value = None if value is None else int(value)
+        elif field_name in {"subset_seed"}:
+            value = int(value)
+        elif field_name in {
+            "lengthscale",
+            "nu",
+            "variance",
+            "reg_lambda",
+            "fourier_eps",
+            "nufft_tol",
+        }:
+            value = float(value)
+        elif field_name == "l2_scaled":
+            value = bool(value)
+        elif field_name in {
+            "subset_mode",
+            "kernel_family",
+            "precision",
+            "nufft_backend",
+        }:
+            value = value.strip().lower()
+        payload[field_name] = value
+    return payload
+
+
+def system_config_fingerprint(cfg: ControlledConfig) -> str:
+    """Hash the canonical system-building config, excluding method settings."""
+    encoded = json.dumps(
+        system_config_payload(cfg),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _array_artifact_fingerprint(name: str, value: Any) -> str:
+    hasher = hashlib.sha256()
+    _hash_array(hasher, name, value)
+    return hasher.hexdigest()
+
+
+def _artifact_array_descriptor(name: str, value: np.ndarray) -> dict[str, Any]:
+    array = np.ascontiguousarray(value)
+    return {
+        "dtype": str(array.dtype),
+        "shape": [int(size) for size in array.shape],
+        "sha256": _array_artifact_fingerprint(name, array),
+    }
+
+
+def _system_artifact_arrays(system: PreparedSystem) -> dict[str, np.ndarray]:
+    """Copy the frozen solve/prediction context to exact host arrays."""
+    ctx = system.data_ctx
+    arrays = {
+        "weights_flat": np.ascontiguousarray(_asnumpy(ctx.weights_gpu_flat)),
+        "weights_np_flat": np.ascontiguousarray(
+            np.asarray(ctx.weights_np_flat, dtype=np.float64).reshape(-1)
+        ),
+        "gf": np.ascontiguousarray(_asnumpy(ctx.gf_gpu)),
+        "rhs_storage": np.ascontiguousarray(_asnumpy(ctx.rhs_gpu)),
+        "rhs_solve": np.ascontiguousarray(_asnumpy(system.rhs_gpu)),
+    }
+    for name, value in (
+        ("xtxcol", getattr(ctx, "xtxcol_gpu", None)),
+        ("x_center", getattr(ctx, "x_center_gpu", None)),
+    ):
+        if value is not None:
+            arrays[name] = np.ascontiguousarray(_asnumpy(value))
+    return arrays
+
+
+def save_prepared_system_artifact(
+    system: PreparedSystem,
+    cfg: ControlledConfig,
+    path: str | Path,
+) -> Path:
+    """Atomically persist one exact PreparedSystem as a portable NPZ artifact.
+
+    The artifact stores the byte-exact weights, Gf, storage/solve rhs, spatial
+    Toeplitz column, prediction center, and context metadata.  Large training
+    arrays are intentionally omitted because they are not needed after Fourier
+    precomputation.
+    """
+    _validate_prepared_system_for_config(system, cfg)
+    target = Path(path).expanduser().resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    arrays = _system_artifact_arrays(system)
+    clean_system_manifest = {
+        key: value
+        for key, value in system.manifest.items()
+        if not str(key).startswith(("system_artifact_", "timing_solution_"))
+    }
+    artifact_manifest = {
+        "schema_version": _SYSTEM_ARTIFACT_SCHEMA_VERSION,
+        "system_id": system.system_id,
+        "system_config": system_config_payload(cfg),
+        "system_config_sha256": system_config_fingerprint(cfg),
+        "reg_lambda": float(system.reg_lambda),
+        "setup_seconds": float(system.setup_seconds),
+        "source_bundle_sha256": system.manifest.get("source_bundle_sha256"),
+        "dataset_content_index_sha256": system.manifest.get(
+            "dataset_content_index_sha256"
+        ),
+        "dataset_metadata_sha256": system.manifest.get("dataset_metadata_sha256"),
+        "data_context_meta": _sanitize_json(dict(system.data_ctx.meta)),
+        "system_manifest": _sanitize_json(clean_system_manifest),
+        "arrays": {
+            name: _artifact_array_descriptor(name, value)
+            for name, value in arrays.items()
+        },
+    }
+    metadata_bytes = json.dumps(
+        _sanitize_json(artifact_manifest),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    payload = dict(arrays)
+    payload["artifact_manifest_json"] = np.frombuffer(metadata_bytes, dtype=np.uint8)
+    temporary = target.with_name(f".{target.name}.tmp")
+    with temporary.open("wb") as handle:
+        np.savez(handle, **payload)
+    temporary.replace(target)
+    artifact_sha256 = hashlib.sha256(target.read_bytes()).hexdigest()
+    loaded_from_artifact = bool(
+        system.manifest.get("prepared_system_loaded_from_artifact", False)
+    )
+    system.manifest.update(
+        {
+            "system_artifact_schema_version": _SYSTEM_ARTIFACT_SCHEMA_VERSION,
+            "system_artifact_path": str(target),
+            "system_artifact_sha256": artifact_sha256,
+            "system_artifact_export_path": str(target),
+            "system_artifact_export_sha256": artifact_sha256,
+            # Kept for compatibility, but now describes the origin of the
+            # PreparedSystem rather than the most recent export operation.
+            "system_artifact_loaded": loaded_from_artifact,
+            "prepared_system_loaded_from_artifact": loaded_from_artifact,
+        }
+    )
+    return target
+
+
+def _load_system_artifact_payload(
+    path: Path,
+) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
+    try:
+        with np.load(path, allow_pickle=False) as loaded:
+            if "artifact_manifest_json" not in loaded.files:
+                raise ValueError("artifact_manifest_json is missing")
+            metadata_bytes = np.asarray(
+                loaded["artifact_manifest_json"], dtype=np.uint8
+            ).tobytes()
+            manifest = json.loads(metadata_bytes.decode("utf-8"))
+            descriptors = manifest.get("arrays", {})
+            if not isinstance(descriptors, dict) or not descriptors:
+                raise ValueError("array descriptors are missing")
+            arrays: dict[str, np.ndarray] = {}
+            for name, descriptor in descriptors.items():
+                if name not in loaded.files:
+                    raise ValueError(f"artifact array {name!r} is missing")
+                array = np.ascontiguousarray(loaded[name])
+                if str(array.dtype) != str(descriptor.get("dtype")):
+                    raise ValueError(f"artifact array {name!r} dtype changed")
+                if [int(size) for size in array.shape] != list(
+                    descriptor.get("shape", [])
+                ):
+                    raise ValueError(f"artifact array {name!r} shape changed")
+                if _array_artifact_fingerprint(name, array) != descriptor.get("sha256"):
+                    raise ValueError(f"artifact array {name!r} checksum changed")
+                arrays[name] = array
+    except (
+        OSError,
+        ValueError,
+        KeyError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        zipfile.BadZipFile,
+    ) as exc:
+        raise ValueError(f"invalid prepared-system artifact {path}: {exc}") from exc
+    return manifest, arrays
+
+
+def load_prepared_system_artifact(
+    cfg: ControlledConfig,
+    path: str | Path,
+    *,
+    expected_source_sha256: str | None = None,
+    expected_dataset_content_index_sha256: str | None = None,
+    expected_dataset_metadata_sha256: str | None = None,
+) -> PreparedSystem:
+    """Restore a PreparedSystem and reject any provenance/config/hash mismatch."""
+    _validate_config(cfg)
+    artifact_path = Path(path).expanduser().resolve()
+    artifact_manifest, arrays = _load_system_artifact_payload(artifact_path)
+    if int(artifact_manifest.get("schema_version", -1)) != int(
+        _SYSTEM_ARTIFACT_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            f"unsupported prepared-system artifact schema "
+            f"{artifact_manifest.get('schema_version')!r}"
+        )
+    expected_config_sha256 = system_config_fingerprint(cfg)
+    if artifact_manifest.get("system_config_sha256") != expected_config_sha256:
+        raise ValueError("prepared-system artifact config does not match this case")
+    for field, expected in (
+        ("source_bundle_sha256", expected_source_sha256),
+        (
+            "dataset_content_index_sha256",
+            expected_dataset_content_index_sha256,
+        ),
+        ("dataset_metadata_sha256", expected_dataset_metadata_sha256),
+    ):
+        if expected is not None and artifact_manifest.get(field) != expected:
+            raise ValueError(
+                f"prepared-system artifact {field}={artifact_manifest.get(field)!r}, "
+                f"expected {expected!r}"
+            )
+    required_arrays = {
+        "weights_flat",
+        "weights_np_flat",
+        "gf",
+        "rhs_storage",
+        "rhs_solve",
+    }
+    missing = sorted(required_arrays - set(arrays))
+    if missing:
+        raise ValueError(f"prepared-system artifact is missing required arrays {missing}")
+
+    backend = build_gpu_backend_bundle(BackendConfig(nufft=str(cfg.nufft_backend)))
+    xp = backend.xp
+    data_meta = dict(artifact_manifest.get("data_context_meta", {}))
+    dim = int(data_meta.get("dim", 0))
+    weight_shape = tuple(int(size) for size in data_meta.get("weight_shape", ()))
+    if not weight_shape or int(np.prod(weight_shape)) != int(arrays["weights_flat"].size):
+        raise ValueError("prepared-system artifact has an invalid weight_shape")
+    weights_flat_gpu = xp.ascontiguousarray(xp.asarray(arrays["weights_flat"]))
+    data_ctx = GPUDataContext(
+        x_gpu=xp.empty((0, dim), dtype=xp.float64),
+        y_gpu=xp.empty((0,), dtype=xp.float64),
+        weights_gpu_nd=weights_flat_gpu.reshape(weight_shape),
+        weights_gpu_flat=weights_flat_gpu,
+        weights_np_flat=np.ascontiguousarray(arrays["weights_np_flat"]),
+        rhs_gpu=xp.ascontiguousarray(xp.asarray(arrays["rhs_storage"])),
+        gf_gpu=xp.ascontiguousarray(xp.asarray(arrays["gf"])),
+        xtxcol_gpu=(
+            xp.ascontiguousarray(xp.asarray(arrays["xtxcol"]))
+            if "xtxcol" in arrays
+            else None
+        ),
+        x_center_gpu=(
+            xp.ascontiguousarray(xp.asarray(arrays["x_center"]))
+            if "x_center" in arrays
+            else None
+        ),
+        meta=data_meta,
+    )
+    reg_lambda = float(artifact_manifest["reg_lambda"])
+    restored_rhs_gpu = xp.ascontiguousarray(xp.asarray(arrays["rhs_solve"]))
+    restored_system_id = system_fingerprint(
+        data_ctx,
+        reg_lambda,
+        solve_rhs_gpu=restored_rhs_gpu,
+    )
+    if restored_system_id != artifact_manifest.get("system_id"):
+        raise ValueError(
+            "prepared-system artifact arrays do not reproduce the recorded system_id"
+        )
+    nested_manifest = artifact_manifest.get("system_manifest")
+    if not isinstance(nested_manifest, dict):
+        raise ValueError("prepared-system artifact has no valid nested system manifest")
+    manifest = dict(nested_manifest)
+    for field in (
+        "source_bundle_sha256",
+        "dataset_content_index_sha256",
+        "dataset_metadata_sha256",
+    ):
+        if manifest.get(field) != artifact_manifest.get(field):
+            raise ValueError(
+                f"prepared-system nested manifest {field} differs from its "
+                "artifact provenance envelope"
+            )
+    actual_components = system_component_fingerprints(
+        data_ctx,
+        solve_rhs_gpu=restored_rhs_gpu,
+    )
+    if manifest.get("system_id") != restored_system_id:
+        raise ValueError("prepared-system nested manifest system_id is inconsistent")
+    if manifest.get("system_config_sha256") != expected_config_sha256:
+        raise ValueError("prepared-system nested manifest config hash is inconsistent")
+    if manifest.get("reg_lambda") is None or float(
+        manifest["reg_lambda"]
+    ) != reg_lambda:
+        raise ValueError("prepared-system nested manifest regularization is inconsistent")
+    for field, actual in actual_components.items():
+        if manifest.get(field) != actual:
+            raise ValueError(
+                f"prepared-system nested manifest {field} is missing or inconsistent"
+            )
+    artifact_sha256 = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    build_runtime = manifest.get("system_build_runtime")
+    if not isinstance(build_runtime, dict):
+        build_runtime = _runtime_subset(manifest)
+    current_runtime = _backend_runtime_manifest(backend)
+    manifest.update(
+        {
+            "system_id": restored_system_id,
+            "system_config": system_config_payload(cfg),
+            "system_config_sha256": expected_config_sha256,
+            "system_artifact_schema_version": _SYSTEM_ARTIFACT_SCHEMA_VERSION,
+            "system_artifact_path": str(artifact_path),
+            "system_artifact_sha256": artifact_sha256,
+            "system_artifact_loaded": True,
+            "prepared_system_loaded_from_artifact": True,
+            "prepared_system_origin_artifact_path": str(artifact_path),
+            "prepared_system_origin_artifact_sha256": artifact_sha256,
+            "system_build_runtime": build_runtime,
+            "current_timing_runtime": current_runtime,
+            "setup_timing_source": "reused_from_prepared_system_artifact",
+            "setup_inclusive_timing_eligible": False,
+            **current_runtime,
+        }
+    )
+    system = PreparedSystem(
+        backend=backend,
+        data_ctx=data_ctx,
+        rhs_gpu=restored_rhs_gpu,
+        reg_lambda=reg_lambda,
+        setup_seconds=float(artifact_manifest["setup_seconds"]),
+        system_id=restored_system_id,
+        manifest=manifest,
+    )
+    _validate_prepared_system_for_config(system, cfg)
+    return system
+
+
+def _validate_prepared_system_for_config(
+    system: PreparedSystem,
+    cfg: ControlledConfig,
+) -> None:
+    """Fail closed unless a supplied PreparedSystem is exact for this config."""
+    _validate_config(cfg)
+    expected_config_sha256 = system_config_fingerprint(cfg)
+    recorded_config_sha256 = system.manifest.get("system_config_sha256")
+    if recorded_config_sha256 != expected_config_sha256:
+        raise ValueError(
+            "PreparedSystem lacks the exact dataset/kernel/Fourier system config hash "
+            "required by this case"
+        )
+    if float(system.reg_lambda) != float(cfg.reg_lambda):
+        raise ValueError("PreparedSystem regularization does not match the case config")
+    if system.manifest.get("reg_lambda") is None or float(
+        system.manifest["reg_lambda"]
+    ) != float(system.reg_lambda):
+        raise ValueError("PreparedSystem manifest regularization is missing or inconsistent")
+    actual_system_id = system_fingerprint(
+        system.data_ctx,
+        float(system.reg_lambda),
+        solve_rhs_gpu=system.rhs_gpu,
+    )
+    if actual_system_id != system.system_id or system.manifest.get(
+        "system_id"
+    ) != system.system_id:
+        raise ValueError(
+            "PreparedSystem weights/Gf/rhs no longer match its recorded system_id"
+        )
+    actual_components = system_component_fingerprints(
+        system.data_ctx,
+        solve_rhs_gpu=system.rhs_gpu,
+    )
+    mismatched_components = {
+        field: {
+            "recorded": system.manifest.get(field),
+            "actual": actual,
+        }
+        for field, actual in actual_components.items()
+        if system.manifest.get(field) != actual
+    }
+    if mismatched_components:
+        raise ValueError(
+            "PreparedSystem component hashes are missing or inconsistent: "
+            f"{mismatched_components}"
+        )
 
 
 def _box_fingerprint(active: BoxActiveSet) -> str:
@@ -560,27 +1069,23 @@ def prepare_shared_system(cfg: ControlledConfig) -> PreparedSystem:
     if str(cfg.precision).lower() == "mixed32":
         data_ctx.meta["complex_dtype"] = "complex64"
     rhs_gpu = backend.xp.asarray(data_ctx.rhs_gpu, dtype=solve_dtype)
-    system_id = system_fingerprint(data_ctx, float(cfg.reg_lambda))
-    component_fingerprints = system_component_fingerprints(data_ctx)
+    system_id = system_fingerprint(
+        data_ctx,
+        float(cfg.reg_lambda),
+        solve_rhs_gpu=rhs_gpu,
+    )
+    component_fingerprints = system_component_fingerprints(
+        data_ctx,
+        solve_rhs_gpu=rhs_gpu,
+    )
 
-    cp = backend.xp
-    runtime_version = None
-    driver_version = None
-    compute_capability = None
-    try:
-        runtime_version = int(cp.cuda.runtime.runtimeGetVersion())
-        driver_version = int(cp.cuda.runtime.driverGetVersion())
-        props = cp.cuda.runtime.getDeviceProperties(int(backend.device_id))
-        major = props.get("major") if isinstance(props, dict) else getattr(props, "major", None)
-        minor = props.get("minor") if isinstance(props, dict) else getattr(props, "minor", None)
-        if major is not None and minor is not None:
-            compute_capability = f"{int(major)}.{int(minor)}"
-    except Exception:
-        pass
+    runtime_manifest = _backend_runtime_manifest(backend)
 
     manifest = {
         "system_id": system_id,
         **component_fingerprints,
+        "system_config": system_config_payload(cfg),
+        "system_config_sha256": system_config_fingerprint(cfg),
         "dataset_stem": cfg.dataset_stem,
         "dataset_dir": str(Path(dataset["path"]).parent),
         "dataset_path": dataset["path"],
@@ -627,14 +1132,12 @@ def prepare_shared_system(cfg: ControlledConfig) -> PreparedSystem:
         "machine_epsilon": float(machine_eps),
         "tolerance": float(cfg.tol),
         "tol_over_machine_epsilon": float(cfg.tol / machine_eps),
-        "device_name": str(backend.device_name),
-        "device_id": int(backend.device_id),
-        "supports_fp64": bool(backend.supports_fp64),
-        "supports_complex128": bool(backend.supports_complex128),
-        "cupy_version": str(getattr(cp, "__version__", "unknown")),
-        "cuda_runtime_version": runtime_version,
-        "cuda_driver_version": driver_version,
-        "compute_capability": compute_capability,
+        **runtime_manifest,
+        "system_build_runtime": runtime_manifest,
+        "current_timing_runtime": runtime_manifest,
+        "prepared_system_loaded_from_artifact": False,
+        "setup_timing_source": "measured_in_current_process",
+        "setup_inclusive_timing_eligible": True,
         "git_revision": _git_revision(),
         **_source_manifest(),
         "runtime_temp_dir": runtime_temp,
@@ -1214,6 +1717,9 @@ def run_one_method(
 ) -> tuple[dict[str, Any], np.ndarray | None]:
     backend = system.backend
     op_ctx = _fresh_operator_context(system, cfg)
+    setup_inclusive_eligible = bool(
+        system.manifest.get("setup_inclusive_timing_eligible", True)
+    )
     row: dict[str, Any] = {
         "system_id": system.system_id,
         "method": spec.label,
@@ -1229,6 +1735,8 @@ def run_one_method(
         "precision_mode": str(cfg.precision),
         "solve_dtype": str(backend.xp.dtype(_solve_dtype(system, cfg))),
         "true_residual_audit_dtype": "complex128",
+        "setup_inclusive_timing_eligible": setup_inclusive_eligible,
+        "setup_timing_source": system.manifest.get("setup_timing_source"),
         "rank": spec.rank,
         "status": "running",
     }
@@ -1294,8 +1802,9 @@ def run_one_method(
                 "true_relres": float(true_relres),
                 "solve_seconds": float(solve_seconds),
                 "build_plus_solve_seconds": float(build_seconds + solve_seconds),
-                "shared_setup_plus_method_seconds": float(
-                    system.setup_seconds + build_seconds + solve_seconds
+                "shared_setup_plus_method_seconds": (
+                    float(system.setup_seconds + build_seconds + solve_seconds)
+                    if setup_inclusive_eligible else math.nan
                 ),
                 "n_matvec": int(solve_stats.get("n_matvec", -1)),
                 "beta_dtype": str(beta_saved.dtype),
@@ -1374,6 +1883,13 @@ def summarize_rows(
     method_order: Iterable[str] | None = None,
 ) -> list[dict[str, Any]]:
     measured = [row for row in rows if not bool(row.get("is_warmup", False))]
+    setup_inclusive_eligible = bool(
+        measured
+        and all(
+            bool(row.get("setup_inclusive_timing_eligible", True))
+            for row in measured
+        )
+    )
     cg_by_repeat = {
         int(row["repeat_idx"]): row
         for row in measured
@@ -1404,10 +1920,11 @@ def summarize_rows(
                 cold = cg_solve / method_total
                 paired_cold.append(cold)
                 paired_wins += int(cold > 1.0)
-                paired_pipeline.append(
-                    (float(setup_seconds) + cg_solve) /
-                    (float(setup_seconds) + method_total)
-                )
+                if setup_inclusive_eligible:
+                    paired_pipeline.append(
+                        (float(setup_seconds) + cg_solve) /
+                        (float(setup_seconds) + method_total)
+                    )
             if all(math.isfinite(v) and v > 0.0 for v in (cg_solve, method_solve)):
                 paired_reuse.append(cg_solve / method_solve)
         converged_rows = [row for row in method_rows if _is_converged(row, tol)]
@@ -1440,6 +1957,8 @@ def summarize_rows(
                 and all(_is_converged(row, tol) for row in method_rows)
                 and len(paired_cold) == len(method_rows)
             ),
+            "setup_inclusive_timing_eligible": setup_inclusive_eligible,
+            "setup_timing_source": first.get("setup_timing_source"),
             "paired_wins_over_cg": int(paired_wins),
             "paired_comparisons": len(paired_cold),
             "cold_speedup_median": float(np.median(paired_cold)) if paired_cold else math.nan,
@@ -1796,8 +2315,149 @@ def _post_diagnostics(
     return diagnostics, arrays
 
 
-def run_controlled_experiment(cfg: ControlledConfig) -> Path:
-    system = prepare_shared_system(cfg)
+def save_timing_prediction_solutions(
+    system: PreparedSystem,
+    cfg: ControlledConfig,
+    rows: list[dict[str, Any]],
+    saved_solutions: list[tuple[dict[str, Any], np.ndarray]],
+    output_dir: str | Path,
+) -> dict[str, Any]:
+    """Persist one canonical *measured* beta per method for prediction audits.
+
+    The lowest-index converged measured repeat is selected.  If no repeat
+    converged, the lowest-index available measured beta is retained and marked
+    ineligible so a downstream audit can fail with evidence instead of silently
+    rebuilding or re-solving the system.
+    """
+    destination = Path(output_dir).expanduser().resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+    artifact_path = destination / TIMING_SOLUTIONS_ARTIFACT_FILENAME
+    manifest_path = destination / TIMING_SOLUTIONS_MANIFEST_FILENAME
+
+    arrays: dict[str, np.ndarray] = {}
+    solution_records: list[dict[str, Any]] = []
+    method_order = [str(method) for method in cfg.methods]
+    for method_index, method in enumerate(method_order):
+        candidates = [
+            (row, np.ascontiguousarray(np.asarray(beta)))
+            for row, beta in saved_solutions
+            if str(row.get("method")) == method and not bool(row.get("is_warmup"))
+        ]
+        candidates.sort(
+            key=lambda item: (
+                int(item[0].get("repeat_idx", 10**9)),
+                int(item[0].get("order_position", 10**9)),
+            )
+        )
+        converged = [item for item in candidates if _is_converged(item[0], cfg.tol)]
+        chosen = converged[0] if converged else (candidates[0] if candidates else None)
+        if chosen is None:
+            measured_rows = sorted(
+                (
+                    row
+                    for row in rows
+                    if str(row.get("method")) == method
+                    and not bool(row.get("is_warmup"))
+                ),
+                key=lambda row: (
+                    int(row.get("repeat_idx", 10**9)),
+                    int(row.get("order_position", 10**9)),
+                ),
+            )
+            solution_records.append(
+                {
+                    "method": method,
+                    "available": False,
+                    "selection_eligible": False,
+                    "reason": "no measured beta was returned",
+                    "timing_row": _sanitize_json(measured_rows[0]) if measured_rows else None,
+                }
+            )
+            continue
+
+        timing_row, beta = chosen
+        array_key = f"beta_{method_index:03d}"
+        arrays[array_key] = beta
+        descriptor = _artifact_array_descriptor(array_key, beta)
+        solution_records.append(
+            {
+                "method": method,
+                "method_kind": timing_row.get("method_kind"),
+                "available": True,
+                "selection_eligible": bool(_is_converged(timing_row, cfg.tol)),
+                "array_key": array_key,
+                "beta": descriptor,
+                "timing_repeat_idx": int(timing_row.get("repeat_idx", -1)),
+                "timing_order_position": int(timing_row.get("order_position", -1)),
+                "timing_row": _sanitize_json(timing_row),
+            }
+        )
+
+    temporary = artifact_path.with_name(f".{artifact_path.name}.tmp")
+    with temporary.open("wb") as handle:
+        np.savez(handle, **arrays)
+    temporary.replace(artifact_path)
+    artifact_sha256 = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    component_hashes = system_component_fingerprints(
+        system.data_ctx,
+        solve_rhs_gpu=system.rhs_gpu,
+    )
+    payload = {
+        "schema_version": 1,
+        "artifact_role": (
+            "canonical measured timing solutions for out-of-timing prediction only"
+        ),
+        "system_id": system.system_id,
+        **component_hashes,
+        "system_config_sha256": system_config_fingerprint(cfg),
+        "source_bundle_sha256": system.manifest.get("source_bundle_sha256"),
+        "dataset_content_index_sha256": system.manifest.get(
+            "dataset_content_index_sha256"
+        ),
+        "dataset_metadata_sha256": system.manifest.get("dataset_metadata_sha256"),
+        "timing_system_artifact": TIMING_SYSTEM_ARTIFACT_FILENAME,
+        "timing_system_artifact_sha256": system.manifest.get("system_artifact_sha256"),
+        "timing_solution_artifact": TIMING_SOLUTIONS_ARTIFACT_FILENAME,
+        "timing_solution_artifact_sha256": artifact_sha256,
+        "selection_policy": (
+            "lowest repeat_idx converged measured beta; otherwise lowest available "
+            "measured beta marked ineligible"
+        ),
+        "solution_count": int(sum(bool(record.get("available")) for record in solution_records)),
+        "solutions": solution_records,
+    }
+    manifest_path.write_text(
+        json.dumps(
+            _sanitize_json(payload),
+            indent=2,
+            ensure_ascii=False,
+            default=_json_default,
+            allow_nan=False,
+        ),
+        encoding="utf-8",
+    )
+    manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    system.manifest.update(
+        {
+            "timing_solution_artifact": TIMING_SOLUTIONS_ARTIFACT_FILENAME,
+            "timing_solution_artifact_sha256": artifact_sha256,
+            "timing_solution_manifest": TIMING_SOLUTIONS_MANIFEST_FILENAME,
+            "timing_solution_manifest_sha256": manifest_sha256,
+            "timing_solution_count": payload["solution_count"],
+            "timing_solution_selection_policy": payload["selection_policy"],
+        }
+    )
+    payload["timing_solution_manifest_sha256"] = manifest_sha256
+    return payload
+
+
+def run_controlled_experiment(
+    cfg: ControlledConfig,
+    *,
+    prepared_system: PreparedSystem | None = None,
+) -> Path:
+    system = prepare_shared_system(cfg) if prepared_system is None else prepared_system
+    _validate_prepared_system_for_config(system, cfg)
     specs, rule = resolve_method_specs(system, cfg)
     if len({spec.label for spec in specs}) != len(specs):
         raise ValueError("method labels must be unique; do not request duplicate methods.")
@@ -1854,7 +2514,11 @@ def run_controlled_experiment(cfg: ControlledConfig) -> Path:
             np.linalg.norm(beta - cg_reference) / reference_norm
         )
 
-    final_system_id = system_fingerprint(system.data_ctx, float(system.reg_lambda))
+    final_system_id = system_fingerprint(
+        system.data_ctx,
+        float(system.reg_lambda),
+        solve_rhs_gpu=system.rhs_gpu,
+    )
     if final_system_id != system.system_id:
         raise RuntimeError(
             "the arrays defining A,b changed during the controlled experiment: "
@@ -1877,7 +2541,11 @@ def run_controlled_experiment(cfg: ControlledConfig) -> Path:
     )
     comparisons = pairwise_comparisons(rows, cfg.tol)
     diagnostic_rows, diagnostic_arrays = _post_diagnostics(system, cfg, specs, rule)
-    if system_fingerprint(system.data_ctx, float(system.reg_lambda)) != system.system_id:
+    if system_fingerprint(
+        system.data_ctx,
+        float(system.reg_lambda),
+        solve_rhs_gpu=system.rhs_gpu,
+    ) != system.system_id:
         raise RuntimeError("post diagnostics modified the arrays defining the fixed system.")
 
     if cfg.output_dir:
@@ -1888,6 +2556,18 @@ def run_controlled_experiment(cfg: ControlledConfig) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     completion_path = output_dir / "run_complete.json"
     completion_path.unlink(missing_ok=True)
+    save_prepared_system_artifact(
+        system,
+        cfg,
+        output_dir / TIMING_SYSTEM_ARTIFACT_FILENAME,
+    )
+    timing_solution_payload = save_timing_prediction_solutions(
+        system,
+        cfg,
+        rows,
+        saved_solutions,
+        output_dir,
+    )
     config_payload = asdict(cfg)
     config_payload["methods"] = list(cfg.methods)
     (output_dir / "experiment_config.json").write_text(
@@ -2000,6 +2680,17 @@ def run_controlled_experiment(cfg: ControlledConfig) -> Path:
         "run_row_count": len(rows),
         "summary_row_count": len(summaries),
         "comparison_row_count": len(comparisons),
+        "timing_system_artifact": TIMING_SYSTEM_ARTIFACT_FILENAME,
+        "timing_system_artifact_sha256": manifest["system_artifact_sha256"],
+        "timing_solution_artifact": TIMING_SOLUTIONS_ARTIFACT_FILENAME,
+        "timing_solution_artifact_sha256": timing_solution_payload[
+            "timing_solution_artifact_sha256"
+        ],
+        "timing_solution_manifest": TIMING_SOLUTIONS_MANIFEST_FILENAME,
+        "timing_solution_manifest_sha256": timing_solution_payload[
+            "timing_solution_manifest_sha256"
+        ],
+        "timing_solution_count": int(timing_solution_payload["solution_count"]),
     }
     completion_temp = output_dir / ".run_complete.json.tmp"
     completion_temp.write_text(

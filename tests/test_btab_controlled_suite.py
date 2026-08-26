@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import zipfile
 from dataclasses import replace
@@ -12,6 +13,9 @@ from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled import (
 )
 from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.benchmark import (
     ControlledConfig,
+    TIMING_SOLUTIONS_ARTIFACT_FILENAME,
+    TIMING_SOLUTIONS_MANIFEST_FILENAME,
+    TIMING_SYSTEM_ARTIFACT_FILENAME,
 )
 from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.suite import (
     _complete_run,
@@ -217,7 +221,9 @@ def test_missing_geolife_alias_and_wrong_sidecar_fail_clearly(tmp_path) -> None:
     assert "complete PLT trajectory" in message
 
 
-def test_resume_requires_matching_config_source_and_repeat_count(tmp_path) -> None:
+def test_resume_requires_matching_evidence_and_rejects_malformed_valid_json(
+    tmp_path: Path,
+) -> None:
     suite = load_suite_config(_config_path())
     dataset_dir = tmp_path / "data"
     _write_profile_fixtures(suite, "demo", dataset_dir)
@@ -236,6 +242,37 @@ def test_resume_requires_matching_config_source_and_repeat_count(tmp_path) -> No
     (run_dir / "experiment_config.json").write_text(
         json.dumps(config_payload), encoding="utf-8"
     )
+    timing_system_path = run_dir / TIMING_SYSTEM_ARTIFACT_FILENAME
+    timing_solution_path = run_dir / TIMING_SOLUTIONS_ARTIFACT_FILENAME
+    timing_solution_manifest_path = run_dir / TIMING_SOLUTIONS_MANIFEST_FILENAME
+    timing_system_path.write_bytes(b"exact-system-artifact")
+    timing_solution_path.write_bytes(b"canonical-timing-betas")
+    timing_system_sha256 = hashlib.sha256(timing_system_path.read_bytes()).hexdigest()
+    timing_solution_sha256 = hashlib.sha256(
+        timing_solution_path.read_bytes()
+    ).hexdigest()
+    timing_solution_manifest_path.write_text(
+        json.dumps(
+            {
+                "system_id": "fixed-system",
+                "weights_sha256": "weights-sha",
+                "gf_sha256": "gf-sha",
+                "rhs_sha256": "rhs-sha",
+                "rhs_storage_sha256": "rhs-storage-sha",
+                "system_config_sha256": "system-config-sha",
+                "source_bundle_sha256": "frozen-source",
+                "dataset_content_index_sha256": "frozen-data",
+                "dataset_metadata_sha256": "frozen-metadata",
+                "timing_system_artifact_sha256": timing_system_sha256,
+                "timing_solution_artifact_sha256": timing_solution_sha256,
+                "solution_count": len(config.methods),
+            }
+        ),
+        encoding="utf-8",
+    )
+    timing_solution_manifest_sha256 = hashlib.sha256(
+        timing_solution_manifest_path.read_bytes()
+    ).hexdigest()
     (run_dir / "system_manifest.json").write_text(
         json.dumps(
             {
@@ -245,6 +282,16 @@ def test_resume_requires_matching_config_source_and_repeat_count(tmp_path) -> No
                 "source_bundle_sha256": "frozen-source",
                 "dataset_content_index_sha256": "frozen-data",
                 "dataset_metadata_sha256": "frozen-metadata",
+                "weights_sha256": "weights-sha",
+                "gf_sha256": "gf-sha",
+                "rhs_sha256": "rhs-sha",
+                "rhs_storage_sha256": "rhs-storage-sha",
+                "system_config_sha256": "system-config-sha",
+                "timing_runtime_sha256": "fixture-runtime",
+                "system_artifact_sha256": timing_system_sha256,
+                "timing_solution_artifact_sha256": timing_solution_sha256,
+                "timing_solution_manifest_sha256": timing_solution_manifest_sha256,
+                "timing_solution_count": len(config.methods),
             }
         ),
         encoding="utf-8",
@@ -275,8 +322,15 @@ def test_resume_requires_matching_config_source_and_repeat_count(tmp_path) -> No
     (run_dir / "matched_comparisons.json").write_text(
         json.dumps(comparisons), encoding="utf-8"
     )
-    for name in ("matched_runs.csv", "matched_summary.csv", "matched_comparisons.csv"):
-        (run_dir / name).write_text("header\n", encoding="utf-8")
+    (run_dir / "matched_runs.csv").write_text("header\n", encoding="utf-8")
+    (run_dir / "matched_summary.csv").write_text(
+        "method,measured_repeats\n"
+        + "".join(
+            f"{method},{config.measured_repeats}\n" for method in config.methods
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "matched_comparisons.csv").write_text("header\n", encoding="utf-8")
     (run_dir / "run_complete.json").write_text(
         json.dumps(
             {
@@ -285,6 +339,13 @@ def test_resume_requires_matching_config_source_and_repeat_count(tmp_path) -> No
                 "source_bundle_sha256": "frozen-source",
                 "dataset_content_index_sha256": "frozen-data",
                 "dataset_metadata_sha256": "frozen-metadata",
+                "timing_system_artifact": TIMING_SYSTEM_ARTIFACT_FILENAME,
+                "timing_system_artifact_sha256": timing_system_sha256,
+                "timing_solution_artifact": TIMING_SOLUTIONS_ARTIFACT_FILENAME,
+                "timing_solution_artifact_sha256": timing_solution_sha256,
+                "timing_solution_manifest": TIMING_SOLUTIONS_MANIFEST_FILENAME,
+                "timing_solution_manifest_sha256": timing_solution_manifest_sha256,
+                "timing_solution_count": len(config.methods),
                 "methods": list(config.methods),
                 "warmup_repeats": config.warmup_repeats,
                 "measured_repeats": config.measured_repeats,
@@ -304,6 +365,38 @@ def test_resume_requires_matching_config_source_and_repeat_count(tmp_path) -> No
         expected_dataset_content_index_sha256="frozen-data",
         expected_dataset_metadata_sha256="frozen-metadata",
     )
+    assert _complete_run(
+        run_dir,
+        5000,
+        expected_config=config,
+        expected_source_sha256="frozen-source",
+        expected_dataset_content_index_sha256="frozen-data",
+        expected_dataset_metadata_sha256="frozen-metadata",
+        expected_timing_runtime_sha256="fixture-runtime",
+    )
+    original_summary_csv = (run_dir / "matched_summary.csv").read_bytes()
+    (run_dir / "matched_summary.csv").write_text(
+        f"method,measured_repeats\ncg,{config.measured_repeats}\n",
+        encoding="utf-8",
+    )
+    assert not _complete_run(
+        run_dir,
+        5000,
+        expected_config=config,
+        expected_source_sha256="frozen-source",
+        expected_dataset_content_index_sha256="frozen-data",
+        expected_dataset_metadata_sha256="frozen-metadata",
+    )
+    (run_dir / "matched_summary.csv").write_bytes(original_summary_csv)
+    assert not _complete_run(
+        run_dir,
+        5000,
+        expected_config=config,
+        expected_source_sha256="frozen-source",
+        expected_dataset_content_index_sha256="frozen-data",
+        expected_dataset_metadata_sha256="frozen-metadata",
+        expected_timing_runtime_sha256="different-runtime",
+    )
     assert not _complete_run(
         run_dir,
         5000,
@@ -320,6 +413,39 @@ def test_resume_requires_matching_config_source_and_repeat_count(tmp_path) -> No
         expected_dataset_content_index_sha256="frozen-data",
         expected_dataset_metadata_sha256="frozen-metadata",
     )
+    malformed_payloads = (
+        (run_dir / "system_manifest.json", []),
+        (run_dir / "matched_summary.json", {}),
+        (run_dir / "matched_runs.json", None),
+        (timing_solution_manifest_path, "valid JSON, wrong structure"),
+        (run_dir / "run_complete.json", []),
+    )
+    for malformed_path, malformed_payload in malformed_payloads:
+        original_payload = malformed_path.read_bytes()
+        malformed_path.write_text(
+            json.dumps(malformed_payload),
+            encoding="utf-8",
+        )
+        assert not _complete_run(
+            run_dir,
+            5000,
+            expected_config=config,
+            expected_source_sha256="frozen-source",
+            expected_dataset_content_index_sha256="frozen-data",
+            expected_dataset_metadata_sha256="frozen-metadata",
+        )
+        malformed_path.write_bytes(original_payload)
+    original_solution_artifact = timing_solution_path.read_bytes()
+    timing_solution_path.write_bytes(original_solution_artifact + b"tampered")
+    assert not _complete_run(
+        run_dir,
+        5000,
+        expected_config=config,
+        expected_source_sha256="frozen-source",
+        expected_dataset_content_index_sha256="frozen-data",
+        expected_dataset_metadata_sha256="frozen-metadata",
+    )
+    timing_solution_path.write_bytes(original_solution_artifact)
     (run_dir / "matched_runs.csv").unlink()
     assert not _complete_run(
         run_dir,

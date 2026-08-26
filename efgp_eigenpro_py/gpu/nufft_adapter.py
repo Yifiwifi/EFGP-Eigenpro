@@ -174,10 +174,14 @@ def type2_eval(
     mtot: int,
     eps: float,
     isign: int,
+    *,
+    allow_cpu_fallback: bool = True,
 ) -> Tuple[Any, str]:
     """
     Type-2 NUFFT: uniform Fourier coeffs ``wbeta`` on ``(mtot,)*dim`` to nonuniform ``tphx``.
-    Returns real part on GPU as float64 (caller may cast).
+    Returns real part on GPU as float64 (caller may cast). Set
+    ``allow_cpu_fallback=False`` for formal GPU audits that must fail before a
+    potentially large CPU FINUFFT evaluation.
     """
     xp = backend.xp
     w = xp.asarray(wbeta_flat, dtype=xp.complex128).reshape(-1)
@@ -204,8 +208,16 @@ def type2_eval(
             else:
                 raise NotImplementedError("cufinufft path supports dim<=3 only.")
             return xp.real(yhat).astype(xp.float64), "cufinufft"
-        except Exception:
-            pass
+        except Exception as exc:
+            if not bool(allow_cpu_fallback):
+                raise RuntimeError(
+                    "cuFINUFFT type-2 evaluation failed and CPU fallback is disabled"
+                ) from exc
+
+    if not bool(allow_cpu_fallback):
+        raise RuntimeError(
+            "cuFINUFFT type-2 evaluation is unavailable and CPU fallback is disabled"
+        )
 
     tphx_np = np.ascontiguousarray(_as_numpy(tphx), dtype=np.float64)
     w_np = np.ascontiguousarray(_as_numpy(w), dtype=np.complex128)

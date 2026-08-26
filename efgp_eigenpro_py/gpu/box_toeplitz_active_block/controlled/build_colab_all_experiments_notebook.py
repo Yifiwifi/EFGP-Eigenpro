@@ -51,7 +51,7 @@ def build_notebook() -> dict:
             |---|---|---|
             | `archived_complete_pipeline` | 原 `group_a/group_b/group_c`，direct CG 与 binned-C1 candidates，含 setup/solve/prediction | 原论文探索性规模图与候选筛选 |
             | `controlled_fixed_system` | 所有方法共享同一个哈希 (A\beta=b)，1 warm-up + 5 paired repeats | 方法间严格配对加速、构造/求解/存储权衡 |
-            | `prediction_audit` | 另建固定系统，仅验证 test RMSE | 解与预测等价性；其中时间不进入 speedup claim |
+            | `prediction_audit` | 读取 timed system 与保存的 canonical timed \(\beta\)，仅计算 test RMSE | 同一计时解的预测等价性；其中 prediction 时间不进入 speedup claim |
 
             使用方式：选择 Colab 的 **A100 GPU + High-RAM** runtime，然后点击 **运行时 → 全部运行**。默认的 `RUN_ALL_FORMAL_EXPERIMENTS=True` 会自动完成 smoke、10M 主实验、prediction audit、OAT、box-budget 消融、Synthetic nested-prefix 10M–300M，以及 Winnebago archived-exact 10M–300M。每个规模是独立 job；失败会结构化记录并隔离，不会用 `CalledProcessError` 阻断后续实验。
 
@@ -84,7 +84,7 @@ def build_notebook() -> dict:
             # 从 drive_manifest.json 自动选择正式 campaign 所需数据。
             DATA_BUNDLES = []
             CACHE_DATA_LOCALLY = True       # 正式计时推荐 True，避免 Drive FUSE 进入 timing
-            VERIFY_FULL_SHA256 = False      # 完整 catalog 仅在上传变更后单独校验一次
+            VERIFY_FULL_SHA256 = False      # 只跳过无关 bundle；本次选中 artifact 仍逐个验 SHA-256
 
             # 一键正式 campaign 不重跑不可直接混表的 legacy exploratory groups。
             RUN_LEGACY_GROUPS = []
@@ -105,8 +105,8 @@ def build_notebook() -> dict:
             ACTIVE_SIZES = list(FORMAL_SCALE_SIZES) if RUN_ALL_FORMAL_EXPERIMENTS else [10_000_000]
             ALLOW_100M = RUN_ALL_FORMAL_EXPERIMENTS
             ALLOW_300M = RUN_ALL_FORMAL_EXPERIMENTS
-            PREDICTION_AUDIT_MAX_TRAIN_N = 10_000_000
-            PREDICTION_AUDIT_PROFILES = ["paper_10m"]
+            PREDICTION_AUDIT_MAX_TEST_N = 2_500_000
+            PREDICTION_AUDIT_PROFILES = ["paper_10m", "scale_development_masters"]
 
             # 一键模式中的 profile 级数据族过滤。尤其禁止把已知失败的
             # Winnebago raw-prefix development cases 混入 Synthetic scale job。
@@ -149,7 +149,7 @@ def build_notebook() -> dict:
             if GENERATE_MANITOWOC_300M:
                 requested_size_hints.append(300_000_000)
             if RUN_PREDICTION_AUDIT:
-                requested_size_hints.append(int(PREDICTION_AUDIT_MAX_TRAIN_N))
+                requested_size_hints.extend([10_000_000, 100_000_000, 300_000_000])
             MAX_REQUESTED_N = max(requested_size_hints or [0])
 
             DISCONNECT_RUNTIME_WHEN_VERIFIED = False
@@ -174,6 +174,8 @@ def build_notebook() -> dict:
             from IPython.display import display
 
             IS_COLAB = "google.colab" in sys.modules
+            NOTEBOOK_STARTED_UTC = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            NOTEBOOK_STARTED_PERF_COUNTER = time.perf_counter()
             if IS_COLAB:
                 from google.colab import drive
                 drive.mount("/content/drive")
@@ -345,6 +347,19 @@ def build_notebook() -> dict:
                     f"Missing {DATA_MANIFEST}. Build/upload the catalog using COLAB_DRIVE_DATA.md first."
                 )
             catalog = json.loads(DATA_MANIFEST.read_text(encoding="utf-8"))
+            DATA_MANIFEST_SHA256 = hashlib.sha256(DATA_MANIFEST.read_bytes()).hexdigest()
+            DATA_MANIFEST_SNAPSHOT = DRIVE_RUN_ROOT / "data_manifest_snapshot.json"
+            if DATA_MANIFEST_SNAPSHOT.is_file():
+                snapshot_sha256 = hashlib.sha256(DATA_MANIFEST_SNAPSHOT.read_bytes()).hexdigest()
+                if snapshot_sha256 != DATA_MANIFEST_SHA256:
+                    raise RuntimeError(
+                        "The run directory already contains a different data manifest snapshot; "
+                        "use a new RUN_TAG instead of mixing data catalogs."
+                    )
+            else:
+                snapshot_partial = DATA_MANIFEST_SNAPSHOT.with_suffix(".json.partial")
+                shutil.copy2(DATA_MANIFEST, snapshot_partial)
+                snapshot_partial.replace(DATA_MANIFEST_SNAPSHOT)
             available_bundles = sorted(catalog.get("bundles", {}))
             print("Available bundles:", available_bundles)
             missing_bundles = [name for name in DATA_BUNDLES if name not in catalog.get("bundles", {})]
@@ -363,27 +378,94 @@ def build_notebook() -> dict:
                 print("Full SHA-256 verification of the complete catalog...")
                 verify_catalog(DATA_MANIFEST)
 
-            selected_bytes = sum(int(row["size_bytes"]) for row in selected_artifacts if row["role"] != "metadata_json")
-            if CACHE_DATA_LOCALLY and selected_bytes > shutil.disk_usage("/content").free:
-                raise RuntimeError("Selected bundles do not fit on the current Colab local disk.")
+            def streaming_sha256(path, chunk_bytes=16 * 2**20):
+                digest = hashlib.sha256()
+                with Path(path).open("rb") as handle:
+                    while True:
+                        block = handle.read(int(chunk_bytes))
+                        if not block:
+                            break
+                        digest.update(block)
+                return digest.hexdigest()
 
-            staged = {}
+            # Fail before copying if two selected catalog entries would collide
+            # at the flat local-cache basename with different bytes.
+            selected_by_basename = {}
             for row in selected_artifacts:
+                source = DRIVE_DATA_ROOT / row["relative_path"]
+                basename = source.name
+                prior = selected_by_basename.get(basename)
+                if prior is not None and prior["sha256"] != row["sha256"]:
+                    raise RuntimeError(
+                        f"Selected artifacts collide at {basename!r} with different SHA-256 values."
+                    )
+                selected_by_basename[basename] = row
+
+            cache_valid_by_basename = {}
+            additional_cache_bytes = 0
+            for basename, row in selected_by_basename.items():
                 source = DRIVE_DATA_ROOT / row["relative_path"]
                 if not source.is_file():
                     raise FileNotFoundError(source)
-                if source.stat().st_size != int(row["size_bytes"]):
+                expected_size = int(row["size_bytes"])
+                if source.stat().st_size != expected_size:
                     raise ValueError(f"Byte-size mismatch: {source}")
+                destination = LOCAL_DATA_DIR / basename
+                cache_valid = False
+                if CACHE_DATA_LOCALLY and destination.is_file() and destination.stat().st_size == expected_size:
+                    print("Verifying selected local cache SHA-256:", basename)
+                    cache_valid = streaming_sha256(destination) == row["sha256"]
+                cache_valid_by_basename[basename] = cache_valid
+                if CACHE_DATA_LOCALLY and not cache_valid:
+                    existing_size = destination.stat().st_size if destination.is_file() else 0
+                    additional_cache_bytes += max(expected_size - int(existing_size), 0)
+            if CACHE_DATA_LOCALLY and additional_cache_bytes > shutil.disk_usage("/content").free:
+                raise RuntimeError(
+                    "Selected uncached bytes do not fit on the current Colab local disk."
+                )
+
+            staged = {}
+            inspected_masters = set()
+            for row in selected_artifacts:
+                source = DRIVE_DATA_ROOT / row["relative_path"]
                 destination = LOCAL_DATA_DIR / source.name
                 if CACHE_DATA_LOCALLY:
-                    if not destination.exists() or destination.stat().st_size != source.stat().st_size:
-                        print("Copying to local SSD:", source.name)
-                        shutil.copy2(source, destination)
+                    if not cache_valid_by_basename[source.name]:
+                        print("Copying and SHA-verifying selected artifact:", source.name)
+                        digest = hashlib.sha256()
+                        with source.open("rb") as source_handle, destination.open("wb") as destination_handle:
+                            while True:
+                                block = source_handle.read(16 * 2**20)
+                                if not block:
+                                    break
+                                digest.update(block)
+                                destination_handle.write(block)
+                        if digest.hexdigest() != row["sha256"]:
+                            raise ValueError(f"Catalog SHA-256 mismatch while copying: {source}")
+                        if destination.stat().st_size != int(row["size_bytes"]):
+                            raise ValueError(f"Copied byte-size mismatch: {destination}")
+                        cache_valid_by_basename[source.name] = True
                 else:
                     destination = source
+                    print("SHA-verifying selected Drive artifact:", source.name)
+                    if streaming_sha256(destination) != row["sha256"]:
+                        raise ValueError(f"Catalog SHA-256 mismatch: {source}")
+                    # The runners always receive LOCAL_DATA_DIR.  In no-cache
+                    # mode expose the verified Drive file there through a
+                    # symlink instead of silently leaving the dataset absent.
+                    local_link = LOCAL_DATA_DIR / source.name
+                    if not (
+                        local_link.is_symlink()
+                        and local_link.resolve() == source.resolve()
+                    ):
+                        if local_link.exists() or local_link.is_symlink():
+                            local_link.unlink()
+                        local_link.symlink_to(source)
+                    destination = local_link
                 staged[row["name"]] = destination
-                if row["role"] == "master_npz":
+                if row["role"] == "master_npz" and destination not in inspected_masters:
                     inspect_stored_npz(destination)
+                    inspected_masters.add(destination)
 
             # Runner 要求 metadata 与 NPZ 同 stem；若 catalog 保存的是非规范文件名，建立本地规范别名。
             for dataset_id, dataset in catalog.get("datasets", {}).items():
@@ -394,7 +476,11 @@ def build_notebook() -> dict:
                 metadata_name = f"{dataset_id}:metadata"
                 if master_name in staged and metadata_name in staged:
                     canonical_json = LOCAL_DATA_DIR / (staged[master_name].stem + ".json")
-                    if not canonical_json.exists():
+                    metadata_sha256 = streaming_sha256(staged[metadata_name])
+                    if (
+                        not canonical_json.is_file()
+                        or streaming_sha256(canonical_json) != metadata_sha256
+                    ):
                         shutil.copy2(staged[metadata_name], canonical_json)
 
             REPO_PROCESSED = LOCAL_REPO / "efgp_eigenpro_py/gpu/benchmark_dataset/processed"
@@ -510,7 +596,9 @@ def build_notebook() -> dict:
             r"""
             SMOKE_OK = True
             SMOKE_RETURN_CODE = None
+            SMOKE_ELAPSED_SECONDS = None
             if RUN_PLUMBING_SMOKE:
+                smoke_started = time.perf_counter()
                 smoke_stem = "USGS_EPT_WI_2County_1_B23_full_workunit_ground_elevation_n10000000"
                 smoke_out = DRIVE_RUN_ROOT / "smoke_cufinufft"
                 smoke_result = run_cmd([
@@ -527,6 +615,7 @@ def build_notebook() -> dict:
                     "--output-dir", str(smoke_out),
                 ], cwd=LOCAL_REPO, check=False)
                 SMOKE_RETURN_CODE = int(smoke_result.returncode)
+                SMOKE_ELAPSED_SECONDS = time.perf_counter() - smoke_started
                 SMOKE_OK = SMOKE_RETURN_CODE == 0
                 if not SMOKE_OK:
                     print(
@@ -789,8 +878,34 @@ def build_notebook() -> dict:
                 } for profile_name in manual_profiles)
 
             selected_profiles = list(dict.fromkeys(job["profile"] for job in formal_jobs))
+            CAMPAIGN_EXECUTION_STARTED_UTC = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            CAMPAIGN_EXECUTION_STARTED_PERF_COUNTER = time.perf_counter()
+            CAMPAIGN_JOBS_CSV = DRIVE_RUN_ROOT / "campaign_jobs.csv"
+            CAMPAIGN_JOBS_JSON = DRIVE_RUN_ROOT / "campaign_jobs.json"
+            previous_campaign_rows_by_job = {}
+            if CAMPAIGN_JOBS_JSON.is_file():
+                try:
+                    previous_rows = json.loads(CAMPAIGN_JOBS_JSON.read_text(encoding="utf-8"))
+                    if not isinstance(previous_rows, list) or not all(
+                        isinstance(row, dict) for row in previous_rows
+                    ):
+                        raise TypeError("campaign ledger is not a list of objects")
+                    previous_campaign_rows_by_job = {
+                        str(row["job_id"]): row for row in previous_rows if row.get("job_id")
+                    }
+                except (OSError, json.JSONDecodeError, TypeError):
+                    print("WARNING: previous campaign ledger is unreadable; first-run timing cannot be carried forward.")
             campaign_job_rows = []
+            planned_campaign_job_ids = (
+                (["plumbing_smoke"] if RUN_PLUMBING_SMOKE else [])
+                + [str(job["job_id"]) for job in formal_jobs]
+                + (
+                    ["prediction_accuracy_audit"]
+                    if globals().get("RUN_PREDICTION_AUDIT", False) else []
+                )
+            )
             if RUN_PLUMBING_SMOKE:
+                smoke_elapsed_seconds = globals().get("SMOKE_ELAPSED_SECONDS")
                 campaign_job_rows.append({
                     "job_id": "plumbing_smoke",
                     "profile": "benchmark_smoke",
@@ -801,17 +916,48 @@ def build_notebook() -> dict:
                     "status": "PASS" if SMOKE_OK else "EXECUTION_ERROR",
                     "reason": "" if SMOKE_OK else "smoke command returned non-zero",
                     "case_count": 1,
-                    "elapsed_seconds": None,
+                    "elapsed_seconds": smoke_elapsed_seconds,
+                    "current_invocation_elapsed_seconds": smoke_elapsed_seconds,
+                    "elapsed_seconds_scope": "current smoke invocation wall time; never method timing",
+                    "invocation_mode": "executed",
+                    "resumed_case_count": 0,
+                    "executed_case_count": 1,
+                    "first_run_elapsed_seconds": (
+                        smoke_elapsed_seconds if SMOKE_OK else None
+                    ),
+                    "first_run_elapsed_seconds_source": (
+                        "current successful invocation"
+                        if SMOKE_OK else "unavailable: smoke failed"
+                    ),
                 })
-            CAMPAIGN_JOBS_CSV = DRIVE_RUN_ROOT / "campaign_jobs.csv"
-            CAMPAIGN_JOBS_JSON = DRIVE_RUN_ROOT / "campaign_jobs.json"
 
             def write_campaign_checkpoint():
-                payload = json.dumps(campaign_job_rows, indent=2)
+                # Preserve first-run provenance for planned jobs that this
+                # resumed invocation has not replayed yet. Otherwise a second
+                # interruption after the first job would truncate the old
+                # ledger to the current prefix.
+                current_by_job = {
+                    str(row["job_id"]): row
+                    for row in campaign_job_rows if row.get("job_id")
+                }
+                checkpoint_rows = [
+                    current_by_job.get(job_id)
+                    or previous_campaign_rows_by_job.get(job_id)
+                    for job_id in planned_campaign_job_ids
+                    if (
+                        job_id in current_by_job
+                        or job_id in previous_campaign_rows_by_job
+                    )
+                ]
+                checkpoint_rows.extend(
+                    row for row in campaign_job_rows
+                    if str(row.get("job_id")) not in set(planned_campaign_job_ids)
+                )
+                payload = json.dumps(checkpoint_rows, indent=2)
                 partial_json = CAMPAIGN_JOBS_JSON.with_suffix(".json.partial")
                 partial_json.write_text(payload, encoding="utf-8")
                 partial_json.replace(CAMPAIGN_JOBS_JSON)
-                frame = pd.DataFrame(campaign_job_rows)
+                frame = pd.DataFrame(checkpoint_rows)
                 partial_csv = CAMPAIGN_JOBS_CSV.with_suffix(".csv.partial")
                 frame.to_csv(partial_csv, index=False)
                 partial_csv.replace(CAMPAIGN_JOBS_CSV)
@@ -838,6 +984,67 @@ def build_notebook() -> dict:
                 if int(return_code) == 1 and scientific_failure:
                     return "SCIENTIFIC_FAIL", "legacy scientific-failure exit code"
                 return "EXECUTION_ERROR", f"unexpected suite return code {return_code}"
+
+            def execution_metadata_from_counts(
+                *, case_count, resumed_count, elapsed_seconds,
+                invocation_successful, previous_row=None,
+            ):
+                case_count = int(case_count)
+                resumed_count = int(resumed_count)
+                executed_count = max(case_count - resumed_count, 0)
+                if case_count <= 0:
+                    invocation_mode = "no_cases"
+                elif resumed_count == case_count:
+                    invocation_mode = "resumed_existing"
+                elif resumed_count:
+                    invocation_mode = "mixed_execute_and_resume"
+                else:
+                    invocation_mode = "executed"
+                previous_row = previous_row if isinstance(previous_row, dict) else {}
+                previous_first_run = (
+                    previous_row.get("first_run_elapsed_seconds")
+                    if previous_row.get("status") == "PASS" else None
+                )
+                if invocation_mode == "executed" and invocation_successful:
+                    first_run_elapsed = float(elapsed_seconds)
+                    first_run_source = "current successful invocation"
+                elif previous_first_run is not None:
+                    first_run_elapsed = float(previous_first_run)
+                    first_run_source = "preserved successful campaign checkpoint"
+                else:
+                    first_run_elapsed = None
+                    first_run_source = (
+                        "unavailable: current/previous fresh invocation was not successful"
+                    )
+                return {
+                    "elapsed_seconds": float(elapsed_seconds),
+                    "current_invocation_elapsed_seconds": float(elapsed_seconds),
+                    "elapsed_seconds_scope": (
+                        "current suite invocation wall time; resume validation is not first-run "
+                        "experiment time and neither value is method timing"
+                    ),
+                    "invocation_mode": invocation_mode,
+                    "resumed_case_count": resumed_count,
+                    "executed_case_count": executed_count,
+                    "first_run_elapsed_seconds": first_run_elapsed,
+                    "first_run_elapsed_seconds_source": first_run_source,
+                }
+
+            def suite_execution_metadata(
+                status_rows, elapsed_seconds, job_status, previous_row=None,
+            ):
+                statuses = [str(row.get("status", "")) for row in status_rows]
+                metadata = execution_metadata_from_counts(
+                    case_count=len(statuses),
+                    resumed_count=sum(
+                        status.startswith("resumed_existing") for status in statuses
+                    ),
+                    elapsed_seconds=elapsed_seconds,
+                    invocation_successful=(job_status == "PASS"),
+                    previous_row=previous_row,
+                )
+                metadata["suite_case_statuses"] = statuses
+                return metadata
 
             def scale_core_pass(case_records):
                 required = {"cg", "default", "full-eig"}
@@ -887,10 +1094,18 @@ def build_notebook() -> dict:
                     if gate_results.get(gate_key) is not True:
                         skip_reason = "SKIPPED_UPSTREAM_GATE"
                 if skip_reason:
+                    elapsed = time.perf_counter() - started
                     campaign_job_rows.append({
                         **base_row, "return_code": None, "status": skip_reason,
                         "reason": skip_reason, "case_count": 0,
-                        "elapsed_seconds": time.perf_counter() - started,
+                        "elapsed_seconds": elapsed,
+                        "current_invocation_elapsed_seconds": elapsed,
+                        "elapsed_seconds_scope": "gate evaluation only; no experiment executed",
+                        "invocation_mode": "skipped",
+                        "resumed_case_count": 0,
+                        "executed_case_count": 0,
+                        "first_run_elapsed_seconds": None,
+                        "first_run_elapsed_seconds_source": "not executed",
                     })
                     write_campaign_checkpoint()
                     print(f"[{job_id}] {skip_reason}")
@@ -904,10 +1119,18 @@ def build_notebook() -> dict:
                     case_ids=job.get("case_ids", ()),
                 )
                 if not cases:
+                    elapsed = time.perf_counter() - started
                     campaign_job_rows.append({
                         **base_row, "return_code": None, "status": "CONFIG_ERROR",
                         "reason": "profile filter selected zero cases", "case_count": 0,
-                        "elapsed_seconds": time.perf_counter() - started,
+                        "elapsed_seconds": elapsed,
+                        "current_invocation_elapsed_seconds": elapsed,
+                        "elapsed_seconds_scope": "configuration validation only; no experiment executed",
+                        "invocation_mode": "no_cases",
+                        "resumed_case_count": 0,
+                        "executed_case_count": 0,
+                        "first_run_elapsed_seconds": None,
+                        "first_run_elapsed_seconds_source": "not executed",
                     })
                     write_campaign_checkpoint()
                     print(f"[{job_id}] CONFIG_ERROR: profile filter selected zero cases")
@@ -959,10 +1182,21 @@ def build_notebook() -> dict:
                 status_path = output_root / "suite_status.json"
                 try:
                     status_rows = json.loads(status_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
+                    if not isinstance(status_rows, list) or not all(
+                        isinstance(row, dict) for row in status_rows
+                    ):
+                        raise TypeError("suite status is not a list of objects")
+                except (OSError, json.JSONDecodeError, TypeError):
                     status_rows = []
                 job_status, reason = classify_suite_invocation(
                     completed.returncode, status_rows, len(cases)
+                )
+                elapsed = time.perf_counter() - started
+                execution_metadata = suite_execution_metadata(
+                    status_rows,
+                    elapsed,
+                    job_status,
+                    previous_campaign_rows_by_job.get(job_id),
                 )
                 campaign_job_rows.append({
                     **base_row,
@@ -971,7 +1205,7 @@ def build_notebook() -> dict:
                     "reason": reason,
                     "case_count": len(cases),
                     "suite_status_path": str(status_path),
-                    "elapsed_seconds": time.perf_counter() - started,
+                    **execution_metadata,
                 })
                 controlled_profile_outputs.append(output_root)
                 if job.get("gate_series"):
@@ -1068,37 +1302,76 @@ def build_notebook() -> dict:
                 if not manifest_path.is_file():
                     problems.append("missing system_manifest.json")
                 else:
-                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    try:
+                        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        manifest = {}
+                        problems.append("unreadable system_manifest.json")
+                    if not isinstance(manifest, dict):
+                        manifest = {}
+                        problems.append("system_manifest.json is not an object")
                     if not manifest.get("system_unchanged"): problems.append("system changed")
                     if manifest.get("nufft_backend_resolved") != "cufinufft": problems.append("backend fallback")
                     if manifest.get("nufft_stage") != "cufinufft": problems.append("NUFFT stage is not GPU")
                     if manifest.get("precision_mode") != "fp64": problems.append("not fp64")
+                    if not manifest.get("device_name"): problems.append("missing timing device_name")
+                    if not manifest.get("compute_capability"): problems.append("missing compute_capability")
+                    if not manifest.get("timing_runtime_sha256"): problems.append("missing timing_runtime_sha256")
                     missing_component_hashes = [
-                        field for field in ("weights_sha256", "gf_sha256", "rhs_sha256")
+                        field for field in (
+                            "weights_sha256", "gf_sha256", "rhs_sha256",
+                            "rhs_storage_sha256",
+                        )
                         if not manifest.get(field)
                     ]
                     if missing_component_hashes:
-                        warnings.append(
-                            "legacy manifest lacks component hashes: "
+                        problems.append(
+                            "manifest lacks exact component hashes: "
                             + ", ".join(missing_component_hashes)
                         )
                 if not config_path.is_file():
                     problems.append("missing experiment_config.json")
                 else:
-                    config = json.loads(config_path.read_text(encoding="utf-8"))
+                    try:
+                        config = json.loads(config_path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        config = {}
+                        problems.append("unreadable experiment_config.json")
+                    if not isinstance(config, dict):
+                        config = {}
+                        problems.append("experiment_config.json is not an object")
                     if not config.get("strict_gpu_eig"): problems.append("strict_gpu_eig false")
                 if not complete_path.is_file(): problems.append("missing run_complete.json")
                 if not summary_path.is_file():
                     problems.append("missing matched_summary.csv")
                 else:
-                    matched = pd.read_csv(summary_path)
+                    try:
+                        matched = pd.read_csv(summary_path)
+                    except (OSError, pd.errors.ParserError, pd.errors.EmptyDataError) as exc:
+                        matched = pd.DataFrame()
+                        problems.append(f"unreadable matched_summary.csv: {type(exc).__name__}")
                     required_columns = {
                         "method", "measured_repeats", "converged_repeats",
                         "performance_claim_eligible", "true_relres_max", "cold_speedup_median",
                     }
-                    if not required_columns.issubset(matched.columns):
+                    if matched.empty:
+                        problems.append("matched summary is empty")
+                    elif not required_columns.issubset(matched.columns):
                         problems.append("matched summary lacks eligibility columns")
                     else:
+                        expected_methods = config.get("methods")
+                        observed_methods = matched["method"].astype(str).tolist()
+                        if (
+                            not isinstance(expected_methods, list)
+                            or not expected_methods
+                            or len({str(method) for method in expected_methods})
+                            != len(expected_methods)
+                            or sorted(observed_methods)
+                            != sorted(str(method) for method in expected_methods)
+                        ):
+                            problems.append(
+                                "matched summary method coverage differs from experiment_config.methods"
+                            )
                         eligible = matched["performance_claim_eligible"].astype(str).str.lower().eq("true")
                         expected_repeats = int(config.get("measured_repeats", 5))
                         five_of_five = (
@@ -1126,6 +1399,7 @@ def build_notebook() -> dict:
                                     + ", ".join(matched.loc[jitter, "method"].astype(str).tolist())
                                 )
                 audit_rows.append({
+                    "run_dir": str(run_dir),
                     "output_group": record["output_group"],
                     "suite_profile": record["suite_profile"],
                     "job_id": record.get("job_id", record["suite_profile"]),
@@ -1136,16 +1410,35 @@ def build_notebook() -> dict:
                     "weights_sha256": manifest.get("weights_sha256"),
                     "gf_sha256": manifest.get("gf_sha256"),
                     "rhs_sha256": manifest.get("rhs_sha256"),
+                    "rhs_storage_sha256": manifest.get("rhs_storage_sha256"),
+                    "device_name": manifest.get("device_name"),
+                    "compute_capability": manifest.get("compute_capability"),
+                    "timing_runtime_sha256": manifest.get("timing_runtime_sha256"),
                     "warning": "; ".join(warnings),
                     "status": "PASS" if not problems else "FAIL: " + "; ".join(problems),
                 })
             controlled_artifact_audit = pd.DataFrame(
                 audit_rows,
                 columns=[
-                    "output_group", "suite_profile", "job_id", "mandatory", "case", "N", "system_id",
-                    "weights_sha256", "gf_sha256", "rhs_sha256", "warning", "status",
+                    "run_dir", "output_group", "suite_profile", "job_id", "mandatory", "case", "N", "system_id",
+                    "weights_sha256", "gf_sha256", "rhs_sha256", "rhs_storage_sha256",
+                    "device_name", "compute_capability", "timing_runtime_sha256",
+                    "warning", "status",
                 ],
             )
+            if not controlled_artifact_audit.empty:
+                for output_group, group_index in controlled_artifact_audit.groupby(
+                    "output_group", sort=False
+                ).groups.items():
+                    group = controlled_artifact_audit.loc[group_index]
+                    if (
+                        group["device_name"].dropna().astype(str).nunique() != 1
+                        or group["compute_capability"].dropna().astype(str).nunique() != 1
+                        or group["timing_runtime_sha256"].dropna().astype(str).nunique() != 1
+                    ):
+                        controlled_artifact_audit.loc[group_index, "status"] = (
+                            "FAIL: selected profile mixes or lacks GPU runtime identity"
+                        )
             CONTROLLED_AUDIT_PATH = DRIVE_RUN_ROOT / "controlled_artifact_audit.csv"
             controlled_artifact_audit.to_csv(CONTROLLED_AUDIT_PATH, index=False)
             ignored_controlled_artifacts = pd.DataFrame({
@@ -1173,9 +1466,9 @@ def build_notebook() -> dict:
     cells.append(
         _markdown(
             r"""
-            # C. Prediction-equivalence audit（单独、非计时）
+            # C. Prediction-equivalence audit（复用 timed system/solution；单独、非计时）
 
-            Audit 会从每个 controlled config 重新构造自己的 fixed system，求解后按 GPU chunk 预测。其 solve/prediction 时间明确排除在 speedup claim 外。对于 master-prefix protocol，正式逻辑测试集为对应训练规模的前 (N/4) 行。
+            Audit 必须读取 timing case 保存的 exact system 与 canonical timed \(\beta\)，不得重建系统或重解。它只按 GPU chunk 计算预测，prediction 时间明确排除在 speedup claim 外。目标包括 `paper_10m` 三个 case 的全部 timed methods，以及 Synthetic nested-prefix 的 100M/300M（`cg/default`）；每个 case 最多使用测试集的前 2.5M 行。
             """
         )
     )
@@ -1183,86 +1476,363 @@ def build_notebook() -> dict:
         _code(
             r"""
             prediction_outputs = []
+            prediction_validation_rows = []
             expected_prediction_case_count = 0
             if RUN_PREDICTION_AUDIT:
+                from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.prediction_audit import (
+                    PREDICTION_AUDIT_COMPLETION_FILENAME,
+                    PREDICTION_AUDIT_CSV_FILENAME,
+                    PREDICTION_AUDIT_JSON_FILENAME,
+                    prediction_source_manifest,
+                )
+                CURRENT_PREDICTION_SOURCE_SHA256 = prediction_source_manifest()[
+                    "prediction_source_bundle_sha256"
+                ]
+                prediction_started = time.perf_counter()
+                prediction_resumed_count = 0
                 prediction_records = [
                     record for record in selected_case_records
-                    if record.get("suite_profile") in set(PREDICTION_AUDIT_PROFILES)
+                    if (
+                        record.get("suite_profile") in set(PREDICTION_AUDIT_PROFILES)
+                        and (
+                        record.get("suite_profile") == "paper_10m"
+                        or (
+                            record.get("suite_profile") == "scale_development_masters"
+                            and record.get("dataset_family") == "Synthetic"
+                            and record.get("job_id") in {"synthetic_nested_100m", "synthetic_nested_300m"}
+                        )
+                        )
+                    )
                 ]
                 expected_prediction_case_count = len(prediction_records)
                 prediction_targets = []
                 prediction_errors = []
+                prediction_scientific_failures = []
+
+                def validate_prediction_payload(payload, *, audit_out, config_path, timing_manifest, required_methods, expected_n_test):
+                    problems = []
+                    if not isinstance(payload, dict):
+                        return ["prediction audit payload is not a JSON object"]
+                    current_config_sha = hashlib.sha256(config_path.read_bytes()).hexdigest()
+                    if payload.get("config_source_sha256") != current_config_sha:
+                        problems.append("config_source_sha256 mismatch")
+                    if payload.get("dataset_content_index_sha256") != timing_manifest.get("dataset_content_index_sha256"):
+                        problems.append("dataset_content_index_sha256 mismatch")
+                    if payload.get("source_bundle_sha256") != timing_manifest.get("source_bundle_sha256"):
+                        problems.append("source_bundle_sha256 mismatch")
+                    if payload.get("prediction_source_bundle_sha256") != CURRENT_PREDICTION_SOURCE_SHA256:
+                        problems.append("prediction_source_bundle_sha256 mismatch")
+                    if payload.get("test_dataset_content_index_verified") is not True:
+                        problems.append("test dataset content index was not verified")
+                    if payload.get("test_dataset_metadata_verified") is not True:
+                        problems.append("test dataset metadata was not verified")
+                    if payload.get("strict_prediction_nufft") is not True:
+                        problems.append("strict_prediction_nufft must be true")
+                    if payload.get("observed_prediction_nufft_stages") != ["cufinufft"]:
+                        problems.append("prediction did not exclusively use cufinufft")
+                    if payload.get("audit_rebuilt_system") is not False:
+                        problems.append("audit_rebuilt_system must be false")
+                    if payload.get("timing_system_reused") is not True:
+                        problems.append("timing_system_reused must be true")
+                    if payload.get("timing_solutions_reused") is not True:
+                        problems.append("timing_solutions_reused must be true")
+                    if payload.get("timing_solution_hashes_verified") is not True:
+                        problems.append("timing_solution_hashes_verified must be true")
+                    if payload.get("timing_system_hashes_exact") is not True:
+                        problems.append("timing_system_hashes_exact must be true")
+                    if payload.get("audit_solve_count") != 0:
+                        problems.append("audit_solve_count must be zero")
+                    if payload.get("audit_solves_per_method") != 0:
+                        problems.append("audit_solves_per_method must be zero")
+                    timing_completion_path = config_path.parent / "run_complete.json"
+                    if not timing_completion_path.is_file():
+                        problems.append("timing run_complete.json is missing")
+                    elif payload.get("timing_run_complete_sha256") != hashlib.sha256(
+                        timing_completion_path.read_bytes()
+                    ).hexdigest():
+                        problems.append("timing run completion checksum mismatch")
+                    if payload.get("audit_pass") is not True:
+                        problems.append("audit_pass is not true")
+                    for field in (
+                        "system_id", "weights_sha256", "gf_sha256", "rhs_sha256",
+                        "rhs_storage_sha256", "reg_lambda",
+                    ):
+                        if not timing_manifest.get(field) or payload.get(field) != timing_manifest.get(field):
+                            problems.append(f"{field} does not exactly match timing artifact")
+                    try:
+                        observed_n_test = int(payload.get("evaluated_n_test", -1))
+                    except (TypeError, ValueError):
+                        observed_n_test = -1
+                    if observed_n_test != int(expected_n_test):
+                        problems.append(
+                            f"evaluated_n_test={payload.get('evaluated_n_test')} expected={expected_n_test}"
+                        )
+                    rows = payload.get("rows", [])
+                    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+                        problems.append("prediction rows are not a list of objects")
+                        rows = []
+                    observed_methods = {str(row.get("method")) for row in rows}
+                    if observed_methods != set(required_methods):
+                        problems.append(
+                            f"prediction methods={sorted(observed_methods)} expected={sorted(required_methods)}"
+                        )
+                    if len(rows) != len(required_methods):
+                        problems.append(
+                            "prediction JSON must contain exactly one row per required method"
+                        )
+                    non_equivalent = sorted(
+                        str(row.get("method")) for row in rows
+                        if str(row.get("method")) != "cg"
+                        and row.get("prediction_equivalent_to_cg") is not True
+                    )
+                    if non_equivalent:
+                        problems.append(f"prediction equivalence failed: {non_equivalent}")
+
+                    json_path = Path(audit_out) / PREDICTION_AUDIT_JSON_FILENAME
+                    csv_path = Path(audit_out) / PREDICTION_AUDIT_CSV_FILENAME
+                    completion_path = Path(audit_out) / PREDICTION_AUDIT_COMPLETION_FILENAME
+                    if not (json_path.is_file() and csv_path.is_file() and completion_path.is_file()):
+                        problems.append("prediction JSON/CSV/completion artifact set is incomplete")
+                    else:
+                        try:
+                            completion = json.loads(completion_path.read_text(encoding="utf-8"))
+                            csv_frame = pd.read_csv(csv_path)
+                        except (OSError, json.JSONDecodeError, ValueError) as exc:
+                            problems.append(f"prediction completion/CSV unreadable: {type(exc).__name__}")
+                        else:
+                            if not isinstance(completion, dict):
+                                problems.append("prediction completion is not a JSON object")
+                            else:
+                                if completion.get("prediction_audit_json_sha256") != hashlib.sha256(json_path.read_bytes()).hexdigest():
+                                    problems.append("prediction JSON checksum mismatch")
+                                if completion.get("prediction_audit_csv_sha256") != hashlib.sha256(csv_path.read_bytes()).hexdigest():
+                                    problems.append("prediction CSV checksum mismatch")
+                                if completion.get("system_id") != payload.get("system_id"):
+                                    problems.append("prediction completion system_id mismatch")
+                                if completion.get("methods") != list(required_methods):
+                                    problems.append("prediction completion methods mismatch")
+                                try:
+                                    completion_row_count = int(completion.get("row_count", -1))
+                                except (TypeError, ValueError, OverflowError):
+                                    completion_row_count = -1
+                                if completion_row_count != len(rows):
+                                    problems.append("prediction completion row_count mismatch")
+                                if completion.get("audit_pass") != payload.get("audit_pass"):
+                                    problems.append("prediction completion audit_pass mismatch")
+                                if completion.get("prediction_source_bundle_sha256") != CURRENT_PREDICTION_SOURCE_SHA256:
+                                    problems.append("prediction completion source mismatch")
+                            if len(csv_frame) != len(rows) or set(csv_frame.get("method", [])) != set(required_methods):
+                                problems.append("prediction CSV rows/methods differ from JSON")
+                    return problems
+
                 for record in prediction_records:
                     config_path = Path(record["run_dir"]) / "experiment_config.json"
                     manifest_path = Path(record["run_dir"]) / "system_manifest.json"
                     if not manifest_path.is_file() or not config_path.is_file():
-                        prediction_errors.append(
-                            f"prediction target lacks config/manifest: {record['run_dir']}"
+                        message = f"prediction target lacks config/manifest: {record['run_dir']}"
+                        prediction_errors.append(message)
+                        prediction_validation_rows.append({
+                            "case_id": record["case_id"], "status": "EXECUTION_ERROR",
+                            "audit_pass": False,
+                            "exact_timing_system_match": False,
+                            "timing_solutions_reused": False,
+                            "timing_solution_hashes_verified": False,
+                            "zero_audit_solves": False,
+                            "problems": message,
+                        })
+                        continue
+                    try:
+                        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                        config = json.loads(config_path.read_text(encoding="utf-8"))
+                        n_train = int(manifest["n_train"])
+                    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                        message = (
+                            f"prediction target has unreadable config/manifest: "
+                            f"{record['run_dir']} ({type(exc).__name__})"
                         )
+                        prediction_errors.append(message)
+                        prediction_validation_rows.append({
+                            "case_id": record["case_id"], "status": "EXECUTION_ERROR",
+                            "audit_pass": False,
+                            "exact_timing_system_match": False,
+                            "timing_solutions_reused": False,
+                            "timing_solution_hashes_verified": False,
+                            "zero_audit_solves": False,
+                            "problems": message,
+                        })
                         continue
-                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                    n_train = int(manifest["n_train"])
-                    if n_train > int(PREDICTION_AUDIT_MAX_TRAIN_N):
-                        continue
-                    prediction_targets.append((record, config_path, manifest))
-                for record, config_path, manifest in prediction_targets:
+                    required_methods = (
+                        [str(method) for method in config.get("methods", [])]
+                        if record.get("suite_profile") == "paper_10m"
+                        else ["cg", "default"]
+                    )
+                    expected_n_test = min(int(PREDICTION_AUDIT_MAX_TEST_N), n_train // 4)
+                    prediction_targets.append(
+                        (record, config_path, manifest, required_methods, expected_n_test)
+                    )
+                for record, config_path, manifest, required_methods, expected_n_test in prediction_targets:
                     audit_out = config_path.parent / "prediction_audit"
-                    if (audit_out / "prediction_audit.json").is_file():
-                        existing = json.loads(
-                            (audit_out / "prediction_audit.json").read_text(encoding="utf-8")
-                        )
-                        current_config_sha = hashlib.sha256(config_path.read_bytes()).hexdigest()
-                        if existing.get("config_source_sha256") != current_config_sha:
-                            prediction_errors.append(f"stale prediction audit: {record['case_id']}")
-                            continue
-                        if existing.get("dataset_content_index_sha256") != manifest.get("dataset_content_index_sha256"):
-                            prediction_errors.append(f"prediction data mismatch: {record['case_id']}")
-                            continue
-                        audit_source_sha = existing.get("source_bundle_sha256")
-                        timing_source_sha = manifest.get("source_bundle_sha256")
-                        if (
-                            audit_source_sha is not None
-                            and timing_source_sha is not None
-                            and audit_source_sha != timing_source_sha
-                        ):
-                            prediction_errors.append(f"prediction source mismatch: {record['case_id']}")
-                            continue
-                        print("Prediction audit already exists; skipping", config_path.parent.name)
-                        prediction_outputs.append(audit_out)
+                    existing_is_valid = False
+                    if (audit_out / PREDICTION_AUDIT_JSON_FILENAME).is_file():
+                        try:
+                            existing = json.loads(
+                                (audit_out / PREDICTION_AUDIT_JSON_FILENAME).read_text(encoding="utf-8")
+                            )
+                        except (OSError, json.JSONDecodeError) as exc:
+                            existing = {}
+                            existing_problems = [
+                                f"existing prediction JSON unreadable: {type(exc).__name__}"
+                            ]
+                        else:
+                            existing_problems = validate_prediction_payload(
+                                existing,
+                                audit_out=audit_out,
+                                config_path=config_path,
+                                timing_manifest=manifest,
+                                required_methods=required_methods,
+                                expected_n_test=expected_n_test,
+                            )
+                        if not existing_problems:
+                            print("Valid prediction audit already exists; reusing", config_path.parent.name)
+                            prediction_outputs.append(audit_out)
+                            prediction_resumed_count += 1
+                            prediction_validation_rows.append({
+                                "case_id": record["case_id"],
+                                "suite_profile": record.get("suite_profile"),
+                                "dataset_family": record.get("dataset_family"),
+                                "n_train": int(manifest["n_train"]),
+                                "required_methods": ",".join(required_methods),
+                                "evaluated_n_test": expected_n_test,
+                                "status": "PASS_RESUMED",
+                                "audit_pass": True,
+                                "exact_timing_system_match": True,
+                                "timing_solutions_reused": True,
+                                "timing_solution_hashes_verified": True,
+                                "zero_audit_solves": True,
+                                "problems": "",
+                                "audit_path": str(audit_out / "prediction_audit.json"),
+                            })
+                            existing_is_valid = True
+                        else:
+                            print(
+                                "Existing prediction audit is stale/ineligible; rerunning",
+                                record["case_id"], existing_problems,
+                            )
+                    if existing_is_valid:
                         continue
-                    completed = run_cmd([
+                    command = [
                         sys.executable, "-m",
                         "efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.prediction_audit",
                         "--config", str(config_path),
                         "--prediction-chunk-size", "100000",
-                        "--warmup-solves", "1",
-                        "--max-test", str(n_train // 4),
+                        "--strict-prediction-nufft",
+                        "--max-test", str(expected_n_test),
                         "--output-dir", str(audit_out),
-                    ], cwd=LOCAL_REPO, check=False)
-                    if completed.returncode == 0 and (audit_out / "prediction_audit.json").is_file():
+                    ]
+                    if record.get("suite_profile") != "paper_10m":
+                        command.extend(["--methods", ",".join(required_methods)])
+                    completed = run_cmd(command, cwd=LOCAL_REPO, check=False)
+                    final_payload = {}
+                    final_problems = ["prediction audit JSON missing"]
+                    if (audit_out / PREDICTION_AUDIT_JSON_FILENAME).is_file():
+                        try:
+                            final_payload = json.loads(
+                                (audit_out / PREDICTION_AUDIT_JSON_FILENAME).read_text(encoding="utf-8")
+                            )
+                        except (OSError, json.JSONDecodeError) as exc:
+                            final_problems = [
+                                f"prediction JSON unreadable after execution: {type(exc).__name__}"
+                            ]
+                        else:
+                            final_problems = validate_prediction_payload(
+                                final_payload,
+                                audit_out=audit_out,
+                                config_path=config_path,
+                                timing_manifest=manifest,
+                                required_methods=required_methods,
+                                expected_n_test=expected_n_test,
+                            )
+                    if completed.returncode == 0 and not final_problems:
                         prediction_outputs.append(audit_out)
+                        validation_status = "PASS_EXECUTED"
                     else:
-                        prediction_errors.append(
-                            f"prediction command failed for {record['case_id']} rc={completed.returncode}"
+                        message = (
+                            f"prediction audit failed for {record['case_id']} rc={completed.returncode}: "
+                            + "; ".join(final_problems)
                         )
+                        prediction_errors.append(message)
+                        if completed.returncode == 2 or final_payload.get("audit_pass") is False:
+                            prediction_scientific_failures.append(message)
+                        validation_status = (
+                            "SCIENTIFIC_FAIL" if message in prediction_scientific_failures
+                            else "EXECUTION_ERROR"
+                        )
+                    prediction_validation_rows.append({
+                        "case_id": record["case_id"],
+                        "suite_profile": record.get("suite_profile"),
+                        "dataset_family": record.get("dataset_family"),
+                        "n_train": int(manifest["n_train"]),
+                        "required_methods": ",".join(required_methods),
+                        "evaluated_n_test": expected_n_test,
+                        "status": validation_status,
+                        "audit_pass": final_payload.get("audit_pass") is True,
+                        "exact_timing_system_match": all(
+                            final_payload.get(field) == manifest.get(field)
+                            and manifest.get(field) is not None
+                            for field in (
+                                "system_id", "weights_sha256", "gf_sha256",
+                                "rhs_sha256", "rhs_storage_sha256", "reg_lambda",
+                            )
+                        ),
+                        "timing_solutions_reused": final_payload.get("timing_solutions_reused") is True,
+                        "timing_solution_hashes_verified": (
+                            final_payload.get("timing_solution_hashes_verified") is True
+                        ),
+                        "zero_audit_solves": (
+                            final_payload.get("audit_solve_count") == 0
+                            and final_payload.get("audit_solves_per_method") == 0
+                        ),
+                        "problems": "; ".join(final_problems),
+                        "audit_path": str(audit_out / "prediction_audit.json"),
+                    })
                 prediction_status = (
                     "PASS" if expected_prediction_case_count > 0
                     and len(prediction_outputs) == expected_prediction_case_count
-                    and not prediction_errors else "EXECUTION_ERROR"
+                    and not prediction_errors
+                    else ("SCIENTIFIC_FAIL" if prediction_scientific_failures else "EXECUTION_ERROR")
                 )
+                prediction_elapsed = time.perf_counter() - prediction_started
+                prediction_execution_metadata = execution_metadata_from_counts(
+                    case_count=expected_prediction_case_count,
+                    resumed_count=prediction_resumed_count,
+                    elapsed_seconds=prediction_elapsed,
+                    invocation_successful=(prediction_status == "PASS"),
+                    previous_row=previous_campaign_rows_by_job.get("prediction_accuracy_audit"),
+                )
+                prediction_families = sorted({
+                    str(record.get("dataset_family"))
+                    for record, *_ in prediction_targets
+                    if record.get("dataset_family")
+                })
+                prediction_sizes = sorted({
+                    int(manifest["n_train"])
+                    for _, _, manifest, _, _ in prediction_targets
+                })
                 campaign_job_rows.append({
-                    "job_id": "paper_10m_prediction_audit",
-                    "profile": "prediction_audit",
-                    "dataset_family": "Synthetic,Winnebago,Manitowoc",
-                    "n_train": "10000000",
+                    "job_id": "prediction_accuracy_audit",
+                    "profile": ",".join(PREDICTION_AUDIT_PROFILES),
+                    "dataset_family": ",".join(prediction_families),
+                    "n_train": ",".join(str(value) for value in prediction_sizes),
                     "mandatory": True,
-                    "return_code": 0 if prediction_status == "PASS" else 1,
+                    "return_code": 0 if prediction_status == "PASS" else (2 if prediction_status == "SCIENTIFIC_FAIL" else 1),
                     "status": prediction_status,
                     "reason": "; ".join(prediction_errors),
                     "case_count": expected_prediction_case_count,
-                    "elapsed_seconds": None,
+                    **prediction_execution_metadata,
                 })
                 write_campaign_checkpoint()
+            PREDICTION_ARTIFACT_AUDIT_PATH = DRIVE_RUN_ROOT / "prediction_artifact_audit.csv"
+            pd.DataFrame(prediction_validation_rows).to_csv(PREDICTION_ARTIFACT_AUDIT_PATH, index=False)
             print("Prediction audit outputs:", prediction_outputs)
             """
         )
@@ -1282,6 +1852,11 @@ def build_notebook() -> dict:
         _code(
             r"""
             import re
+            from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.prediction_audit import (
+                PREDICTION_AUDIT_COMPLETION_FILENAME,
+                PREDICTION_AUDIT_CSV_FILENAME,
+                PREDICTION_AUDIT_JSON_FILENAME,
+            )
 
             def dataset_family_label(stem):
                 text = str(stem or "")
@@ -1303,7 +1878,9 @@ def build_notebook() -> dict:
                 "method_order_seed", "eig_seed", "nystrom_seed", "rpcholesky_seed",
                 "precompute_chunk_size", "strict_gpu_eig",
             )
-            SYSTEM_COMPONENT_FIELDS = ("weights_sha256", "gf_sha256", "rhs_sha256")
+            SYSTEM_COMPONENT_FIELDS = (
+                "weights_sha256", "gf_sha256", "rhs_sha256", "rhs_storage_sha256"
+            )
 
             def dataset_series_id(stem):
                 return re.sub(r"_n(?:train)?\d+$", "", str(stem or ""), flags=re.IGNORECASE)
@@ -1311,14 +1888,45 @@ def build_notebook() -> dict:
                 str(Path(record["run_dir"]).resolve()): record
                 for record in selected_case_records
             }
+            prediction_outputs_declared = "prediction_outputs" in globals()
+            selected_prediction_audit_dirs = {
+                str(Path(path).resolve())
+                for path in globals().get("prediction_outputs", [])
+            }
             result_frames = []
             controlled_frames = []
+            prediction_frames = []
+            report_ingest_warnings = []
             for summary_path in sorted(CONTROLLED_OUTPUT_ROOT.rglob("matched_summary.csv")):
-                frame = pd.read_csv(summary_path)
                 run_dir = summary_path.parent.resolve()
-                manifest = json.loads(summary_path.with_name("system_manifest.json").read_text(encoding="utf-8"))
                 config_path = summary_path.with_name("experiment_config.json")
-                config = json.loads(config_path.read_text(encoding="utf-8"))
+                try:
+                    frame = pd.read_csv(summary_path)
+                    manifest = json.loads(
+                        summary_path.with_name("system_manifest.json").read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                    config = json.loads(config_path.read_text(encoding="utf-8"))
+                    if not isinstance(manifest, dict) or not isinstance(config, dict):
+                        raise ValueError("manifest/config is not a JSON object")
+                    required_report_columns = {
+                        "method", "performance_claim_eligible", "measured_repeats",
+                        "converged_repeats", "true_relres_max", "cold_speedup_median",
+                    }
+                    if frame.empty or not required_report_columns.issubset(frame.columns):
+                        raise ValueError(
+                            "controlled summary is empty or lacks required report columns"
+                        )
+                except (
+                    OSError, json.JSONDecodeError, ValueError,
+                    pd.errors.ParserError, pd.errors.EmptyDataError,
+                ) as exc:
+                    report_ingest_warnings.append({
+                        "artifact": str(summary_path),
+                        "reason": f"{type(exc).__name__}: {exc}",
+                    })
+                    continue
                 relative_parts = run_dir.relative_to(CONTROLLED_OUTPUT_ROOT.resolve()).parts
                 output_group = relative_parts[0] if relative_parts else "unknown"
                 selected_record = selected_record_by_dir.get(str(run_dir))
@@ -1348,6 +1956,16 @@ def build_notebook() -> dict:
                 frame["nufft_backend_resolved"] = manifest.get("nufft_backend_resolved")
                 frame["nufft_stage"] = manifest.get("nufft_stage")
                 frame["precision_mode"] = manifest.get("precision_mode")
+                frame["device_name"] = manifest.get("device_name")
+                frame["compute_capability"] = manifest.get("compute_capability")
+                frame["timing_runtime_sha256"] = manifest.get("timing_runtime_sha256")
+                frame["prepared_system_loaded_from_artifact"] = manifest.get(
+                    "prepared_system_loaded_from_artifact", False
+                )
+                frame["setup_inclusive_timing_eligible"] = manifest.get(
+                    "setup_inclusive_timing_eligible",
+                    not bool(manifest.get("prepared_system_loaded_from_artifact", False)),
+                )
                 for field in CONFIG_INDEX_FIELDS:
                     frame[f"cfg_{field}"] = config.get(field)
                 scientific_config = {field: config.get(field) for field in CONFIG_INDEX_FIELDS}
@@ -1376,26 +1994,92 @@ def build_notebook() -> dict:
                 result_frames.append(frame)
 
             for audit_path in sorted(CONTROLLED_OUTPUT_ROOT.rglob("prediction_audit.csv")):
-                frame = pd.read_csv(audit_path)
                 run_dir = audit_path.parent.parent.resolve()
-                manifest = json.loads((run_dir / "system_manifest.json").read_text(encoding="utf-8"))
                 audit_payload_path = audit_path.with_suffix(".json")
-                audit_payload = (
-                    json.loads(audit_payload_path.read_text(encoding="utf-8"))
-                    if audit_payload_path.is_file() else {}
-                )
+                try:
+                    frame = pd.read_csv(audit_path)
+                    manifest = json.loads(
+                        (run_dir / "system_manifest.json").read_text(encoding="utf-8")
+                    )
+                    audit_payload = (
+                        json.loads(audit_payload_path.read_text(encoding="utf-8"))
+                        if audit_payload_path.is_file() else {}
+                    )
+                    if not isinstance(manifest, dict) or not isinstance(audit_payload, dict):
+                        raise ValueError("prediction/system manifest is not a JSON object")
+                    if frame.empty or "method" not in frame.columns:
+                        raise ValueError("prediction audit is empty or lacks method column")
+                except (
+                    OSError, json.JSONDecodeError, ValueError,
+                    pd.errors.ParserError, pd.errors.EmptyDataError,
+                ) as exc:
+                    report_ingest_warnings.append({
+                        "artifact": str(audit_path),
+                        "reason": f"{type(exc).__name__}: {exc}",
+                    })
+                    continue
+                completion_path = audit_path.parent / PREDICTION_AUDIT_COMPLETION_FILENAME
+                completion_valid = False
+                if completion_path.is_file() and audit_payload_path.is_file():
+                    try:
+                        completion_payload = json.loads(
+                            completion_path.read_text(encoding="utf-8")
+                        )
+                        completion_valid = bool(
+                            isinstance(completion_payload, dict)
+                            and completion_payload.get("prediction_audit_json_sha256")
+                            == hashlib.sha256(audit_payload_path.read_bytes()).hexdigest()
+                            and completion_payload.get("prediction_audit_csv_sha256")
+                            == hashlib.sha256(audit_path.read_bytes()).hexdigest()
+                        )
+                    except (OSError, json.JSONDecodeError):
+                        completion_valid = False
                 relative_parts = run_dir.relative_to(CONTROLLED_OUTPUT_ROOT.resolve()).parts
                 output_group = relative_parts[0] if relative_parts else "unknown"
                 selected_record = selected_record_by_dir.get(str(run_dir))
-                frame["audit_system_id"] = frame["system_id"]
+                csv_system_id = (
+                    frame["system_id"].iloc[0]
+                    if "system_id" in frame.columns and not frame.empty else None
+                )
+                frame["audit_system_id"] = audit_payload.get("system_id", csv_system_id)
                 frame["timing_system_id"] = manifest.get("system_id")
                 for field in SYSTEM_COMPONENT_FIELDS:
                     frame[f"audit_{field}"] = audit_payload.get(field)
                     frame[f"timing_{field}"] = manifest.get(field)
-                frame["audit_rebuilt_system"] = True
+                exact_system_match = all(
+                    audit_payload.get(field) is not None
+                    and audit_payload.get(field) == manifest.get(field)
+                    for field in ("system_id", *SYSTEM_COMPONENT_FIELDS, "reg_lambda")
+                )
+                frame["audit_rebuilt_system"] = audit_payload.get("audit_rebuilt_system")
+                frame["timing_system_reused"] = audit_payload.get("timing_system_reused")
+                frame["timing_solutions_reused"] = audit_payload.get("timing_solutions_reused")
+                frame["timing_solution_hashes_verified"] = audit_payload.get(
+                    "timing_solution_hashes_verified"
+                )
+                frame["audit_solve_count"] = audit_payload.get("audit_solve_count")
+                frame["audit_pass"] = audit_payload.get("audit_pass")
+                frame["prediction_completion_valid"] = completion_valid
+                frame["exact_timing_system_match"] = exact_system_match
+                row_equivalent = frame["method"].astype(str).eq("cg")
+                if "prediction_equivalent_to_cg" in frame.columns:
+                    row_equivalent = row_equivalent | frame[
+                        "prediction_equivalent_to_cg"
+                    ].astype(str).str.lower().eq("true")
+                frame["prediction_claim_eligible"] = bool(
+                    exact_system_match
+                    and audit_payload.get("audit_rebuilt_system") is False
+                    and audit_payload.get("timing_system_reused") is True
+                    and audit_payload.get("timing_solutions_reused") is True
+                    and audit_payload.get("timing_solution_hashes_verified") is True
+                    and audit_payload.get("audit_solve_count") == 0
+                    and audit_payload.get("audit_solves_per_method") == 0
+                    and audit_payload.get("audit_pass") is True
+                    and completion_valid
+                ) & row_equivalent
                 frame["protocol_family"] = "prediction_audit"
                 frame["evidence_role"] = "accuracy_only"
-                frame["timing_scope"] = "excluded from all speed claims"
+                frame["timing_scope"] = "timed beta reused; prediction-only audit excluded from all speed claims"
                 frame["output_group"] = output_group
                 frame["suite_profile"] = (
                     selected_record.get("suite_profile") if selected_record else output_group
@@ -1403,17 +2087,42 @@ def build_notebook() -> dict:
                 frame["case"] = run_dir.name
                 frame["case_id"] = run_dir.name
                 frame["run_dir"] = str(run_dir)
-                frame["selected_in_this_invocation"] = selected_record is not None
+                frame["selected_in_this_invocation"] = bool(
+                    selected_record is not None
+                    and (
+                        not prediction_outputs_declared
+                        or str(audit_path.parent.resolve())
+                        in selected_prediction_audit_dirs
+                    )
+                )
                 frame["dataset_stem"] = manifest.get("dataset_stem")
                 frame["dataset_family"] = dataset_family_label(manifest.get("dataset_stem"))
                 frame["dataset_series_id"] = dataset_series_id(manifest.get("dataset_stem"))
                 frame["N"] = manifest.get("n_train")
+                if "test_rmse_ratio_vs_cg" in frame.columns:
+                    frame["test_rmse_difference_ppm_vs_cg"] = 1e6 * (
+                        pd.to_numeric(frame["test_rmse_ratio_vs_cg"], errors="coerce") - 1.0
+                    )
+                    frame["test_rmse_absolute_relative_difference_vs_cg"] = (
+                        pd.to_numeric(frame["test_rmse_ratio_vs_cg"], errors="coerce") - 1.0
+                    ).abs()
+                prediction_frames.append(frame)
                 result_frames.append(frame)
 
             controlled_catalog = (
                 pd.concat(controlled_frames, ignore_index=True, sort=False)
                 if controlled_frames else pd.DataFrame()
             )
+            prediction_catalog = (
+                pd.concat(prediction_frames, ignore_index=True, sort=False)
+                if prediction_frames else pd.DataFrame()
+            )
+            selected_prediction = (
+                prediction_catalog.loc[prediction_catalog["selected_in_this_invocation"]].copy()
+                if not prediction_catalog.empty else pd.DataFrame()
+            )
+            PREDICTION_ACCURACY_SUMMARY_PATH = DRIVE_RUN_ROOT / "prediction_accuracy_summary.csv"
+            selected_prediction.to_csv(PREDICTION_ACCURACY_SUMMARY_PATH, index=False)
             if not controlled_catalog.empty:
                 duplicate_key = ["output_group", "case_id", "method"]
                 selected_for_duplicate_check = controlled_catalog.loc[
@@ -1431,6 +2140,15 @@ def build_notebook() -> dict:
                 if not controlled_catalog.empty else pd.DataFrame()
             )
             selected_controlled.to_csv(SELECTED_CONTROLLED_INDEX_PATH, index=False)
+            REPORT_INGEST_WARNINGS_PATH = DRIVE_RUN_ROOT / "report_ingest_warnings.csv"
+            pd.DataFrame(report_ingest_warnings).to_csv(
+                REPORT_INGEST_WARNINGS_PATH, index=False
+            )
+            if report_ingest_warnings:
+                print(
+                    f"Skipped {len(report_ingest_warnings)} unreadable stale/partial "
+                    f"report artifacts; see {REPORT_INGEST_WARNINGS_PATH}."
+                )
             INELIGIBLE_INDEX_PATH = DRIVE_RUN_ROOT / "controlled_ineligible_rows.csv"
             ineligible_controlled = (
                 controlled_catalog.loc[
@@ -1478,9 +2196,35 @@ def build_notebook() -> dict:
                 ):
                     raise RuntimeError(f"{context}: CG cold speedup must be exactly one; got {values}")
 
-            controlled_plot = controlled_catalog.copy()
+            def minmax_error(frame, median_field, min_field, max_field):
+                median = pd.to_numeric(frame[median_field], errors="raise").to_numpy(float)
+                minimum = (
+                    pd.to_numeric(frame[min_field], errors="coerce").to_numpy(float)
+                    if min_field in frame.columns else median.copy()
+                )
+                maximum = (
+                    pd.to_numeric(frame[max_field], errors="coerce").to_numpy(float)
+                    if max_field in frame.columns else median.copy()
+                )
+                minimum = np.where(np.isfinite(minimum), minimum, median)
+                maximum = np.where(np.isfinite(maximum), maximum, median)
+                return median, np.vstack([
+                    np.maximum(median - minimum, 0.0),
+                    np.maximum(maximum - median, 0.0),
+                ])
+
+            controlled_plot = selected_controlled.copy()
             if not controlled_plot.empty:
                 controlled_plot = controlled_plot.loc[controlled_plot["claim_eligible"]].copy()
+                if "controlled_artifact_audit" in globals():
+                    passed_run_dirs = set(
+                        controlled_artifact_audit.loc[
+                            controlled_artifact_audit["status"].eq("PASS"), "run_dir"
+                        ].astype(str)
+                    )
+                    controlled_plot = controlled_plot.loc[
+                        controlled_plot["run_dir"].astype(str).isin(passed_run_dirs)
+                    ].copy()
 
             # paper_10m is a method comparison at one N, not a scale curve.
             paper_plot = (
@@ -1585,6 +2329,56 @@ def build_notebook() -> dict:
                     GENERATED_PLOT_PATHS.append(pareto_path)
                     plt.show()
 
+            # Accuracy-only evidence from exact timed systems and canonical timed solutions.
+            prediction_plot = (
+                selected_prediction.loc[selected_prediction["prediction_claim_eligible"]].copy()
+                if not selected_prediction.empty else pd.DataFrame()
+            )
+            if not prediction_plot.empty:
+                prediction_plot["audit_case_label"] = prediction_plot.apply(
+                    lambda row: f"{row['dataset_family']} {int(row['N']) / 1e6:g}M",
+                    axis=1,
+                )
+                prediction_key = ["case_id", "method"]
+                if bool(prediction_plot.duplicated(prediction_key, keep=False).any()):
+                    raise RuntimeError("Prediction audit has duplicate case/method rows.")
+                audit_cases = list(dict.fromkeys(prediction_plot["audit_case_label"].astype(str)))
+                audit_methods = [
+                    method for method in METHOD_ORDER
+                    if method != "cg" and method in set(prediction_plot["method"])
+                ]
+                x = np.arange(len(audit_cases), dtype=float)
+                width = min(0.16, 0.75 / max(len(audit_methods), 1))
+                fig, ax = plt.subplots(figsize=(max(10.5, 1.8 * len(audit_cases)), 5.3))
+                for method_index, method in enumerate(audit_methods):
+                    rows = prediction_plot.loc[
+                        prediction_plot["method"].eq(method)
+                    ].set_index("audit_case_label")
+                    values = np.asarray([
+                        float(rows.loc[label, "test_rmse_difference_ppm_vs_cg"])
+                        if label in rows.index else np.nan
+                        for label in audit_cases
+                    ])
+                    positions = x + (method_index - (len(audit_methods) - 1) / 2) * width
+                    ax.bar(
+                        positions, values, width=width,
+                        color=METHOD_COLORS.get(method), label=method,
+                    )
+                ax.axhline(0.0, color="black", lw=1)
+                ax.set_xticks(x, audit_cases, rotation=20, ha="right")
+                ax.set_ylabel("test RMSE difference vs CG (ppm)")
+                ax.set_title(
+                    "Prediction equivalence using canonical timed solutions "
+                    "(accuracy only; lower absolute difference is better)"
+                )
+                ax.grid(axis="y", alpha=.25)
+                ax.legend(ncol=min(3, max(len(audit_methods), 1)), frameon=False)
+                fig.tight_layout()
+                prediction_plot_path = DRIVE_RUN_ROOT / "prediction_accuracy_vs_cg.png"
+                fig.savefig(prediction_plot_path, dpi=180, bbox_inches="tight")
+                GENERATED_PLOT_PATHS.append(prediction_plot_path)
+                plt.show()
+
             # One-at-a-time robustness scan: lambda varies at ell=0.1, and ell varies at lambda=0.1.
             oat_plot = (
                 controlled_plot.loc[controlled_plot["output_group"].eq("winnebago_oat_n10m")].copy()
@@ -1670,12 +2464,18 @@ def build_notebook() -> dict:
             )
             if not budget_plot.empty:
                 case_systems = budget_plot[[
-                    "case_id", "system_id", "weights_sha256", "gf_sha256", "rhs_sha256"
+                    "case_id", "system_id", "weights_sha256", "gf_sha256", "rhs_sha256",
+                    "rhs_storage_sha256", "cfg_reg_lambda", "device_name", "compute_capability",
+                    "timing_runtime_sha256",
                 ]].drop_duplicates()
                 BOX_BUDGET_SYSTEM_MATCH = bool(
                     len(case_systems) == 3
                     and all(case_systems[field].notna().all() and case_systems[field].nunique() == 1
-                            for field in ("system_id", "weights_sha256", "gf_sha256", "rhs_sha256"))
+                            for field in (
+                                "system_id", "weights_sha256", "gf_sha256", "rhs_sha256",
+                                "rhs_storage_sha256", "cfg_reg_lambda", "device_name",
+                                "compute_capability", "timing_runtime_sha256",
+                            ))
                 )
                 if not BOX_BUDGET_SYSTEM_MATCH:
                     print(
@@ -1696,18 +2496,22 @@ def build_notebook() -> dict:
                 if not default_budget.empty:
                     x_values = pd.to_numeric(default_budget["cfg_box_budget"], errors="raise").to_numpy(float)
                     actual_sizes = pd.to_numeric(default_budget["box_size"], errors="coerce").to_numpy(float)
+                    speed_values, speed_yerr = minmax_error(
+                        default_budget, "cold_speedup_median", "cold_speedup_min", "cold_speedup_max"
+                    )
+                    iteration_values, iteration_yerr = minmax_error(
+                        default_budget, "iterations_median", "iterations_min", "iterations_max"
+                    )
                     fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.0))
-                    axes[0].plot(
-                        x_values,
-                        pd.to_numeric(default_budget["cold_speedup_median"], errors="raise"),
-                        marker="o", color=METHOD_COLORS["default"],
+                    axes[0].errorbar(
+                        x_values, speed_values, yerr=speed_yerr,
+                        marker="o", capsize=3, color=METHOD_COLORS["default"],
                     )
                     axes[0].axhline(1.0, color="black", lw=1, ls="--")
                     axes[0].set_ylabel("paired cold speedup over CG")
-                    axes[1].plot(
-                        x_values,
-                        pd.to_numeric(default_budget["iterations_median"], errors="raise"),
-                        marker="o", color=METHOD_COLORS["default"],
+                    axes[1].errorbar(
+                        x_values, iteration_values, yerr=iteration_yerr,
+                        marker="o", capsize=3, color=METHOD_COLORS["default"],
                     )
                     axes[1].set_ylabel("median PCG iterations")
                     axes[2].plot(
@@ -1731,7 +2535,14 @@ def build_notebook() -> dict:
                                 ].iloc[0])),
                                 xytext=(0, 8), textcoords="offset points", ha="center", fontsize=8,
                             )
-                    fig.suptitle("Winnebago 10M fixed-system active-box budget ablation")
+                    budget_audit_label = (
+                        "fixed-system" if BOX_BUDGET_SYSTEM_MATCH
+                        else "INVALID fixed-system audit: systems differ"
+                    )
+                    fig.suptitle(
+                        f"Winnebago 10M {budget_audit_label} active-box budget ablation "
+                        "(whiskers=min–max)"
+                    )
                     fig.tight_layout()
                     budget_plot_path = DRIVE_RUN_ROOT / "winnebago_box_budget_10m.png"
                     fig.savefig(budget_plot_path, dpi=180, bbox_inches="tight")
@@ -1746,6 +2557,33 @@ def build_notebook() -> dict:
             scale_plot = (
                 controlled_plot.loc[controlled_plot["output_group"].isin(SCALE_OUTPUT_GROUPS)].copy()
                 if not controlled_plot.empty else pd.DataFrame()
+            )
+            scale_method_availability_rows = []
+            if not scale_plot.empty:
+                for (output_group, family), family_frame in scale_plot.groupby(
+                    ["output_group", "dataset_family"], sort=True
+                ):
+                    union_methods = {
+                        str(method) for method in family_frame["method"].dropna().astype(str)
+                    }
+                    for n_train, n_frame in family_frame.groupby("N", sort=True):
+                        available_methods = {
+                            str(method) for method in n_frame["method"].dropna().astype(str)
+                        }
+                        ordered_methods = [
+                            method for method in METHOD_ORDER if method in available_methods
+                        ] + sorted(available_methods - set(METHOD_ORDER))
+                        scale_method_availability_rows.append({
+                            "output_group": output_group,
+                            "dataset_family": family,
+                            "N": int(n_train),
+                            "methods": ",".join(ordered_methods),
+                            "method_count": len(available_methods),
+                            "is_subset_vs_profile_union": available_methods != union_methods,
+                        })
+            SCALE_METHOD_AVAILABILITY_PATH = DRIVE_RUN_ROOT / "scale_method_availability.csv"
+            pd.DataFrame(scale_method_availability_rows).to_csv(
+                SCALE_METHOD_AVAILABILITY_PATH, index=False
             )
             scale_profiles = (
                 scale_plot.groupby("output_group", sort=True)
@@ -1763,6 +2601,15 @@ def build_notebook() -> dict:
                 )
                 for ax, family in zip(axes[0], families):
                     family_frame = profile_frame.loc[profile_frame["dataset_family"].eq(family)]
+                    for runtime_field in (
+                        "device_name", "compute_capability", "timing_runtime_sha256",
+                    ):
+                        runtime_values = family_frame[runtime_field].dropna().astype(str)
+                        if len(runtime_values) != len(family_frame) or runtime_values.nunique() != 1:
+                            raise RuntimeError(
+                                f"{output_group}/{family} mixes or lacks {runtime_field}; "
+                                "do not join scale points measured on different GPU runtimes."
+                            )
                     series_values = family_frame["dataset_series_id"].dropna().astype(str)
                     if (
                         len(series_values) != len(family_frame)
@@ -1791,6 +2638,17 @@ def build_notebook() -> dict:
                                 raise RuntimeError(
                                     f"{output_group}/{family} does not reuse one master {field}."
                                 )
+                    family_union_methods = set(family_frame["method"].dropna().astype(str))
+                    method_subset_notes = []
+                    for n_train, n_frame in family_frame.groupby("N", sort=True):
+                        available_methods = set(n_frame["method"].dropna().astype(str))
+                        if available_methods != family_union_methods:
+                            ordered_available = [
+                                method for method in METHOD_ORDER if method in available_methods
+                            ] + sorted(available_methods - set(METHOD_ORDER))
+                            method_subset_notes.append(
+                                f"{int(n_train) / 1e6:g}M: {', '.join(ordered_available)}"
+                            )
                     for method in METHOD_ORDER:
                         group = family_frame.loc[family_frame["method"].eq(method)].sort_values("N")
                         if group.empty:
@@ -1802,10 +2660,12 @@ def build_notebook() -> dict:
                         if bool(pd.to_numeric(group["N"], errors="coerce").duplicated().any()):
                             raise RuntimeError(f"{output_group}/{family}/{method} has duplicate N values.")
                         x_values = pd.to_numeric(group["N"], errors="raise").to_numpy(float)
-                        y_values = pd.to_numeric(group["cold_speedup_median"], errors="raise").to_numpy(float)
+                        y_values, yerr = minmax_error(
+                            group, "cold_speedup_median", "cold_speedup_min", "cold_speedup_max"
+                        )
                         linestyle = "-" if np.unique(x_values).size >= 2 else "None"
-                        ax.plot(
-                            x_values, y_values, marker="o", ls=linestyle,
+                        ax.errorbar(
+                            x_values, y_values, yerr=yerr, marker="o", ls=linestyle, capsize=3,
                             color=METHOD_COLORS.get(method), label=method,
                         )
                     ax.set_xscale("log")
@@ -1813,6 +2673,13 @@ def build_notebook() -> dict:
                     ax.set_title(family)
                     ax.set_xlabel("training rows N")
                     ax.grid(True, alpha=.25)
+                    if method_subset_notes:
+                        ax.text(
+                            0.02, 0.02,
+                            "method subsets at large N\n" + "\n".join(method_subset_notes),
+                            transform=ax.transAxes, ha="left", va="bottom", fontsize=7.5,
+                            bbox={"facecolor": "white", "edgecolor": "0.8", "alpha": 0.85},
+                        )
                 axes[0][0].set_ylabel("paired cold speedup over CG")
                 handles = [
                     Line2D([0], [0], marker="o", color=METHOD_COLORS[m], label=m)
@@ -1820,12 +2687,73 @@ def build_notebook() -> dict:
                 ]
                 fig.legend(handles=handles, ncol=min(3, len(handles)), frameon=False,
                            loc="upper center", bbox_to_anchor=(0.5, 1.04))
-                fig.suptitle(f"Controlled scale: {output_group}", y=1.11)
+                fig.suptitle(
+                    f"Controlled scale: {output_group} (median; whiskers=min–max)", y=1.11
+                )
                 fig.tight_layout()
                 scale_plot_path = DRIVE_RUN_ROOT / f"{output_group}_cold_speedup.png"
                 fig.savefig(scale_plot_path, dpi=180, bbox_inches="tight")
                 GENERATED_PLOT_PATHS.append(scale_plot_path)
                 plt.show()
+
+                setup_profile = profile_frame.loc[
+                    profile_frame["setup_inclusive_timing_eligible"].astype(str).str.lower().eq("true")
+                ].copy()
+                if not setup_profile.empty:
+                    fig_setup, setup_axes = plt.subplots(
+                        1, len(families), figsize=(5.2 * len(families), 4.6),
+                        squeeze=False, sharey=True,
+                    )
+                    for ax_setup, family in zip(setup_axes[0], families):
+                        family_setup = setup_profile.loc[
+                            setup_profile["dataset_family"].eq(family)
+                        ]
+                        for method in METHOD_ORDER:
+                            group = family_setup.loc[
+                                family_setup["method"].eq(method)
+                            ].sort_values("N")
+                            if group.empty:
+                                continue
+                            x_values = pd.to_numeric(
+                                group["N"], errors="raise"
+                            ).to_numpy(float)
+                            y_values = pd.to_numeric(
+                                group["shared_fourier_setup_plus_method_speedup_median"],
+                                errors="raise",
+                            ).to_numpy(float)
+                            ax_setup.plot(
+                                x_values, y_values, marker="o",
+                                ls="-" if np.unique(x_values).size >= 2 else "None",
+                                color=METHOD_COLORS.get(method), label=method,
+                            )
+                        ax_setup.set_xscale("log")
+                        ax_setup.axhline(1.0, color="black", lw=1, ls="--")
+                        ax_setup.set_title(family)
+                        ax_setup.set_xlabel("training rows N")
+                        ax_setup.grid(True, alpha=.25)
+                    setup_axes[0][0].set_ylabel(
+                        "setup-inclusive median speedup over CG"
+                    )
+                    fig_setup.legend(
+                        handles=handles, ncol=min(3, len(handles)), frameon=False,
+                        loc="upper center", bbox_to_anchor=(0.5, 1.04),
+                    )
+                    fig_setup.suptitle(
+                        f"Controlled scale: {output_group} (shared Fourier setup included; "
+                        "artifact-reused setup timings excluded)", y=1.11,
+                    )
+                    fig_setup.tight_layout()
+                    setup_plot_path = (
+                        DRIVE_RUN_ROOT / f"{output_group}_setup_inclusive_speedup.png"
+                    )
+                    fig_setup.savefig(setup_plot_path, dpi=180, bbox_inches="tight")
+                    GENERATED_PLOT_PATHS.append(setup_plot_path)
+                    plt.show()
+                else:
+                    print(
+                        f"No eligible setup-inclusive timing rows for {output_group}; "
+                        "solver-only scale plot remains valid."
+                    )
 
             deprecated_plot = DRIVE_RUN_ROOT / "controlled_scale_speedup.png"
             if deprecated_plot.is_file():
@@ -1839,22 +2767,113 @@ def build_notebook() -> dict:
             r"""
             # E. 最终 checkpoint、Drive 校验与可选断开
 
-            结果目录只包含配置、manifest、CSV/JSON 和图，不复制大数据。自动断开默认关闭；只有下格确认所有期望 case 均有 `run_complete.json` 且统一索引已写入 Drive 后才允许开启。
+            结果目录只包含配置、数据 manifest 快照、CSV/JSON 和图，不复制大数据。自动断开默认关闭；只有下格确认所有期望 case 均有 `run_complete.json`、prediction audit 严格复用 timing system/solutions，且统一索引已写入 Drive 后才允许开启。
             """
         )
     )
     cells.append(
         _code(
             r"""
+            CAMPAIGN_EXECUTION_FINISHED_UTC = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            current_campaign_invocation_elapsed_seconds = (
+                time.perf_counter() - CAMPAIGN_EXECUTION_STARTED_PERF_COUNTER
+            )
+            current_notebook_invocation_elapsed_seconds = (
+                time.perf_counter() - NOTEBOOK_STARTED_PERF_COUNTER
+            )
+            prior_final_manifest = {}
+            prior_manifest_path = DRIVE_RUN_ROOT / "colab_run_manifest.json"
+            if prior_manifest_path.is_file():
+                try:
+                    prior_final_manifest = json.loads(prior_manifest_path.read_text(encoding="utf-8"))
+                    if not isinstance(prior_final_manifest, dict):
+                        raise TypeError("prior final manifest is not an object")
+                except (OSError, json.JSONDecodeError, TypeError):
+                    prior_final_manifest = {}
+                    print("WARNING: prior final manifest is unreadable; first-run total cannot be carried forward.")
+            non_smoke_jobs = [row for row in campaign_job_rows if row.get("job_id") != "plumbing_smoke"]
+            all_campaign_jobs_fresh = bool(
+                non_smoke_jobs
+                and all(
+                    row.get("invocation_mode") == "executed"
+                    and row.get("status") == "PASS"
+                    for row in non_smoke_jobs
+                )
+            )
+            if all_campaign_jobs_fresh:
+                first_run_campaign_elapsed_seconds = current_campaign_invocation_elapsed_seconds
+                first_run_campaign_elapsed_source = "current invocation"
+            elif (
+                prior_final_manifest.get("run_verified") is True
+                and prior_final_manifest.get("first_run_campaign_elapsed_seconds") is not None
+            ):
+                first_run_campaign_elapsed_seconds = float(
+                    prior_final_manifest["first_run_campaign_elapsed_seconds"]
+                )
+                first_run_campaign_elapsed_source = "preserved prior final manifest"
+            else:
+                first_run_campaign_elapsed_seconds = None
+                first_run_campaign_elapsed_source = (
+                    "unavailable: one or more artifacts predated the timing ledger"
+                )
+            resume_summary = {
+                "executed_job_count": sum(
+                    row.get("invocation_mode") == "executed" for row in campaign_job_rows
+                ),
+                "resumed_job_count": sum(
+                    row.get("invocation_mode") == "resumed_existing" for row in campaign_job_rows
+                ),
+                "mixed_job_count": sum(
+                    row.get("invocation_mode") == "mixed_execute_and_resume" for row in campaign_job_rows
+                ),
+                "resumed_case_count": sum(
+                    int(row.get("resumed_case_count", 0) or 0) for row in campaign_job_rows
+                ),
+                "executed_case_count": sum(
+                    int(row.get("executed_case_count", 0) or 0) for row in campaign_job_rows
+                ),
+            }
             final_manifest = {
                 "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "notebook_invocation_started_utc": NOTEBOOK_STARTED_UTC,
+                "campaign_execution_started_utc": CAMPAIGN_EXECUTION_STARTED_UTC,
+                "campaign_execution_finished_utc": CAMPAIGN_EXECUTION_FINISHED_UTC,
+                "current_notebook_invocation_elapsed_seconds": current_notebook_invocation_elapsed_seconds,
+                "current_campaign_invocation_elapsed_seconds": current_campaign_invocation_elapsed_seconds,
+                "first_run_campaign_elapsed_seconds": first_run_campaign_elapsed_seconds,
+                "first_run_campaign_elapsed_seconds_source": first_run_campaign_elapsed_source,
+                "resume_summary": resume_summary,
+                "elapsed_time_semantics": {
+                    "campaign_jobs.elapsed_seconds": (
+                        "wall time of the current invocation; for resumed_existing it is only "
+                        "resume validation and must not be reported as first-run experiment time"
+                    ),
+                    "campaign_jobs.first_run_elapsed_seconds": (
+                        "exact fresh suite wall time when observed, otherwise preserved or null; "
+                        "never a per-method timing claim"
+                    ),
+                    "paper_method_timing": (
+                        "use matched_summary.csv paired selection/build+solve columns, not campaign wall time"
+                    ),
+                },
                 "git_sha": GIT_SHA,
                 "runtime": runtime_info,
                 "data_manifest": str(DATA_MANIFEST),
-                "data_manifest_sha256": hashlib.sha256(DATA_MANIFEST.read_bytes()).hexdigest(),
+                "data_manifest_sha256": DATA_MANIFEST_SHA256,
+                "data_manifest_snapshot": str(DATA_MANIFEST_SNAPSHOT),
+                "data_manifest_snapshot_sha256": hashlib.sha256(
+                    DATA_MANIFEST_SNAPSHOT.read_bytes()
+                ).hexdigest(),
                 "selected_data_bundles": DATA_BUNDLES,
                 "run_tag": RUN_TAG,
                 "active_sizes": [int(n) for n in ACTIVE_SIZES],
+                "independent_manitowoc_300m_status": (
+                    "requested" if RUN_MANITOWOC_SCALE and 300_000_000 in ACTIVE_SIZES
+                    else "pending_data_generation_and_prefix_verification"
+                ),
+                "real_data_300m_route": (
+                    "Winnebago archived-exact; independent Manitowoc is currently 10M only"
+                ),
                 "legacy_groups": list(RUN_LEGACY_GROUPS),
                 "controlled_profiles": selected_profiles,
                 "campaign_jobs_csv": str(CAMPAIGN_JOBS_CSV),
@@ -1880,6 +2899,11 @@ def build_notebook() -> dict:
                 "selected_controlled_index": str(SELECTED_CONTROLLED_INDEX_PATH),
                 "controlled_artifact_audit": str(CONTROLLED_AUDIT_PATH),
                 "controlled_ineligible_rows": str(INELIGIBLE_INDEX_PATH),
+                "report_ingest_warnings": str(REPORT_INGEST_WARNINGS_PATH),
+                "prediction_artifact_audit": str(PREDICTION_ARTIFACT_AUDIT_PATH),
+                "prediction_accuracy_summary": str(PREDICTION_ACCURACY_SUMMARY_PATH),
+                "prediction_accuracy_plot": str(DRIVE_RUN_ROOT / "prediction_accuracy_vs_cg.png"),
+                "scale_method_availability": str(SCALE_METHOD_AVAILABILITY_PATH),
                 "generated_plots": [str(path) for path in GENERATED_PLOT_PATHS],
                 "expected_prediction_case_count": int(expected_prediction_case_count),
                 "box_budget_fixed_system_match": BOX_BUDGET_SYSTEM_MATCH,
@@ -1888,21 +2912,179 @@ def build_notebook() -> dict:
                 (DRIVE_RUN_ROOT / "legacy_archived_pipeline" / group / "_SUCCESS.json").is_file()
                 for group in RUN_LEGACY_GROUPS
             )
+            expected_selected_controlled_pairs = set()
+            selected_config_method_schema_valid = True
+            for record in selected_case_records:
+                config_path = Path(record["run_dir"]) / "experiment_config.json"
+                try:
+                    selected_config = json.loads(config_path.read_text(encoding="utf-8"))
+                    if not isinstance(selected_config, dict):
+                        raise TypeError("experiment_config is not an object")
+                    methods = selected_config.get("methods")
+                    if (
+                        not isinstance(methods, list)
+                        or not methods
+                        or len({str(method) for method in methods}) != len(methods)
+                    ):
+                        raise ValueError("invalid experiment_config.methods")
+                except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                    selected_config_method_schema_valid = False
+                    continue
+                run_dir_key = str(Path(record["run_dir"]).resolve())
+                expected_selected_controlled_pairs.update(
+                    (run_dir_key, str(method)) for method in methods
+                )
+            observed_selected_controlled_pairs = (
+                set(
+                    zip(
+                        selected_controlled["run_dir"].astype(str),
+                        selected_controlled["method"].astype(str),
+                    )
+                )
+                if not selected_controlled.empty else set()
+            )
+            selected_controlled_summary_complete = bool(
+                selected_config_method_schema_valid
+                and observed_selected_controlled_pairs
+                == expected_selected_controlled_pairs
+                and len(selected_controlled) == len(expected_selected_controlled_pairs)
+                and (
+                    selected_controlled.empty
+                    or selected_controlled["claim_eligible"].eq(True).all()
+                )
+            )
+            final_manifest["selected_controlled_summary_complete"] = (
+                selected_controlled_summary_complete
+            )
+            final_manifest["expected_selected_controlled_method_row_count"] = int(
+                len(expected_selected_controlled_pairs)
+            )
             controlled_complete = (
                 expected_controlled_case_count == 0
                 or (
                     len(controlled_artifact_audit) == expected_controlled_case_count
                     and controlled_artifact_audit["status"].eq("PASS").all()
+                    and selected_controlled_summary_complete
                 )
             )
+            prediction_validation_frame = pd.DataFrame(prediction_validation_rows)
+            expected_prediction_summary_pairs = {
+                (str(row.get("case_id")), method)
+                for row in prediction_validation_rows
+                for method in str(row.get("required_methods", "")).split(",")
+                if method
+            }
+            observed_prediction_summary_pairs = (
+                set(
+                    zip(
+                        selected_prediction["case_id"].astype(str),
+                        selected_prediction["method"].astype(str),
+                    )
+                )
+                if not selected_prediction.empty else set()
+            )
+            prediction_summary_complete = bool(
+                not RUN_PREDICTION_AUDIT
+                or (
+                    expected_prediction_case_count > 0
+                    and expected_prediction_summary_pairs
+                    and observed_prediction_summary_pairs
+                    == expected_prediction_summary_pairs
+                    and len(selected_prediction)
+                    == len(expected_prediction_summary_pairs)
+                    and selected_prediction["prediction_claim_eligible"].eq(True).all()
+                )
+            )
+            prediction_artifacts_pass = bool(
+                len(prediction_validation_frame) == expected_prediction_case_count
+                and not prediction_validation_frame.empty
+                and prediction_validation_frame["status"].astype(str).str.startswith("PASS").all()
+                and prediction_validation_frame["audit_pass"].eq(True).all()
+                and prediction_validation_frame["exact_timing_system_match"].eq(True).all()
+                and prediction_validation_frame["timing_solutions_reused"].eq(True).all()
+                and prediction_validation_frame["timing_solution_hashes_verified"].eq(True).all()
+                and prediction_validation_frame["zero_audit_solves"].eq(True).all()
+                and prediction_summary_complete
+            )
+            final_manifest["prediction_summary_complete"] = prediction_summary_complete
+            final_manifest["prediction_artifacts_pass"] = prediction_artifacts_pass
+            final_manifest["prediction_audits_verified"] = prediction_artifacts_pass
             prediction_complete = (
                 not RUN_PREDICTION_AUDIT
                 or (
                     expected_prediction_case_count > 0
                     and len(prediction_outputs) == expected_prediction_case_count
-                    and all((Path(path) / "prediction_audit.json").is_file() for path in prediction_outputs)
+                    and all(
+                        (Path(path) / PREDICTION_AUDIT_JSON_FILENAME).is_file()
+                        and (Path(path) / PREDICTION_AUDIT_CSV_FILENAME).is_file()
+                        and (Path(path) / PREDICTION_AUDIT_COMPLETION_FILENAME).is_file()
+                        for path in prediction_outputs
+                    )
+                    and prediction_artifacts_pass
                 )
             )
+            selected_output_groups = (
+                set(selected_controlled["output_group"].astype(str))
+                if not selected_controlled.empty else set()
+            )
+            expected_plot_paths = []
+            if "paper_10m" in selected_output_groups:
+                expected_plot_paths.extend([
+                    DRIVE_RUN_ROOT / "controlled_10m_method_speedup.png",
+                    DRIVE_RUN_ROOT / "controlled_10m_speed_memory_pareto.png",
+                ])
+            if "winnebago_oat_n10m" in selected_output_groups:
+                expected_plot_paths.append(
+                    DRIVE_RUN_ROOT / "winnebago_oat_10m_speed_memory.png"
+                )
+            if "winnebago_box_budget_n10m" in selected_output_groups:
+                expected_plot_paths.append(
+                    DRIVE_RUN_ROOT / "winnebago_box_budget_10m.png"
+                )
+            selected_scale_groups = sorted(
+                selected_output_groups.intersection(SCALE_OUTPUT_GROUPS)
+            )
+            setup_timing_coverage_complete = True
+            for output_group in selected_scale_groups:
+                expected_plot_paths.extend([
+                    DRIVE_RUN_ROOT / f"{output_group}_cold_speedup.png",
+                    DRIVE_RUN_ROOT / f"{output_group}_setup_inclusive_speedup.png",
+                ])
+                eligible_setup_rows = controlled_plot.loc[
+                    controlled_plot["output_group"].astype(str).eq(output_group)
+                    & controlled_plot["setup_inclusive_timing_eligible"].astype(str).str.lower().eq("true")
+                ]
+                expected_setup_run_dirs = {
+                    str(Path(record["run_dir"]).resolve())
+                    for record in selected_case_records
+                    if str(record["output_group"]) == output_group
+                }
+                observed_setup_run_dirs = set(
+                    eligible_setup_rows["run_dir"].astype(str)
+                )
+                if observed_setup_run_dirs != expected_setup_run_dirs:
+                    setup_timing_coverage_complete = False
+            if RUN_PREDICTION_AUDIT:
+                expected_plot_paths.append(
+                    DRIVE_RUN_ROOT / "prediction_accuracy_vs_cg.png"
+                )
+            generated_plot_keys = {
+                str(Path(path).resolve()) for path in GENERATED_PLOT_PATHS
+            }
+            plot_artifacts_complete = bool(
+                setup_timing_coverage_complete
+                and all(
+                    path.is_file() and str(path.resolve()) in generated_plot_keys
+                    for path in expected_plot_paths
+                )
+            )
+            final_manifest["expected_plot_artifacts"] = [
+                str(path) for path in expected_plot_paths
+            ]
+            final_manifest["setup_timing_coverage_complete"] = (
+                setup_timing_coverage_complete
+            )
+            final_manifest["plot_artifacts_complete"] = plot_artifacts_complete
             workload_requested = bool(
                 RUN_LEGACY_GROUPS or selected_profiles or extra_suites or RUN_PREDICTION_AUDIT
             )
@@ -1913,12 +3095,26 @@ def build_notebook() -> dict:
             run_verified = bool(
                 workload_requested and legacy_complete and controlled_complete
                 and prediction_complete and campaign_complete and INDEX_PATH.is_file()
+                and plot_artifacts_complete
                 and (BOX_BUDGET_SYSTEM_MATCH is not False)
             )
+            if not run_verified and first_run_campaign_elapsed_source == "current invocation":
+                first_run_campaign_elapsed_seconds = None
+                first_run_campaign_elapsed_source = (
+                    "unavailable: fresh campaign did not pass final verification"
+                )
+                final_manifest["first_run_campaign_elapsed_seconds"] = None
+                final_manifest["first_run_campaign_elapsed_seconds_source"] = (
+                    first_run_campaign_elapsed_source
+                )
             final_manifest["campaign_complete"] = campaign_complete
             final_manifest["run_verified"] = run_verified
             FINAL_MANIFEST_PATH = DRIVE_RUN_ROOT / "colab_run_manifest.json"
-            FINAL_MANIFEST_PATH.write_text(json.dumps(final_manifest, indent=2), encoding="utf-8")
+            final_manifest_partial = FINAL_MANIFEST_PATH.with_suffix(".json.partial")
+            final_manifest_partial.write_text(
+                json.dumps(final_manifest, indent=2), encoding="utf-8"
+            )
+            final_manifest_partial.replace(FINAL_MANIFEST_PATH)
             print(json.dumps(final_manifest, indent=2))
             if run_verified:
                 print("ONE-CLICK CAMPAIGN VERIFIED: all mandatory jobs passed.")
@@ -1942,12 +3138,13 @@ def build_notebook() -> dict:
             r"""
             ## 运行后检查清单
 
-            1. 每个 controlled case 的 `system_manifest.json`：`system_unchanged=true`、`nufft_stage=cufinufft`。
+            1. 每个 controlled case 的 `system_manifest.json`：`system_unchanged=true`、`nufft_stage=cufinufft`，且 weights/Gf/solve-RHS/storage-RHS/λ 哈希完整。
             2. 每个正式方法：5/5 repeats 满足 independently recomputed residual (<10^{-7})。
             3. 300M 若只跑 core methods，表中明确列出方法集合；不要与另一次 invocation 的随机方法拼成 paired table。
             4. Legacy、controlled、prediction audit 保持不同 `protocol_family`。
             5. Synthetic 表中明确区分 archived noise=.3 `_ntrainN` 与 development noise=.02 `_nN`。
-            6. 记录 Colab GPU 型号、Git SHA、数据 SHA、实际 (M)、box size/rank 和完整 timing scope。
+            6. Prediction 必须同时有 JSON、CSV 和 completion manifest，严格使用 cuFINUFFT，并保持 audit solve count=0。
+            7. 记录完整 timing-runtime SHA（GPU、compute capability、CuPy/CUDA/NUFFT）、Git SHA、数据 SHA、实际 (M)、box size/rank 和 timing scope；artifact 恢复的 setup 时间不得进入 setup-inclusive 图。
             """
         )
     )

@@ -645,11 +645,17 @@ def predict_v1(
     data_ctx: GPUDataContext,
     x_eval: Any,
     beta_gpu: Any,
+    *,
+    return_nufft_stage: bool = False,
+    allow_cpu_fallback: bool = True,
 ) -> Any:
     """
     Predict at ``x_eval`` (``numpy`` or CuPy ``(N, d)``), same formula as ``EFGPSolver.predict``.
     Type-2 NUFFT goes through ``nufft_adapter.type2_eval`` (cuFINUFFT when available for ``dim<=3``).
-    Returns a real-valued CuPy vector on the active device.
+    Returns a real-valued CuPy vector on the active device.  With
+    ``return_nufft_stage=True`` it also returns the actual backend tag.
+    ``allow_cpu_fallback=False`` makes strict audit callers fail immediately
+    on a missing or failed cuFINUFFT path instead of first running CPU FINUFFT.
     """
     xp = backend.xp
     if data_ctx.x_center_gpu is None or data_ctx.weights_gpu_flat is None:
@@ -671,8 +677,20 @@ def predict_v1(
     tphx = _tphx_scaled_gpu(xp, x_eval_gpu, data_ctx.x_center_gpu, h)
     beta_c = xp.asarray(beta_gpu, dtype=xp.complex128).reshape(-1)
     wbeta = data_ctx.weights_gpu_flat * beta_c
-    yhat, _st = type2_eval(backend, tphx, wbeta, dim, mtot, nufft_tol, +1)
-    return xp.real(yhat)
+    yhat, stage = type2_eval(
+        backend,
+        tphx,
+        wbeta,
+        dim,
+        mtot,
+        nufft_tol,
+        +1,
+        allow_cpu_fallback=bool(allow_cpu_fallback),
+    )
+    prediction = xp.real(yhat)
+    if return_nufft_stage:
+        return prediction, str(stage)
+    return prediction
 
 
 def solve_beta_plain_cg_v1(

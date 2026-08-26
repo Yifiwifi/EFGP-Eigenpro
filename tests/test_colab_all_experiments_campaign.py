@@ -52,7 +52,21 @@ def test_one_click_plan_filters_unsafe_development_family() -> None:
     assert '("Winnebago", "scale_archived_exact", "winnebago_exact")' in source
     assert '("Winnebago", "scale_development_masters"' not in source
     assert '"job_id": "winnebago_box_budget_n10m"' in source
-    assert 'PREDICTION_AUDIT_PROFILES = ["paper_10m"]' in source
+    assert 'PREDICTION_AUDIT_PROFILES = ["paper_10m", "scale_development_masters"]' in source
+    assert "PREDICTION_AUDIT_MAX_TEST_N = 2_500_000" in source
+    assert 'record.get("job_id") in {"synthetic_nested_100m", "synthetic_nested_300m"}' in source
+    assert 'payload.get("timing_solutions_reused") is not True' in source
+    assert 'DATA_MANIFEST_SNAPSHOT = DRIVE_RUN_ROOT / "data_manifest_snapshot.json"' in source
+    assert '"data_manifest_snapshot": str(DATA_MANIFEST_SNAPSHOT)' in source
+    assert '"first_run_campaign_elapsed_seconds"' in source
+    assert 'print("Verifying selected local cache SHA-256:", basename)' in source
+    assert "local_link.symlink_to(source)" in source
+    assert '"prediction_summary_complete"' in source
+    assert '"plot_artifacts_complete"' in source
+    assert "expected_selected_controlled_pairs" in source
+    assert "controlled_plot = selected_controlled.copy()" in source
+    assert '_setup_inclusive_speedup.png' in source
+    assert '"pending_data_generation_and_prefix_verification"' in source
     assert "check=False" in source
     assert "SCIENTIFIC_FAIL" in source
 
@@ -79,7 +93,10 @@ def test_one_click_orchestrator_runs_all_jobs_with_family_filters(tmp_path: Path
         profile_name = args[args.index("--profile") + 1]
         payload = json.loads(config_path.read_text(encoding="utf-8"))
         cases = payload["profiles"][profile_name]["cases"]
+        is_resume = (output_root / "suite_status.json").is_file()
         scientific_failure = bool(
+            not is_resume
+            and
             profile_name == "scale_development_masters"
             and int(cases[0]["expected_n_train"]) == 30_000_000
         )
@@ -87,7 +104,10 @@ def test_one_click_orchestrator_runs_all_jobs_with_family_filters(tmp_path: Path
         for case_index, case in enumerate(cases):
             run_dir = output_root / case["id"]
             run_dir.mkdir(parents=True, exist_ok=True)
-            status_row = {"case_id": case["id"], "status": "completed"}
+            status_row = {
+                "case_id": case["id"],
+                "status": "resumed_existing" if is_resume else "completed",
+            }
             if scientific_failure and case_index == 0:
                 status_row["status"] = "completed_with_ineligible_methods"
                 status_row["ineligible_methods"] = ["default"]
@@ -169,4 +189,27 @@ def test_one_click_orchestrator_runs_all_jobs_with_family_filters(tmp_path: Path
     assert job_status["synthetic_nested_300m"] == "SKIPPED_UPSTREAM_GATE"
     assert job_status["winnebago_box_budget_n10m"] == "PASS"
     assert job_status["winnebago_exact_300m"] == "PASS"
+    campaign_rows = {
+        row["job_id"]: row for row in namespace["campaign_job_rows"]
+    }
+    assert campaign_rows["paper_10m"]["invocation_mode"] == "executed"
+    assert campaign_rows["paper_10m"]["resumed_case_count"] == 0
+    assert campaign_rows["paper_10m"]["executed_case_count"] == 3
+    assert campaign_rows["paper_10m"]["first_run_elapsed_seconds"] > 0
+    assert campaign_rows["synthetic_nested_30m"]["first_run_elapsed_seconds"] is None
+    assert "not first-run" in campaign_rows["paper_10m"]["elapsed_seconds_scope"]
+    assert "method timing" in campaign_rows["paper_10m"]["elapsed_seconds_scope"]
     assert (tmp_path / "run" / "campaign_jobs.json").is_file()
+
+    first_run_elapsed = campaign_rows["paper_10m"]["first_run_elapsed_seconds"]
+    exec(compile(orchestrator_source, "<one-click-orchestrator-resume>", "exec"), namespace)
+    resumed_rows = {row["job_id"]: row for row in namespace["campaign_job_rows"]}
+    assert resumed_rows["paper_10m"]["invocation_mode"] == "resumed_existing"
+    assert resumed_rows["paper_10m"]["resumed_case_count"] == 3
+    assert resumed_rows["paper_10m"]["executed_case_count"] == 0
+    assert resumed_rows["paper_10m"]["first_run_elapsed_seconds"] == first_run_elapsed
+    assert (
+        resumed_rows["paper_10m"]["first_run_elapsed_seconds_source"]
+        == "preserved successful campaign checkpoint"
+    )
+    assert resumed_rows["synthetic_nested_30m"]["first_run_elapsed_seconds"] is None

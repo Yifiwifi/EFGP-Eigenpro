@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -104,16 +105,18 @@ def test_system_fingerprint_detects_rhs_change() -> None:
 
 
 @pytest.mark.parametrize(
-    ("attribute", "changed_field"),
+    ("attribute", "changed_fields"),
     [
-        ("weights_gpu_flat", "weights_sha256"),
-        ("gf_gpu", "gf_sha256"),
-        ("rhs_gpu", "rhs_sha256"),
+        ("weights_gpu_flat", {"weights_sha256"}),
+        ("gf_gpu", {"gf_sha256"}),
+        # Without an explicit cast solve RHS, the data-context RHS is both the
+        # solve array and its separately named storage provenance anchor.
+        ("rhs_gpu", {"rhs_sha256", "rhs_storage_sha256"}),
     ],
 )
 def test_system_component_fingerprints_localize_array_change(
     attribute: str,
-    changed_field: str,
+    changed_fields: set[str],
 ) -> None:
     system = _fake_system()
     before = system_component_fingerprints(system.data_ctx)
@@ -122,7 +125,67 @@ def test_system_component_fingerprints_localize_array_change(
     setattr(system.data_ctx, attribute, changed)
     after = system_component_fingerprints(system.data_ctx)
 
-    assert {field for field in before if before[field] != after[field]} == {changed_field}
+    assert {field for field in before if before[field] != after[field]} == changed_fields
+
+
+def test_timing_prediction_artifact_selects_lowest_converged_measured_beta(
+    tmp_path,
+) -> None:
+    system = _fake_system()
+    cfg = ControlledConfig(methods=("cg", "default"), measured_repeats=2)
+
+    def row(method: str, repeat: int, status: str, relres: float) -> dict:
+        return {
+            "system_id": system.system_id,
+            "method": method,
+            "method_kind": "cg" if method == "cg" else "active-eig",
+            "repeat_idx": repeat,
+            "order_position": 0,
+            "is_warmup": False,
+            "status": status,
+            "true_relres": relres,
+            "iterations": 10 - repeat,
+            "build_seconds": 0.1,
+            "solve_seconds": 0.2,
+        }
+
+    cg0 = row("cg", 0, "converged", 1e-9)
+    default0 = row("default", 0, "maxiter", 2e-7)
+    default1 = row("default", 1, "converged", 1e-9)
+    rows = [cg0, default0, default1]
+    saved = [
+        (cg0, np.ones(system.manifest["M"], dtype=np.complex128)),
+        (default0, np.zeros(system.manifest["M"], dtype=np.complex128)),
+        (default1, np.full(system.manifest["M"], 2.0, dtype=np.complex128)),
+    ]
+
+    payload = benchmark_module.save_timing_prediction_solutions(
+        system,
+        cfg,
+        rows,
+        saved,
+        tmp_path,
+    )
+
+    assert payload["solution_count"] == 2
+    records = {record["method"]: record for record in payload["solutions"]}
+    assert records["cg"]["timing_repeat_idx"] == 0
+    assert records["default"]["timing_repeat_idx"] == 1
+    assert records["default"]["selection_eligible"] is True
+    stored = json.loads(
+        (tmp_path / benchmark_module.TIMING_SOLUTIONS_MANIFEST_FILENAME).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert stored["timing_solution_artifact_sha256"] == payload[
+        "timing_solution_artifact_sha256"
+    ]
+    with np.load(
+        tmp_path / benchmark_module.TIMING_SOLUTIONS_ARTIFACT_FILENAME,
+        allow_pickle=False,
+    ) as loaded:
+        selected = np.asarray(loaded[records["default"]["array_key"]])
+    assert np.all(selected == 2.0)
 
 
 def test_empty_score_box_makes_default_fall_back_to_jacobi() -> None:
@@ -219,6 +282,22 @@ def test_summary_uses_paired_cold_speedup_and_requested_order() -> None:
     assert comparison["reference_method"] == "cg"
     assert comparison["candidate_method"] == "pcg"
     assert comparison["total_speedup_median"] == pytest.approx(3.0)
+
+    restored_rows = [
+        {**row, "setup_inclusive_timing_eligible": False}
+        for row in rows
+    ]
+    restored_summary = summarize_rows(
+        restored_rows, 100.0, 1e-7, method_order=("cg", "pcg")
+    )
+    assert all(
+        row["setup_inclusive_timing_eligible"] is False
+        for row in restored_summary
+    )
+    assert all(
+        np.isnan(row["shared_fourier_setup_plus_method_speedup_median"])
+        for row in restored_summary
+    )
 
 
 def test_unconverged_candidate_is_excluded_from_speedup_claims() -> None:

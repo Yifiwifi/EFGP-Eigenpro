@@ -19,10 +19,12 @@ routes while preserving their different timing semantics.
    one-click formal campaign enables the 100M/300M gates automatically.  If the
    runtime has less than 30 GiB GPU memory or 20 GiB currently available host
    RAM, only the 300M jobs are marked `SKIPPED_HARDWARE`; smaller jobs continue.
-4. Full SHA verification is intentionally outside the routine timed campaign.
-   Run it once after changing the uploaded catalog; routine runs keep
-   `VERIFY_FULL_SHA256=False` and still validate registered byte sizes and
-   per-case data fingerprints.
+4. `VERIFY_FULL_SHA256=False` skips only the expensive **complete-catalog**
+   pass. Every artifact selected for this run is still SHA-256 verified: an
+   existing local cache is hashed before reuse, and a Drive artifact is hashed
+   while it is copied (or directly before use in no-cache mode). Thus routine
+   runs do not stall on unrelated bundles but never trust only a filename and
+   byte size.
 
 `RUN_ALL_FORMAL_EXPERIMENTS=True` creates this fixed job order automatically:
 
@@ -32,8 +34,12 @@ routes while preserving their different timing semantics.
 4. Winnebago 10M box-budget ablation at 4096/8192/16384.
 5. Synthetic development-master prefixes at 10M/30M/100M/300M.
 6. Winnebago archived-exact artifacts at 10M/30M/100M/300M.
-7. Prediction audit for the three `paper_10m` cases only.
-8. Artifact audit, eligible-only plots, campaign ledger, and final manifest.
+7. Prediction audit that reuses the timed system and canonical timed solutions:
+   all methods for the three `paper_10m` cases, plus `cg/default` for Synthetic
+   development-master 100M and 300M.  Every case uses at most the first 2.5M
+   test rows.
+8. Artifact audit, solver-only and setup-inclusive scale plots, campaign
+   ledger, and an atomically replaced final manifest.
 
 The development scale is filtered to `dataset_family="Synthetic"`; the known
 failing Winnebago raw-prefix route is not launched.  The archived scale is
@@ -69,8 +75,9 @@ The three output protocol families must never share a speedup column:
   complete pipeline; setup routes and linear systems are not matched.
 - `controlled_fixed_system`: one hashed system per case, 1 warm-up and 5 paired
   repeats; primary timing is selection/build plus solve.
-- `prediction_audit`: rebuilt system used only for RMSE equivalence; its timing
-  is excluded from performance claims.
+- `prediction_audit`: exact timing system and canonical measured solutions are
+  loaded without rebuilding or solving.  Only chunked prediction and RMSE are
+  performed, and prediction timing is excluded from performance claims.
 
 Each scale size is an independent suite job under
 `controlled_fixed_system/<profile>/_jobs/<job_id>/`.  The suite returns `0` for
@@ -78,6 +85,23 @@ all-pass, `2` for complete artifacts with scientific failures, and `1` for
 execution/config/data errors.  The notebook records all three in
 `campaign_jobs.csv/json` and continues independent jobs; it never converts a
 complete negative result into a top-level `CalledProcessError`.
+
+The campaign ledger separates a fresh suite wall time from a resume-validation
+wall time; the latter must never be reported as experiment runtime. Failed
+fresh invocations are never preserved as successful first-run timings. The
+final manifest verifies exact selected case/method coverage, requires every
+formal figure to be generated in the current invocation, and verifies prediction
+`audit_pass`, exact equality of `system_id`,
+weights/Gf, solve/storage RHS and lambda, verified timed-solution hashes, zero
+audit solves, strict cuFINUFFT prediction, and the complete JSON/CSV/completion
+artifact set. Scale points must also share one timing-runtime hash covering the
+device, compute capability, CuPy/CUDA versions, and resolved NUFFT backend. A
+setup-inclusive plot excludes rows whose setup time came from a
+restored artifact; every selected scale size must have eligible setup timing for
+the setup-inclusive curve. Stale readable results remain in diagnostic indexes
+but cannot enter the current paper figures. The manifest copies the exact Drive data catalog to
+`data_manifest_snapshot.json` and explicitly marks independent Manitowoc 300M
+as pending until its master is generated and prefix-verified.
 
 Regenerate the notebook after changing its source template with:
 

@@ -7,6 +7,7 @@ import json
 import sys
 import traceback
 import zipfile
+from collections import Counter
 from dataclasses import asdict, fields
 from datetime import datetime
 from pathlib import Path
@@ -14,11 +15,20 @@ from typing import Any
 
 from .benchmark import (
     ControlledConfig,
+    PreparedSystem,
+    TIMING_SOLUTIONS_ARTIFACT_FILENAME,
+    TIMING_SOLUTIONS_MANIFEST_FILENAME,
+    TIMING_SYSTEM_ARTIFACT_FILENAME,
     _npz_content_index_sha256,
     _resolve_dataset_dir,
     _sanitize_json,
     _source_manifest,
+    load_prepared_system_artifact,
+    prepare_shared_system,
+    probe_timing_runtime,
     run_controlled_experiment,
+    save_prepared_system_artifact,
+    system_config_fingerprint,
 )
 
 
@@ -390,6 +400,7 @@ def _complete_run(
     expected_source_sha256: str,
     expected_dataset_content_index_sha256: str,
     expected_dataset_metadata_sha256: str,
+    expected_timing_runtime_sha256: str | None = None,
 ) -> bool:
     required_paths = [
         run_dir / "system_manifest.json",
@@ -400,6 +411,9 @@ def _complete_run(
         run_dir / "matched_summary.csv",
         run_dir / "matched_comparisons.json",
         run_dir / "matched_comparisons.csv",
+        run_dir / TIMING_SYSTEM_ARTIFACT_FILENAME,
+        run_dir / TIMING_SOLUTIONS_ARTIFACT_FILENAME,
+        run_dir / TIMING_SOLUTIONS_MANIFEST_FILENAME,
         run_dir / "run_complete.json",
     ]
     if not all(path.is_file() for path in required_paths):
@@ -418,38 +432,124 @@ def _complete_run(
         completion = json.loads(
             (run_dir / "run_complete.json").read_text(encoding="utf-8")
         )
+        timing_solution_manifest = json.loads(
+            (run_dir / TIMING_SOLUTIONS_MANIFEST_FILENAME).read_text(
+                encoding="utf-8"
+            )
+        )
+        with (run_dir / "matched_summary.csv").open(
+            newline="", encoding="utf-8"
+        ) as handle:
+            summary_csv = list(csv.DictReader(handle))
     except Exception:
         return False
     if not (
+        isinstance(manifest, dict)
+        and isinstance(saved_config, dict)
+        and isinstance(completion, dict)
+        and isinstance(timing_solution_manifest, dict)
+        and isinstance(summary, list)
+        and all(isinstance(row, dict) for row in summary)
+        and isinstance(summary_csv, list)
+        and all(isinstance(row, dict) for row in summary_csv)
+        and isinstance(runs, list)
+        and all(isinstance(row, dict) for row in runs)
+        and isinstance(comparisons, list)
+        and all(isinstance(row, dict) for row in comparisons)
+    ):
+        return False
+
+    def resume_int(value: Any) -> int | None:
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    if not (
         manifest.get("system_unchanged")
-        and int(manifest.get("n_train", -1)) == int(expected_n)
+        and resume_int(manifest.get("n_train")) == int(expected_n)
         and manifest.get("source_bundle_sha256") == expected_source_sha256
         and manifest.get("dataset_content_index_sha256")
         == expected_dataset_content_index_sha256
         and manifest.get("dataset_metadata_sha256") == expected_dataset_metadata_sha256
+        and (
+            expected_timing_runtime_sha256 is None
+            or manifest.get("timing_runtime_sha256")
+            == expected_timing_runtime_sha256
+        )
         and saved_config == _expected_config_payload(expected_config)
-        and isinstance(summary, list)
         and summary
-        and isinstance(runs, list)
-        and isinstance(comparisons, list)
-        and isinstance(completion, dict)
     ):
         return False
 
-    by_method = {
-        str(row.get("method")): row for row in summary if isinstance(row, dict)
-    }
     expected_methods = tuple(str(method) for method in expected_config.methods)
-    if set(by_method) != set(expected_methods):
+    summary_methods = [str(row.get("method")) for row in summary]
+    summary_csv_methods = [str(row.get("method")) for row in summary_csv]
+    if (
+        Counter(summary_methods) != Counter(expected_methods)
+        or Counter(summary_csv_methods) != Counter(expected_methods)
+    ):
         return False
+    by_method = {str(row.get("method")): row for row in summary}
     if not all(
-        int(by_method[method].get("measured_repeats", -1))
+        resume_int(by_method[method].get("measured_repeats"))
         == int(expected_config.measured_repeats)
         for method in expected_methods
     ):
         return False
 
     system_id = str(manifest.get("system_id", ""))
+    timing_system_path = run_dir / TIMING_SYSTEM_ARTIFACT_FILENAME
+    timing_solutions_path = run_dir / TIMING_SOLUTIONS_ARTIFACT_FILENAME
+    timing_solution_manifest_path = run_dir / TIMING_SOLUTIONS_MANIFEST_FILENAME
+    timing_system_sha256 = hashlib.sha256(timing_system_path.read_bytes()).hexdigest()
+    timing_solutions_sha256 = hashlib.sha256(
+        timing_solutions_path.read_bytes()
+    ).hexdigest()
+    timing_solution_manifest_sha256 = hashlib.sha256(
+        timing_solution_manifest_path.read_bytes()
+    ).hexdigest()
+    if not (
+        system_id
+        and all(
+            bool(manifest.get(field))
+            for field in (
+                "weights_sha256",
+                "gf_sha256",
+                "rhs_sha256",
+                "rhs_storage_sha256",
+                "system_config_sha256",
+            )
+        )
+        and manifest.get("system_artifact_sha256") == timing_system_sha256
+        and manifest.get("timing_solution_artifact_sha256")
+        == timing_solutions_sha256
+        and manifest.get("timing_solution_manifest_sha256")
+        == timing_solution_manifest_sha256
+        and resume_int(manifest.get("timing_solution_count"))
+        == resume_int(timing_solution_manifest.get("solution_count"))
+        and resume_int(manifest.get("timing_solution_count")) is not None
+        and timing_solution_manifest.get("system_id") == system_id
+        and timing_solution_manifest.get("weights_sha256")
+        == manifest.get("weights_sha256")
+        and timing_solution_manifest.get("gf_sha256") == manifest.get("gf_sha256")
+        and timing_solution_manifest.get("rhs_sha256") == manifest.get("rhs_sha256")
+        and timing_solution_manifest.get("rhs_storage_sha256")
+        == manifest.get("rhs_storage_sha256")
+        and timing_solution_manifest.get("system_config_sha256")
+        == manifest.get("system_config_sha256")
+        and timing_solution_manifest.get("source_bundle_sha256")
+        == expected_source_sha256
+        and timing_solution_manifest.get("dataset_content_index_sha256")
+        == expected_dataset_content_index_sha256
+        and timing_solution_manifest.get("dataset_metadata_sha256")
+        == expected_dataset_metadata_sha256
+        and timing_solution_manifest.get("timing_system_artifact_sha256")
+        == timing_system_sha256
+        and timing_solution_manifest.get("timing_solution_artifact_sha256")
+        == timing_solutions_sha256
+    ):
+        return False
     expected_run_count = len(expected_methods) * (
         int(expected_config.warmup_repeats) + int(expected_config.measured_repeats)
     )
@@ -463,7 +563,7 @@ def _complete_run(
             return False
         if len(measured) != int(expected_config.measured_repeats):
             return False
-        if {int(row.get("repeat_idx", -1)) for row in measured} != set(
+        if {resume_int(row.get("repeat_idx")) for row in measured} != set(
             range(int(expected_config.measured_repeats))
         ):
             return False
@@ -471,21 +571,37 @@ def _complete_run(
             return False
 
     return bool(
-        int(completion.get("schema_version", -1)) == 1
+        resume_int(completion.get("schema_version")) == 1
         and completion.get("system_id") == system_id
         and completion.get("source_bundle_sha256") == expected_source_sha256
         and completion.get("dataset_content_index_sha256")
         == expected_dataset_content_index_sha256
         and completion.get("dataset_metadata_sha256")
         == expected_dataset_metadata_sha256
+        and completion.get("timing_system_artifact")
+        == TIMING_SYSTEM_ARTIFACT_FILENAME
+        and completion.get("timing_system_artifact_sha256")
+        == timing_system_sha256
+        and completion.get("timing_solution_artifact")
+        == TIMING_SOLUTIONS_ARTIFACT_FILENAME
+        and completion.get("timing_solution_artifact_sha256")
+        == timing_solutions_sha256
+        and completion.get("timing_solution_manifest")
+        == TIMING_SOLUTIONS_MANIFEST_FILENAME
+        and completion.get("timing_solution_manifest_sha256")
+        == timing_solution_manifest_sha256
+        and resume_int(completion.get("timing_solution_count"))
+        == resume_int(timing_solution_manifest.get("solution_count"))
+        and resume_int(completion.get("timing_solution_count")) is not None
         and completion.get("methods") == list(expected_methods)
-        and int(completion.get("warmup_repeats", -1))
+        and resume_int(completion.get("warmup_repeats"))
         == int(expected_config.warmup_repeats)
-        and int(completion.get("measured_repeats", -1))
+        and resume_int(completion.get("measured_repeats"))
         == int(expected_config.measured_repeats)
-        and int(completion.get("run_row_count", -1)) == len(runs)
-        and int(completion.get("summary_row_count", -1)) == len(summary)
-        and int(completion.get("comparison_row_count", -1)) == len(comparisons)
+        and resume_int(completion.get("run_row_count")) == len(runs)
+        and resume_int(completion.get("summary_row_count")) == len(summary)
+        and resume_int(completion.get("summary_row_count")) == len(summary_csv)
+        and resume_int(completion.get("comparison_row_count")) == len(comparisons)
     )
 
 
@@ -557,12 +673,29 @@ def run_suite(
         nufft_backend_override=nufft_backend_override,
         strict_gpu_eig=strict_gpu_eig,
     )
+    system_config_ids = [system_config_fingerprint(config) for _, config in plan]
+    system_config_counts = Counter(system_config_ids)
     plan_rows = []
-    for validation, config in plan:
+    for (validation, config), system_config_id in zip(plan, system_config_ids):
+        shares_frozen_system = system_config_counts[system_config_id] > 1
         plan_rows.append(
             {
                 **validation,
                 "output_dir": config.output_dir,
+                "system_config_sha256": system_config_id,
+                "shared_frozen_system": shares_frozen_system,
+                "shared_system_case_count": int(system_config_counts[system_config_id]),
+                "shared_system_artifact": (
+                    str(
+                        (
+                            output_root
+                            / "_shared_systems"
+                            / f"{system_config_id}.npz"
+                        ).resolve()
+                    )
+                    if shares_frozen_system
+                    else ""
+                ),
                 "methods": list(config.methods),
                 "fourier_eps": config.fourier_eps,
                 "tol": config.tol,
@@ -576,6 +709,85 @@ def run_suite(
         return output_root, False
 
     expected_source_sha256 = str(_source_manifest()["source_bundle_sha256"])
+    shared_systems: dict[str, PreparedSystem] = {}
+    shared_group_records: dict[str, dict[str, Any]] = {}
+    current_timing_runtimes: dict[str, dict[str, Any]] = {}
+
+    def _current_timing_runtime_sha256(config: ControlledConfig) -> str:
+        backend_key = str(config.nufft_backend)
+        if backend_key not in current_timing_runtimes:
+            current_timing_runtimes[backend_key] = probe_timing_runtime(backend_key)
+        runtime_sha256 = current_timing_runtimes[backend_key].get(
+            "timing_runtime_sha256"
+        )
+        if not runtime_sha256:
+            raise RuntimeError("current timing runtime probe lacks timing_runtime_sha256")
+        return str(runtime_sha256)
+
+    def _shared_system_for_case(
+        validation: dict[str, Any],
+        config: ControlledConfig,
+    ) -> tuple[PreparedSystem | None, Path | None]:
+        system_config_id = system_config_fingerprint(config)
+        if system_config_counts[system_config_id] <= 1:
+            return None, None
+        artifact_path = (
+            output_root / "_shared_systems" / f"{system_config_id}.npz"
+        ).resolve()
+        if system_config_id in shared_systems:
+            return shared_systems[system_config_id], artifact_path
+
+        system: PreparedSystem | None = None
+        if artifact_path.is_file():
+            try:
+                system = load_prepared_system_artifact(
+                    config,
+                    artifact_path,
+                    expected_source_sha256=expected_source_sha256,
+                    expected_dataset_content_index_sha256=str(
+                        validation["dataset_content_index_sha256"]
+                    ),
+                    expected_dataset_metadata_sha256=str(
+                        validation["dataset_metadata_sha256"]
+                    ),
+                )
+                print(
+                    f"[suite] LOAD shared frozen system {system.system_id[:12]} "
+                    f"from {artifact_path}",
+                    flush=True,
+                )
+            except Exception as exc:
+                print(
+                    f"[suite] REBUILD invalid shared-system artifact {artifact_path}: "
+                    f"{type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        if system is None:
+            system = prepare_shared_system(config)
+            for manifest_key, validation_key in (
+                ("dataset_content_index_sha256", "dataset_content_index_sha256"),
+                ("dataset_metadata_sha256", "dataset_metadata_sha256"),
+            ):
+                if str(system.manifest.get(manifest_key)) != str(
+                    validation[validation_key]
+                ):
+                    raise RuntimeError(
+                        f"prepared shared system {manifest_key} does not match suite validation"
+                    )
+            if str(system.manifest.get("source_bundle_sha256")) != expected_source_sha256:
+                raise RuntimeError(
+                    "prepared shared system source bundle does not match suite source"
+                )
+            save_prepared_system_artifact(system, config, artifact_path)
+            print(
+                f"[suite] SAVE shared frozen system {system.system_id[:12]} "
+                f"to {artifact_path}",
+                flush=True,
+            )
+        shared_systems[system_config_id] = system
+        return system, artifact_path
+
     status_rows: list[dict[str, Any]] = []
     index_rows: list[dict[str, Any]] = []
     had_failure = False
@@ -600,8 +812,35 @@ def run_suite(
             f"(N={validation['n_train']}, methods={list(config.methods)})",
             flush=True,
         )
-        case_stage = "resume_check"
+        case_stage = "shared_system"
         try:
+            shared_system, shared_artifact_path = _shared_system_for_case(
+                validation, config
+            )
+            expected_fixed_components = (
+                {
+                    key: shared_system.manifest.get(key)
+                    for key in (
+                        "system_id",
+                        "weights_sha256",
+                        "gf_sha256",
+                        "rhs_sha256",
+                        "rhs_storage_sha256",
+                        "reg_lambda",
+                        "device_name",
+                        "compute_capability",
+                        "timing_runtime_sha256",
+                    )
+                }
+                if shared_system is not None
+                else None
+            )
+            expected_timing_runtime_sha256 = (
+                str(shared_system.manifest.get("timing_runtime_sha256"))
+                if shared_system is not None
+                else _current_timing_runtime_sha256(config)
+            )
+            case_stage = "resume_check"
             resumed = resume and _complete_run(
                 run_dir,
                 int(validation["n_train"]),
@@ -613,12 +852,35 @@ def run_suite(
                 expected_dataset_metadata_sha256=str(
                     validation["dataset_metadata_sha256"]
                 ),
+                expected_timing_runtime_sha256=expected_timing_runtime_sha256,
             )
+            if resumed and expected_fixed_components is not None:
+                resumed_manifest = json.loads(
+                    (run_dir / "system_manifest.json").read_text(encoding="utf-8")
+                )
+                actual_fixed_components = {
+                    key: resumed_manifest.get(key)
+                    for key in expected_fixed_components
+                }
+                if actual_fixed_components != expected_fixed_components:
+                    resumed = False
+                    print(
+                        f"[suite] RERUN case {case_id!r}: its resumed A,b hashes do "
+                        "not match the suite's shared frozen system.",
+                        file=sys.stderr,
+                        flush=True,
+                    )
             if resumed:
                 status = "resumed_existing"
             else:
                 case_stage = "experiment"
-                run_controlled_experiment(config)
+                if shared_system is None:
+                    run_controlled_experiment(config)
+                else:
+                    run_controlled_experiment(
+                        config,
+                        prepared_system=shared_system,
+                    )
                 status = "completed"
 
             case_stage = "artifact_validation"
@@ -630,6 +892,53 @@ def run_suite(
                     f"case {case_id!r} wrote N={manifest.get('n_train')}, "
                     f"expected {validation['n_train']}."
                 )
+            shared_system_verified = False
+            if expected_fixed_components is not None:
+                actual_fixed_components = {
+                    key: manifest.get(key) for key in expected_fixed_components
+                }
+                if actual_fixed_components != expected_fixed_components:
+                    raise RuntimeError(
+                        f"case {case_id!r} did not use the exact shared A,b: "
+                        f"{actual_fixed_components} != {expected_fixed_components}"
+                    )
+                shared_system_verified = True
+                group_id = system_config_fingerprint(config)
+                record = shared_group_records.setdefault(
+                    group_id,
+                    {
+                        "system_config_sha256": group_id,
+                        "system_id": shared_system.system_id,
+                        "weights_sha256": shared_system.manifest.get(
+                            "weights_sha256"
+                        ),
+                        "gf_sha256": shared_system.manifest.get("gf_sha256"),
+                        "rhs_sha256": shared_system.manifest.get("rhs_sha256"),
+                        "rhs_storage_sha256": shared_system.manifest.get(
+                            "rhs_storage_sha256"
+                        ),
+                        "reg_lambda": float(shared_system.reg_lambda),
+                        "device_name": shared_system.manifest.get("device_name"),
+                        "compute_capability": shared_system.manifest.get(
+                            "compute_capability"
+                        ),
+                        "timing_runtime_sha256": shared_system.manifest.get(
+                            "timing_runtime_sha256"
+                        ),
+                        "artifact_relative_path": str(
+                            shared_artifact_path.relative_to(output_root)
+                        ).replace("\\", "/"),
+                        "artifact_sha256": hashlib.sha256(
+                            shared_artifact_path.read_bytes()
+                        ).hexdigest(),
+                        "expected_case_count": int(system_config_counts[group_id]),
+                        "case_ids": [],
+                        "case_run_dirs": [],
+                        "all_cases_exact_match": True,
+                    },
+                )
+                record["case_ids"].append(case_id)
+                record["case_run_dirs"].append(str(run_dir))
             summaries = json.loads(
                 (run_dir / "matched_summary.json").read_text(encoding="utf-8")
             )
@@ -681,6 +990,17 @@ def run_suite(
                 "finished_utc": datetime.now().astimezone().isoformat(),
                 "run_dir": str(run_dir),
             }
+            if expected_fixed_components is not None:
+                status_row.update(
+                    {
+                        "shared_system_config_sha256": system_config_fingerprint(
+                            config
+                        ),
+                        "shared_system_id": shared_system.system_id,
+                        "shared_system_artifact": str(shared_artifact_path),
+                        "shared_system_exact_match": shared_system_verified,
+                    }
+                )
             if ineligible:
                 had_failure = True
                 status_row["ineligible_methods"] = ineligible
@@ -722,6 +1042,12 @@ def run_suite(
                         "n_train": validation["n_train"],
                         "M": manifest.get("M"),
                         "system_id": manifest.get("system_id"),
+                        "shared_system_config_sha256": (
+                            system_config_fingerprint(config)
+                            if expected_fixed_components is not None
+                            else ""
+                        ),
+                        "shared_system_exact_match": bool(shared_system_verified),
                         "run_dir": str(run_dir),
                         **summary,
                     }
@@ -761,6 +1087,56 @@ def run_suite(
                 flush=True,
             )
 
+    shared_group_rows: list[dict[str, Any]] = []
+    for system_config_id, expected_count in sorted(system_config_counts.items()):
+        if expected_count <= 1:
+            continue
+        planned_case_ids = [
+            str(validation["case_id"])
+            for (validation, _), candidate_id in zip(plan, system_config_ids)
+            if candidate_id == system_config_id
+        ]
+        record = dict(
+            shared_group_records.get(
+                system_config_id,
+                {
+                    "system_config_sha256": system_config_id,
+                    "system_id": None,
+                    "weights_sha256": None,
+                    "gf_sha256": None,
+                    "rhs_sha256": None,
+                    "rhs_storage_sha256": None,
+                    "reg_lambda": None,
+                    "device_name": None,
+                    "compute_capability": None,
+                    "timing_runtime_sha256": None,
+                    "artifact_relative_path": str(
+                        Path("_shared_systems") / f"{system_config_id}.npz"
+                    ).replace("\\", "/"),
+                    "artifact_sha256": None,
+                    "case_ids": [],
+                    "case_run_dirs": [],
+                },
+            )
+        )
+        observed_count = len(record.get("case_ids", []))
+        record.update(
+            {
+                "expected_case_count": int(expected_count),
+                "observed_verified_case_count": int(observed_count),
+                "planned_case_ids": planned_case_ids,
+                "all_cases_exact_match": bool(observed_count == expected_count),
+                "verification_rule": (
+                    "Exact equality of system_id, weights_sha256, gf_sha256, "
+                    "solve/storage rhs hashes, reg_lambda, device_name, "
+                    "compute_capability, and the complete timing-runtime hash; "
+                    "no tolerance is used."
+                ),
+            }
+        )
+        shared_group_rows.append(record)
+    _write_json_atomic(output_root / "shared_system_groups.json", shared_group_rows)
+    _write_rows_atomic(output_root / "shared_system_groups.csv", shared_group_rows)
     _write_suite_checkpoint(output_root, status_rows, index_rows)
     return output_root, had_failure
 

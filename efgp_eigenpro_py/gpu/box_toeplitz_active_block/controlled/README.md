@@ -7,9 +7,11 @@ different Fourier setup routes.
 ## Controlled protocol
 
 `benchmark.py` constructs one set of Fourier weights, one Toeplitz generator,
-and one right-hand side. It hashes these arrays and the regularization value,
-then gives the same immutable system to every method. Every CG/PCG run uses the
-same tolerance and iteration limit and starts from zero.
+and one right-hand side. It separately hashes the stored precompute RHS and the
+possibly precision-cast RHS actually passed to CG/PCG; the latter, together
+with the weights, generator, and regularization value, defines `system_id`.
+Every method receives that same immutable system, tolerance, iteration limit,
+and zero initialization.
 
 The timed method unit is
 
@@ -27,6 +29,14 @@ does not compute prediction or RMSE inside the timing harness; the separate
 `prediction_audit.py` performs an explicitly untimed, chunked test-RMSE audit.
 True-residual recomputation, hashing, and post diagnostics are also outside the
 timed unit.
+
+Portable prepared-system artifacts preserve both the original system-build
+runtime and the current timing runtime. If a Colab resume loads an artifact on
+a different GPU, solver-only timing remains eligible after the exact hashes and
+current device identity pass, but the reused historical setup time is excluded
+from setup-inclusive claims. A canonical timing-runtime hash covers the device,
+compute capability, CuPy/CUDA versions, and resolved NUFFT backend so partial
+resume cannot silently mix software runtimes inside a paired ablation.
 
 The raw output records both the recursive residual and a fresh, complex128-audited
 `norm(b - A beta) / norm(b)`, plus the relative coefficient difference from a
@@ -382,16 +392,17 @@ from 2.310x to 3.684x. The corresponding CG/default iterations are
 12966/2166, 4896/726, 1811/233, 5768/1447, and 3076/367 for
 `(lambda,ell)=(0.01,0.1),(0.1,0.1),(1,0.1),(0.1,0.05),(0.1,0.2)`.
 
-The two rank-256 center directories also contain a formal `prediction_audit`
-subdirectory produced by `prediction_audit.py`. Each audit rebuilds one hashed
-system, gives that exact system to CG, default, full eig, Nyström, and
-RPCholesky, predicts all 2.5 million stored test points in chunks of 100,000,
-and rechecks the fingerprint afterward. Synthetic CG test RMSE is
-`0.0082486384`; every preconditioned ratio to CG is in
-`[0.99998031, 1.00000412]`. USGS CG test RMSE is `0.1151403112`; every ratio
-is in `[0.99999594, 1.00000011]`. All audited residuals are below `1e-7`.
-Audit solve and prediction seconds are explicitly marked audit-only and are
-not used in any speed claim.
+The current formal `prediction_audit.py` loads the exact persisted timing
+system and one canonical measured beta per method. It never rebuilds `A,b`,
+never performs a warm-up, and never solves again. The one-click campaign audits
+all timed methods for the three `paper_10m` cases and `cg/default` for the
+Synthetic development-master 100M and 300M cases, using at most the first 2.5
+million test points in chunks of 100,000. A prediction artifact is eligible only
+when `audit_pass=true`, `system_id` and the weights/Gf/rhs hashes exactly match
+the timing manifest, timed-solution hashes verify, and the audit solve count is
+zero. Prediction seconds are accuracy-only and are not used in any speed claim.
+Older v1 audit directories that rebuilt a system do not satisfy this gate and
+must be regenerated from timing artifacts containing canonical solutions.
 
 All these local supplement rows use CPU FINUFFT for the shared setup and an
 RTX 3050 Laptop GPU for the solves. They are matched solver-only evidence,
@@ -417,11 +428,22 @@ negative controls.
 - `score_leverage_arrays.npz`: score/leverage data when full-grid spectral
   diagnostics are requested.
 - `run_complete.json`: written atomically only after all required result files;
-  `--resume` also checks the effective config, source/data fingerprints, method
-  rows, and repeat identifiers before reusing a case.
-- `prediction_audit/prediction_audit.csv/json` (when run): separate system hash,
-  audited residual, full-test RMSE and ratio to CG, chunk size, and audit-only
-  solve/prediction seconds.
+  `--resume` also checks the effective config, source/data fingerprints, current
+  timing-runtime hash, the exact JSON/CSV method set, and repeat identifiers
+  before reusing a case. A Colab reconnect on a different GPU/runtime therefore
+  reruns singleton paper/scale cases instead of indefinitely preserving a mixed
+  profile.
+- `timing_system.npz`: byte-exact portable weights, generator, storage/solve
+  RHS, prediction center, and frozen system metadata used by the timed case.
+- `timing_solutions.npz` and `timing_solutions_manifest.json`: one canonical
+  measured beta per method with array and timing-row checksums. Prediction
+  audits consume these arrays and do not solve again.
+- `prediction_audit/prediction_audit.csv/json` (when run): exact timing-system
+  and timed-solution provenance, test RMSE and ratio to CG, equivalence gate,
+  chunk size, zero audit solves, and accuracy-only prediction seconds.
+- `prediction_audit/prediction_audit_complete.json`: written last and
+  atomically; anchors the prediction JSON and CSV checksums, exact method set,
+  source hash, row count, and audit decision for safe resume.
 
 The controlled-suite CLI uses distinct terminal exit codes:
 
