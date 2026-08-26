@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled import (
     build_colab_all_experiments_notebook as notebook_builder,
@@ -44,19 +45,55 @@ def test_box_budget_profile_is_a_fixed_three_method_sweep() -> None:
     assert {case["expected_n_train"] for case in profile["cases"]} == {10_000_000}
 
 
-def test_one_click_plan_filters_unsafe_development_family() -> None:
+def test_one_click_plan_is_strictly_two_stage() -> None:
     notebook = notebook_builder.build_notebook()
     source = _all_source(notebook)
     assert "RUN_ALL_FORMAL_EXPERIMENTS = True" in source
-    assert '("Synthetic", "scale_development_masters", "synthetic_nested")' in source
-    assert '("Winnebago", "scale_archived_exact", "winnebago_exact")' in source
-    assert '("Winnebago", "scale_development_masters"' not in source
-    assert '"job_id": "winnebago_box_budget_n10m"' in source
-    assert 'PREDICTION_AUDIT_PROFILES = ["paper_10m", "scale_development_masters"]' in source
+    assert "RUN_STAGE1_END_TO_END_KRR = RUN_ALL_FORMAL_EXPERIMENTS" in source
+    assert "RUN_STAGE2_FIXED_AB_SOLVERS = RUN_ALL_FORMAL_EXPERIMENTS" in source
+    assert 'STAGE1_SCALE_PROFILE = "scale_10m_300m"' in source
+    assert '"nystrom-krr", "rpcholesky-krr", "efgp-standard-cg"' in source
+    assert '"efgp-standard-jacobi", "efgp-standard-full-eig"' in source
+    assert '"ours-binned-default"' in source
+    assert "stage1_suite.build_profile_plan(" in source
+    assert "stage1_suite.select_target_regime(" in source
+    assert "canonical_reporting.load_stage1_summaries(" in source
+    assert source.index("canonical_reporting.load_stage1_summaries(") < source.index(
+        "stage1_suite.select_target_regime("
+    )
+    assert "Stage-1 scale campaign is incomplete; refusing target" in source
+    assert "allowed_resource_limit_methods=selection.get(" in source
+    assert "stage1_suite.materialize_robustness_plan(" in source
+    assert (
+        'expected_config = normalize_stage1_config_value(asdict(item["config"]))'
+        in source
+    )
+    assert "observed_config == expected_config" in source
+    assert "Winnebago 10/30/100/300M exact artifacts" in source
+    assert (
+        'frame["declared_dataset_family"] = declared_stage1_dataset_family(item)'
+        in source
+    )
+    assert 'frame["suite_profile"] = item["profile"]' in source
+    assert 'frame["robustness_axes"] = json.dumps(' in source
+    assert "robustness_axes, ensure_ascii=False" in source
+    assert 'frame["fourier_eps"] = float(cfg.fourier_eps)' in source
+    assert "(STAGE1_SCALE_SUMMARY_PATH, stage1_scale_summary)" not in source
+    assert 'globals().get("STAGE1_SCALE_SUMMARY_PATH")' in source
+    assert '"artifact_complete": artifact_complete' in source
+    assert '"scientific_eligible": scientific_eligible' in source
+    assert 'status = str(completion_payload["formal_result_status"])' in source
+    assert '"complete_with_resource_limits"' in source
+    assert "stage1_scale_artifacts_complete" in source
+    assert "stage1_scale_scientifically_eligible" in source
+    assert 'target_profile_name = "fixed_ab_selected_target"' in source
+    assert 'PREDICTION_AUDIT_PROFILES = ["fixed_ab_selected_target"]' in source
     assert "PREDICTION_AUDIT_MAX_TEST_N = 2_500_000" in source
-    assert 'record.get("job_id") in {"synthetic_nested_100m", "synthetic_nested_300m"}' in source
     assert 'payload.get("timing_solutions_reused") is not True' in source
-    assert 'DATA_MANIFEST_SNAPSHOT = DRIVE_RUN_ROOT / "data_manifest_snapshot.json"' in source
+    assert (
+        'DATA_MANIFEST_SNAPSHOT = DRIVE_RUN_ROOT / "data_manifest_snapshot.json"'
+        in source
+    )
     assert '"data_manifest_snapshot": str(DATA_MANIFEST_SNAPSHOT)' in source
     assert '"first_run_campaign_elapsed_seconds"' in source
     assert 'print("Verifying selected local cache SHA-256:", basename)' in source
@@ -65,10 +102,32 @@ def test_one_click_plan_filters_unsafe_development_family() -> None:
     assert '"plot_artifacts_complete"' in source
     assert "expected_selected_controlled_pairs" in source
     assert "controlled_plot = selected_controlled.copy()" in source
-    assert '_setup_inclusive_speedup.png' in source
+    assert '"stage1_krr_train_total_10m_300m.png"' in source
+    assert '"stage1_krr_setup_solving_breakdown.png"' in source
+    assert '"stage1_krr_accuracy_gate.png"' in source
+    assert '"stage1_krr_robustness.png"' in source
+    assert '"stage2_fixed_ab_solver_total.png"' in source
+    assert '"stage2_formal_solver_totals.csv"' in source
+    assert "CONTROLLED ARTIFACT AUDIT FAILED; refusing every formal" in source
+    assert '"solver_total_seconds = selection + preconditioner build + solve"' in source
+    assert "selected_target_path=str(STAGE1_TARGET_PATH)" in source
+    assert "stage1_suite_path=str(STAGE1_SUITE_CONFIG)" in source
+    assert "stage2_feasibility_path=str(STAGE2_FEASIBILITY_PATH)" in source
+    assert (
+        'STAGE2_FEASIBILITY_PATH = DRIVE_RUN_ROOT / "stage2_feasibility.json"' in source
+    )
+    assert '"prospective configured box-budget cap before timing"' in source
+    assert "STAGE2_SYSTEM_CONFIG_FIELDS = (" in source
+    assert '"precision", "nufft_backend", "precompute_chunk_size"' in source
+    assert "inverse_feasible = box_budget <= inverse_max_size" in source
+    assert '"methods": list(STAGE2_FEASIBLE_METHODS)' in source
+    assert '"stage2_feasibility_decision": STAGE2_FEASIBILITY' in source
+    assert "STAGE2_FORBIDDEN_METHODS" in source
+    assert '"fourier-nystrom-precond"' in source
+    assert '"fourier-rpcholesky-precond"' in source
     assert '"pending_data_generation_and_prefix_verification"' in source
     assert "check=False" in source
-    assert "SCIENTIFIC_FAIL" in source
+    assert "NO_ELIGIBLE_TARGET_FAIL_CLOSED" in source
 
 
 def test_committed_notebook_matches_generator() -> None:
@@ -76,7 +135,16 @@ def test_committed_notebook_matches_generator() -> None:
     assert committed == notebook_builder.build_notebook()
 
 
-def test_one_click_orchestrator_runs_all_jobs_with_family_filters(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("box_budget", "inverse_max_size", "active_inverse_feasible"),
+    [(8192, 1024, False), (512, 1024, True)],
+)
+def test_one_click_orchestrator_runs_only_fixed_ab_at_frozen_target(
+    tmp_path: Path,
+    box_budget: int,
+    inverse_max_size: int,
+    active_inverse_feasible: bool,
+) -> None:
     notebook = notebook_builder.build_notebook()
     orchestrator_source = next(
         "".join(cell["source"])
@@ -94,54 +162,20 @@ def test_one_click_orchestrator_runs_all_jobs_with_family_filters(tmp_path: Path
         payload = json.loads(config_path.read_text(encoding="utf-8"))
         cases = payload["profiles"][profile_name]["cases"]
         is_resume = (output_root / "suite_status.json").is_file()
-        scientific_failure = bool(
-            not is_resume
-            and
-            profile_name == "scale_development_masters"
-            and int(cases[0]["expected_n_train"]) == 30_000_000
-        )
         status_rows = []
-        for case_index, case in enumerate(cases):
+        for case in cases:
             run_dir = output_root / case["id"]
             run_dir.mkdir(parents=True, exist_ok=True)
             status_row = {
                 "case_id": case["id"],
                 "status": "resumed_existing" if is_resume else "completed",
             }
-            if scientific_failure and case_index == 0:
-                status_row["status"] = "completed_with_ineligible_methods"
-                status_row["ineligible_methods"] = ["default"]
             status_rows.append(status_row)
-            if profile_name.startswith("scale_"):
-                pd.DataFrame(
-                    [
-                        {
-                            "method": method,
-                            "performance_claim_eligible": not (
-                                scientific_failure and method == "default"
-                            ),
-                            "converged_repeats": (
-                                0 if scientific_failure and method == "default" else 5
-                            ),
-                            "true_relres_max": (
-                                float("nan")
-                                if scientific_failure and method == "default" else 1e-8
-                            ),
-                        }
-                        for method in ("cg", "default", "full-eig")
-                    ]
-                ).to_csv(run_dir / "matched_summary.csv", index=False)
-                (run_dir / "experiment_config.json").write_text(
-                    json.dumps({"measured_repeats": 5, "tol": 1e-7}),
-                    encoding="utf-8",
-                )
         (output_root / "suite_status.json").write_text(
             json.dumps(status_rows),
             encoding="utf-8",
         )
-        return SimpleNamespace(
-            returncode=2 if scientific_failure else 0
-        )
+        return SimpleNamespace(returncode=0)
 
     namespace = {
         "Path": Path,
@@ -153,6 +187,87 @@ def test_one_click_orchestrator_runs_all_jobs_with_family_filters(tmp_path: Path
         "LOCAL_DATA_DIR": tmp_path / "data",
         "DRIVE_RUN_ROOT": tmp_path / "run",
         "RUN_ALL_FORMAL_EXPERIMENTS": True,
+        "RUN_STAGE2_FIXED_AB_SOLVERS": True,
+        "STAGE1_SCALE_PROFILE": "scale_10m_300m",
+        "STAGE2_METHODS": [
+            "cg",
+            "jacobi",
+            "default",
+            "active-inverse",
+            "active-eig",
+            "full-eig",
+        ],
+        "STAGE2_MANDATORY_METHODS": [
+            "cg",
+            "jacobi",
+            "default",
+            "active-eig",
+            "full-eig",
+        ],
+        "END_TO_END_TARGET": {
+            "dataset_stem": "synthetic_true_func_2d_n300000000",
+            "n_train": 30_000_000,
+            "subset_seed": 0,
+            "subset_mode": "prefix",
+            "kernel_family": "matern",
+            "lengthscale": 0.1,
+            "nu": 1.5,
+            "variance": 1.0,
+            "reg_lambda": 0.1,
+            "fourier_eps": 1e-5,
+            "nufft_tol": 1e-10,
+            "l2_scaled": True,
+            "precision": "fp64",
+            "nufft_backend": "cufinufft",
+            "precompute_chunk_size": 1_000_000,
+        },
+        "stage1_config": {
+            "base": {
+                "dataset_stem": "synthetic_true_func_2d_n300000000",
+                "n_train": 10_000_000,
+                "box_budget": box_budget,
+                "inverse_max_size": inverse_max_size,
+            },
+            "profiles": {
+                "scale_10m_300m": {
+                    "cases": [
+                        {
+                            "id": "synthetic_matern_n30m",
+                            "dataset_stem": "synthetic_true_func_2d_n300000000",
+                            "n_train": 30_000_000,
+                        }
+                    ],
+                },
+            },
+        },
+        "stage1_scale_summary": pd.DataFrame(
+            [
+                {
+                    "dataset_stem": "synthetic_true_func_2d_n300000000",
+                    "n_train": 30_000_000,
+                    "dataset_family": "Synthetic",
+                }
+            ]
+        ),
+        "stage1_campaign_rows": [
+            {
+                "job_id": "stage1_scale_synthetic_n30m",
+                "profile": "scale_10m_300m",
+                "dataset_family": "Synthetic",
+                "n_train": 30_000_000,
+                "mandatory": True,
+                "status": "complete_with_resource_limits",
+                "reason": "declared resource-limit methods: rpcholesky-krr",
+                "artifact_complete": True,
+                "scientific_eligible": False,
+                "resource_limit_methods": "rpcholesky-krr",
+                "error_methods": "",
+                "case_count": 1,
+                "invocation_mode": "resumed_existing",
+                "resumed_case_count": 1,
+                "executed_case_count": 0,
+            }
+        ],
         "FORMAL_SCALE_SIZES": [10_000_000, 30_000_000, 100_000_000, 300_000_000],
         "RUN_PLUMBING_SMOKE": True,
         "SMOKE_OK": True,
@@ -170,46 +285,124 @@ def test_one_click_orchestrator_runs_all_jobs_with_family_filters(tmp_path: Path
     exec(compile(orchestrator_source, "<one-click-orchestrator>", "exec"), namespace)
 
     records = namespace["selected_case_records"]
-    assert len(records) == 17
-    development = [
-        record for record in records
-        if record["suite_profile"] == "scale_development_masters"
+    assert len(records) == 1
+    assert records[0]["suite_profile"] == "fixed_ab_selected_target"
+    assert records[0]["dataset_family"] == "Synthetic"
+    assert records[0]["case_id"] == "fixed_ab_target_n30000000"
+    runtime_payload = json.loads(
+        (
+            tmp_path / "run" / "runtime_configs" / "fixed_ab_selected_target.json"
+        ).read_text(encoding="utf-8")
+    )
+    target_profile = runtime_payload["profiles"]["fixed_ab_selected_target"]
+    expected_methods = [
+        method
+        for method in namespace["STAGE2_METHODS"]
+        if method != "active-inverse" or active_inverse_feasible
     ]
-    archived = [
-        record for record in records
-        if record["suite_profile"] == "scale_archived_exact"
-    ]
-    assert {record["dataset_family"] for record in development} == {"Synthetic"}
-    assert {record["dataset_family"] for record in archived} == {"Winnebago"}
-    assert len(development) == 2
-    assert len(archived) == 4
-    job_status = {row["job_id"]: row["status"] for row in namespace["campaign_job_rows"]}
-    assert job_status["synthetic_nested_30m"] == "SCIENTIFIC_FAIL"
-    assert job_status["synthetic_nested_100m"] == "SKIPPED_UPSTREAM_GATE"
-    assert job_status["synthetic_nested_300m"] == "SKIPPED_UPSTREAM_GATE"
-    assert job_status["winnebago_box_budget_n10m"] == "PASS"
-    assert job_status["winnebago_exact_300m"] == "PASS"
-    campaign_rows = {
-        row["job_id"]: row for row in namespace["campaign_job_rows"]
+    assert target_profile["overrides"]["methods"] == expected_methods
+    assert target_profile["overrides"]["box_budget"] == box_budget
+    assert target_profile["overrides"]["inverse_max_size"] == inverse_max_size
+    system_fields = (
+        "dataset_stem",
+        "n_train",
+        "subset_seed",
+        "subset_mode",
+        "kernel_family",
+        "lengthscale",
+        "nu",
+        "variance",
+        "reg_lambda",
+        "fourier_eps",
+        "nufft_tol",
+        "l2_scaled",
+        "precision",
+        "nufft_backend",
+        "precompute_chunk_size",
+    )
+    for field in system_fields:
+        assert field in namespace["STAGE2_FEASIBILITY"]
+        assert (
+            namespace["STAGE2_FEASIBILITY"][field]
+            == namespace["END_TO_END_TARGET"][field]
+        )
+        if field not in {"dataset_stem", "n_train"}:
+            assert (
+                target_profile["overrides"][field]
+                == namespace["END_TO_END_TARGET"][field]
+            )
+    assert set(target_profile["overrides"]["methods"]).isdisjoint(
+        {
+            "nystrom",
+            "rpcholesky",
+            "fourier-nystrom-precond",
+            "fourier-rpcholesky-precond",
+            "nystrom-krr",
+            "rpcholesky-krr",
+        }
+    )
+    feasibility_path = tmp_path / "run" / "stage2_feasibility.json"
+    feasibility = json.loads(feasibility_path.read_text(encoding="utf-8"))
+    assert feasibility["protocol_family"] == "controlled_fixed_system"
+    assert feasibility["decision_basis"] == (
+        "prospective configured box-budget cap before timing"
+    )
+    assert feasibility["dataset_stem"] == namespace["END_TO_END_TARGET"]["dataset_stem"]
+    assert feasibility["n_train"] == 30_000_000
+    assert feasibility["box_budget"] == box_budget
+    assert feasibility["inverse_max_size"] == inverse_max_size
+    assert (
+        feasibility["methods"]["active-inverse"]["feasible"] is active_inverse_feasible
+    )
+    assert all(
+        feasibility["methods"][method]["feasible"] is True
+        for method in namespace["STAGE2_MANDATORY_METHODS"]
+    )
+    job_status = {
+        row["job_id"]: row["status"] for row in namespace["campaign_job_rows"]
     }
-    assert campaign_rows["paper_10m"]["invocation_mode"] == "executed"
-    assert campaign_rows["paper_10m"]["resumed_case_count"] == 0
-    assert campaign_rows["paper_10m"]["executed_case_count"] == 3
-    assert campaign_rows["paper_10m"]["first_run_elapsed_seconds"] > 0
-    assert campaign_rows["synthetic_nested_30m"]["first_run_elapsed_seconds"] is None
-    assert "not first-run" in campaign_rows["paper_10m"]["elapsed_seconds_scope"]
-    assert "method timing" in campaign_rows["paper_10m"]["elapsed_seconds_scope"]
+    assert job_status["fixed_ab_selected_target"] == "PASS"
+    assert job_status["stage1_scale_synthetic_n30m"] == "complete_with_resource_limits"
+    campaign_rows = {row["job_id"]: row for row in namespace["campaign_job_rows"]}
+    assert campaign_rows["fixed_ab_selected_target"]["invocation_mode"] == "executed"
+    assert campaign_rows["fixed_ab_selected_target"]["resumed_case_count"] == 0
+    assert campaign_rows["fixed_ab_selected_target"]["executed_case_count"] == 1
+    assert campaign_rows["fixed_ab_selected_target"]["first_run_elapsed_seconds"] > 0
+    assert campaign_rows["fixed_ab_selected_target"]["planned_methods"] == ",".join(
+        expected_methods
+    )
+    assert campaign_rows["fixed_ab_selected_target"]["stage2_feasibility_path"] == str(
+        feasibility_path
+    )
+    assert (
+        "not first-run"
+        in campaign_rows["fixed_ab_selected_target"]["elapsed_seconds_scope"]
+    )
+    assert (
+        "method timing"
+        in campaign_rows["fixed_ab_selected_target"]["elapsed_seconds_scope"]
+    )
     assert (tmp_path / "run" / "campaign_jobs.json").is_file()
 
-    first_run_elapsed = campaign_rows["paper_10m"]["first_run_elapsed_seconds"]
-    exec(compile(orchestrator_source, "<one-click-orchestrator-resume>", "exec"), namespace)
+    first_run_elapsed = campaign_rows["fixed_ab_selected_target"][
+        "first_run_elapsed_seconds"
+    ]
+    exec(
+        compile(orchestrator_source, "<one-click-orchestrator-resume>", "exec"),
+        namespace,
+    )
     resumed_rows = {row["job_id"]: row for row in namespace["campaign_job_rows"]}
-    assert resumed_rows["paper_10m"]["invocation_mode"] == "resumed_existing"
-    assert resumed_rows["paper_10m"]["resumed_case_count"] == 3
-    assert resumed_rows["paper_10m"]["executed_case_count"] == 0
-    assert resumed_rows["paper_10m"]["first_run_elapsed_seconds"] == first_run_elapsed
     assert (
-        resumed_rows["paper_10m"]["first_run_elapsed_seconds_source"]
+        resumed_rows["fixed_ab_selected_target"]["invocation_mode"]
+        == "resumed_existing"
+    )
+    assert resumed_rows["fixed_ab_selected_target"]["resumed_case_count"] == 1
+    assert resumed_rows["fixed_ab_selected_target"]["executed_case_count"] == 0
+    assert (
+        resumed_rows["fixed_ab_selected_target"]["first_run_elapsed_seconds"]
+        == first_run_elapsed
+    )
+    assert (
+        resumed_rows["fixed_ab_selected_target"]["first_run_elapsed_seconds_source"]
         == "preserved successful campaign checkpoint"
     )
-    assert resumed_rows["synthetic_nested_30m"]["first_run_elapsed_seconds"] is None

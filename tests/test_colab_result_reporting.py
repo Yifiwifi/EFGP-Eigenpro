@@ -30,6 +30,14 @@ def _cell_source(notebook: dict, marker: str) -> str:
     return matches[0]
 
 
+def test_final_manifest_exposes_only_canonical_stage2_claim_summary() -> None:
+    notebook = notebook_builder.build_notebook()
+    source = _cell_source(notebook, '"elapsed_time_semantics":')
+    assert "stage2_fixed_ab_solver_summary.csv matched-repeat paired totals" in source
+    assert "never use raw matched_summary.csv" in source
+    assert '"stage2_raw_diagnostic"' not in source
+
+
 def _write_case(
     run_dir: Path,
     *,
@@ -97,12 +105,14 @@ def _write_case(
         "dataset_metadata_sha256": metadata_sha256,
     }
     if include_component_hashes:
-        manifest.update({
-            "weights_sha256": "weights-hash",
-            "gf_sha256": "gf-hash",
-            "rhs_sha256": "rhs-hash",
-            "rhs_storage_sha256": "rhs-storage-hash",
-        })
+        manifest.update(
+            {
+                "weights_sha256": "weights-hash",
+                "gf_sha256": "gf-hash",
+                "rhs_sha256": "rhs-hash",
+                "rhs_storage_sha256": "rhs-storage-hash",
+            }
+        )
     common = {
         "measured_repeats": 5,
         "converged_repeats": 5,
@@ -139,30 +149,38 @@ def _write_case(
         },
     ]
     for method in extra_methods:
-        rows.append({
-            **common,
-            "method": method,
-            "cold_speedup_median": speedup * 1.1,
-            "cold_speedup_min": speedup * 1.04,
-            "cold_speedup_max": speedup * 1.16,
-            "shared_fourier_setup_plus_method_speedup_median": speedup,
-            "iterations_median": 600,
-            "iterations_min": 590,
-            "iterations_max": 610,
-            "build_plus_solve_seconds_median": 1.0,
-            "build_seconds_median": 0.5,
-            "build_seconds_max": 0.55,
-            "preconditioner_storage_bytes": 128 * 2**20,
-        })
-    (run_dir / "experiment_config.json").write_text(json.dumps(config), encoding="utf-8")
-    (run_dir / "system_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        rows.append(
+            {
+                **common,
+                "method": method,
+                "cold_speedup_median": speedup * 1.1,
+                "cold_speedup_min": speedup * 1.04,
+                "cold_speedup_max": speedup * 1.16,
+                "shared_fourier_setup_plus_method_speedup_median": speedup,
+                "iterations_median": 600,
+                "iterations_min": 590,
+                "iterations_max": 610,
+                "build_plus_solve_seconds_median": 1.0,
+                "build_seconds_median": 0.5,
+                "build_seconds_max": 0.55,
+                "preconditioner_storage_bytes": 128 * 2**20,
+            }
+        )
+    (run_dir / "experiment_config.json").write_text(
+        json.dumps(config), encoding="utf-8"
+    )
+    (run_dir / "system_manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
     (run_dir / "run_complete.json").write_text("{}", encoding="utf-8")
     pd.DataFrame(rows).to_csv(run_dir / "matched_summary.csv", index=False)
 
 
 def _write_prediction_audit(run_dir: Path) -> None:
     config_path = run_dir / "experiment_config.json"
-    manifest = json.loads((run_dir / "system_manifest.json").read_text(encoding="utf-8"))
+    manifest = json.loads(
+        (run_dir / "system_manifest.json").read_text(encoding="utf-8")
+    )
     rows = [
         {
             "system_id": manifest["system_id"],
@@ -236,16 +254,22 @@ def _write_prediction_audit(run_dir: Path) -> None:
         "evaluated_n_test": 2_500_000,
         "prediction_source_bundle_sha256": prediction_source_sha256,
         "prediction_audit_json": json_path.name,
-        "prediction_audit_json_sha256": hashlib.sha256(json_path.read_bytes()).hexdigest(),
+        "prediction_audit_json_sha256": hashlib.sha256(
+            json_path.read_bytes()
+        ).hexdigest(),
         "prediction_audit_csv": csv_path.name,
-        "prediction_audit_csv_sha256": hashlib.sha256(csv_path.read_bytes()).hexdigest(),
+        "prediction_audit_csv_sha256": hashlib.sha256(
+            csv_path.read_bytes()
+        ).hexdigest(),
     }
     (audit_dir / PREDICTION_AUDIT_COMPLETION_FILENAME).write_text(
         json.dumps(completion), encoding="utf-8"
     )
 
 
-def test_reporting_uses_exact_selected_cases_and_isolates_profiles(tmp_path, monkeypatch) -> None:
+def test_reporting_uses_exact_selected_cases_and_isolates_profiles(
+    tmp_path, monkeypatch
+) -> None:
     controlled_root = tmp_path / "controlled_fixed_system"
     paper_run = controlled_root / "paper_10m" / "manitowoc_n10m_matern"
     stale_paper_run = controlled_root / "paper_10m" / "old_manitowoc_n10m_matern"
@@ -258,28 +282,44 @@ def test_reporting_uses_exact_selected_cases_and_isolates_profiles(tmp_path, mon
     _write_case(paper_run, dataset_stem=stem, n_train=10_000_000, speedup=3.2)
     _write_prediction_audit(paper_run)
     _write_case(
-        stale_paper_run, dataset_stem=stem, n_train=10_000_000, speedup=9.7,
+        stale_paper_run,
+        dataset_stem=stem,
+        n_train=10_000_000,
+        speedup=9.7,
     )
     _write_case(
-        stale_run, dataset_stem=stem, n_train=10_000_000, speedup=9.9,
+        stale_run,
+        dataset_stem=stem,
+        n_train=10_000_000,
+        speedup=9.9,
         include_component_hashes=False,
     )
     _write_case(oat_ref, dataset_stem=stem, n_train=10_000_000, speedup=2.9)
     _write_case(
-        oat_lambda, dataset_stem=stem, n_train=10_000_000, speedup=3.4, reg_lambda=0.01,
+        oat_lambda,
+        dataset_stem=stem,
+        n_train=10_000_000,
+        speedup=3.4,
+        reg_lambda=0.01,
     )
     _write_case(
-        oat_lengthscale, dataset_stem=stem, n_train=10_000_000, speedup=2.8, lengthscale=0.2,
+        oat_lengthscale,
+        dataset_stem=stem,
+        n_train=10_000_000,
+        speedup=2.8,
+        lengthscale=0.2,
     )
     output_root = tmp_path / "report"
     output_root.mkdir()
-    selected_case_records = [{
-        "output_group": "paper_10m",
-        "suite_profile": "paper_10m",
-        "case_id": paper_run.name,
-        "run_dir": paper_run,
-        "scale_role": "independent replication",
-    }]
+    selected_case_records = [
+        {
+            "output_group": "paper_10m",
+            "suite_profile": "paper_10m",
+            "case_id": paper_run.name,
+            "run_dir": paper_run,
+            "scale_role": "independent replication",
+        }
+    ]
     notebook = notebook_builder.build_notebook()
     namespace = {
         "Path": Path,
@@ -296,28 +336,43 @@ def test_reporting_uses_exact_selected_cases_and_isolates_profiles(tmp_path, mon
     audit_source = _cell_source(notebook, "ignored_stale_dirs =")
     exec(compile(audit_source, "audit-cell", "exec"), namespace)
     audit = namespace["controlled_artifact_audit"]
-    assert audit[["output_group", "case", "status"]].to_dict("records") == [{
-        "output_group": "paper_10m",
-        "case": paper_run.name,
-        "status": "PASS",
-    }]
+    assert audit[["output_group", "case", "status"]].to_dict("records") == [
+        {
+            "output_group": "paper_10m",
+            "case": paper_run.name,
+            "status": "PASS",
+        }
+    ]
     assert audit.loc[0, "rhs_storage_sha256"] == "rhs-storage-hash"
     assert audit.loc[0, "device_name"] == "NVIDIA A100-SXM4-40GB"
     assert audit.loc[0, "compute_capability"] == "8.0"
     assert audit.loc[0, "timing_runtime_sha256"] == "a100-runtime-hash"
     assert set(namespace["ignored_stale_dirs"]) == {
-        stale_paper_run.resolve(), stale_run.resolve(), oat_ref.resolve(),
-        oat_lambda.resolve(), oat_lengthscale.resolve(),
+        stale_paper_run.resolve(),
+        stale_run.resolve(),
+        oat_ref.resolve(),
+        oat_lambda.resolve(),
+        oat_lengthscale.resolve(),
     }
 
     index_source = _cell_source(notebook, "def dataset_family_label")
     exec(compile(index_source, "index-cell", "exec"), namespace)
     catalog = namespace["controlled_catalog"]
     assert set(catalog["output_group"]) == {
-        "paper_10m", "screen_10m", "winnebago_oat_n10m",
+        "paper_10m",
+        "screen_10m",
+        "winnebago_oat_n10m",
     }
-    assert catalog.loc[catalog["selected_in_this_invocation"], "output_group"].eq("paper_10m").all()
-    assert catalog.loc[catalog["case_id"].eq(paper_run.name), "rhs_sha256"].eq("rhs-hash").all()
+    assert (
+        catalog.loc[catalog["selected_in_this_invocation"], "output_group"]
+        .eq("paper_10m")
+        .all()
+    )
+    assert (
+        catalog.loc[catalog["case_id"].eq(paper_run.name), "rhs_sha256"]
+        .eq("rhs-hash")
+        .all()
+    )
     paper_catalog = catalog.loc[catalog["case_id"].eq(paper_run.name)]
     assert paper_catalog["rhs_storage_sha256"].eq("rhs-storage-hash").all()
     assert paper_catalog["cfg_reg_lambda"].eq(0.1).all()
@@ -348,9 +403,7 @@ def test_reporting_uses_exact_selected_cases_and_isolates_profiles(tmp_path, mon
     assert prediction_summary["exact_timing_system_match"].eq(True).all()
     assert prediction_summary["timing_solutions_reused"].eq(True).all()
     assert prediction_summary["prediction_completion_valid"].eq(True).all()
-    assert prediction_summary["audit_rhs_storage_sha256"].eq(
-        "rhs-storage-hash"
-    ).all()
+    assert prediction_summary["audit_rhs_storage_sha256"].eq("rhs-storage-hash").all()
 
 
 def test_controlled_audit_rejects_truncated_method_summary(tmp_path: Path) -> None:
@@ -367,12 +420,14 @@ def test_controlled_audit_rejects_truncated_method_summary(tmp_path: Path) -> No
     summary.loc[summary["method"].eq("cg")].to_csv(summary_path, index=False)
     output_root = tmp_path / "report"
     output_root.mkdir()
-    selected_case_records = [{
-        "output_group": "paper_10m",
-        "suite_profile": "paper_10m",
-        "case_id": run_dir.name,
-        "run_dir": run_dir,
-    }]
+    selected_case_records = [
+        {
+            "output_group": "paper_10m",
+            "suite_profile": "paper_10m",
+            "case_id": run_dir.name,
+            "run_dir": run_dir,
+        }
+    ]
     notebook = notebook_builder.build_notebook()
     namespace = {
         "Path": Path,
@@ -383,10 +438,15 @@ def test_controlled_audit_rejects_truncated_method_summary(tmp_path: Path) -> No
         "selected_case_records": selected_case_records,
         "display": lambda _value: None,
     }
-    exec(
-        compile(_cell_source(notebook, "ignored_stale_dirs ="), "audit-cell", "exec"),
-        namespace,
-    )
+    with pytest.raises(RuntimeError, match="CONTROLLED ARTIFACT AUDIT FAILED"):
+        exec(
+            compile(
+                _cell_source(notebook, "ignored_stale_dirs ="),
+                "audit-cell",
+                "exec",
+            ),
+            namespace,
+        )
     status = namespace["controlled_artifact_audit"].loc[0, "status"]
     assert status.startswith("FAIL:")
     assert "method coverage differs" in status
@@ -401,12 +461,12 @@ def _execute_reporting_cells(
     notebook = notebook_builder.build_notebook()
     selected_case_records = [
         {
-            "output_group": run_dir.resolve().relative_to(
-                controlled_root.resolve()
-            ).parts[0],
-            "suite_profile": run_dir.resolve().relative_to(
-                controlled_root.resolve()
-            ).parts[0],
+            "output_group": run_dir.resolve()
+            .relative_to(controlled_root.resolve())
+            .parts[0],
+            "suite_profile": run_dir.resolve()
+            .relative_to(controlled_root.resolve())
+            .parts[0],
             "case_id": run_dir.name,
             "run_dir": run_dir,
             "scale_role": None,
@@ -634,3 +694,215 @@ def test_box_budget_report_checks_fixed_system_and_writes_plot(
     assert summary["cfg_reg_lambda"].eq(0.1).all()
     assert summary["device_name"].eq("NVIDIA A100-SXM4-40GB").all()
     assert summary["compute_capability"].astype(str).eq("8.0").all()
+
+
+def test_stage1_formal_report_uses_only_true_end_to_end_krr_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    notebook = notebook_builder.build_notebook()
+    source = _cell_source(notebook, "STAGE1_METHOD_ORDER =")
+    methods = [
+        "nystrom-krr",
+        "rpcholesky-krr",
+        "efgp-standard-cg",
+        "efgp-standard-jacobi",
+        "efgp-standard-full-eig",
+        "ours-binned-default",
+    ]
+    rows = []
+    for family, stem in (
+        ("Synthetic", "synthetic_true_func_2d_n300000000"),
+        ("Winnebago", "USGS_LPC_IL_Winnebago_2018_ntrain300000000"),
+    ):
+        for n_train in (10_000_000, 30_000_000):
+            for method_index, method in enumerate(methods):
+                rows.append(
+                    {
+                        "protocol_family": "end_to_end_krr",
+                        "suite_profile": "scale_10m_300m",
+                        "case_id": f"{family}_{n_train}",
+                        "dataset": family,
+                        "dataset_stem": stem,
+                        "n_train": n_train,
+                        "method": method,
+                        "status": "ok",
+                        "accuracy_eligible": True,
+                        "performance_claim_eligible": True,
+                        "speedup_claim_eligible": True,
+                        "test_rmse": 0.2 + method_index * 1e-5,
+                        "test_r2": 0.99,
+                        "setup_seconds": 2.0 + method_index,
+                        "solving_phase_seconds": 4.0 + method_index,
+                        "train_total_seconds": 6.0 + 2 * method_index,
+                        "speedup_vs_ours": 1.25,
+                    }
+                )
+    import matplotlib.pyplot as plt
+
+    monkeypatch.setattr(plt, "show", lambda: None)
+    namespace = {
+        "Path": Path,
+        "pd": pd,
+        "json": json,
+        "DRIVE_RUN_ROOT": tmp_path,
+        "STAGE1_METHODS": methods,
+        "stage1_scale_verified": pd.DataFrame(rows),
+        "stage1_robustness_verified": pd.DataFrame(),
+        "END_TO_END_TARGET": {
+            "dataset_stem": "synthetic_true_func_2d_n300000000",
+            "n_train": 30_000_000,
+        },
+        "stage1_config": {"base": {"accuracy_relative_tolerance": 0.01}},
+        "display": lambda _value: None,
+    }
+    exec(compile(source, "stage1-report-cell", "exec"), namespace)
+    assert (tmp_path / "stage1_krr_train_total_10m_300m.png").is_file()
+    assert (tmp_path / "stage1_krr_accuracy_gate.png").is_file()
+    assert (tmp_path / "stage1_krr_setup_solving_breakdown.png").is_file()
+    audit = pd.read_csv(tmp_path / "stage1_krr_accuracy_timing_audit.csv")
+    assert set(audit["method"]) == set(methods)
+    assert set(audit["protocol_family"]) == {"end_to_end_krr"}
+
+
+def test_stage2_formal_report_uses_solver_total_and_rejects_krr_labels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    notebook = notebook_builder.build_notebook()
+    source = _cell_source(notebook, "STAGE2_FORMAL_METHODS =")
+    candidate_methods = [
+        "cg",
+        "jacobi",
+        "default",
+        "active-inverse",
+        "active-eig",
+        "full-eig",
+    ]
+    methods = ["cg", "jacobi", "default", "active-eig", "full-eig"]
+    canonical_speedups = {
+        "cg": 1.0,
+        "jacobi": 0.75,
+        "default": 2.5,
+        "active-eig": 3.0,
+        "full-eig": 1.5,
+    }
+    run_dir = tmp_path / "fixed_ab_target"
+    run_dir.mkdir()
+    (run_dir / "system_manifest.json").write_text(
+        json.dumps(
+            {
+                "system_id": "one-hashed-system",
+                "n_train": 30_000_000,
+            }
+        ),
+        encoding="utf-8",
+    )
+    pd.DataFrame(
+        [
+            {
+                "method": method,
+                "performance_claim_eligible": True,
+                "selection_seconds_median": 0.1 * index,
+                "preconditioner_build_seconds_median": 0.2 * index,
+                "solve_seconds_median": 12.0 - index,
+                "solver_total_seconds_median": 12.0 - 0.7 * index,
+                # Deliberately corrupt the derived raw value: the public CSV
+                # must be overwritten from canonical repeat-recomputed totals.
+                "solver_total_speedup_over_cg_median": 999.0,
+                "iterations_median": 4000 - 300 * index,
+            }
+            for index, method in enumerate(methods)
+        ]
+    ).to_csv(run_dir / "matched_summary.csv", index=False)
+    import matplotlib.pyplot as plt
+
+    monkeypatch.setattr(plt, "show", lambda: None)
+    from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled import (
+        two_stage_reporting as canonical_reporting,
+    )
+
+    stage1_path = tmp_path / "stage1_verified.csv"
+    pd.DataFrame([{"verified": True}]).to_csv(stage1_path, index=False)
+    target_path = tmp_path / "selected_target_regime.json"
+    suite_path = tmp_path / "end_to_end_suite.json"
+    feasibility_path = tmp_path / "stage2_feasibility.json"
+    for path in (target_path, suite_path, feasibility_path):
+        path.write_text("{}", encoding="utf-8")
+
+    def fake_canonical_report(config):
+        report_root = Path(config.output_dir)
+        report_root.mkdir(parents=True, exist_ok=True)
+        canonical_rows = []
+        for index, method in enumerate(methods):
+            total = 12.0 - 0.7 * index
+            selection = 0.1 * index
+            build = 0.2 * index
+            canonical_rows.append(
+                {
+                    "method": method,
+                    "system_id": "one-hashed-system",
+                    "selection_seconds": selection,
+                    "preconditioner_build_seconds": build,
+                    "solve_seconds": total - selection - build,
+                    "solver_total_seconds": total,
+                    "measured_repeats": 5,
+                    "solver_total_speedup_over_cg_median": canonical_speedups[method],
+                    "paired_comparisons": 5,
+                    "solver_total_speedup_source": (
+                        "median of matched-repeat CG_i / method_i solver totals"
+                    ),
+                    "performance_claim_eligible": True,
+                }
+            )
+        pd.DataFrame(canonical_rows).to_csv(
+            report_root / "stage2_formal_solver_totals.csv", index=False
+        )
+        return {"manifest": {"artifacts": []}}
+
+    monkeypatch.setattr(
+        canonical_reporting, "build_two_stage_report", fake_canonical_report
+    )
+    namespace = {
+        "Path": Path,
+        "pd": pd,
+        "json": json,
+        "DRIVE_RUN_ROOT": tmp_path,
+        "STAGE2_METHODS": candidate_methods,
+        "STAGE2_FEASIBLE_METHODS": methods,
+        "RUN_ALL_FORMAL_EXPERIMENTS": True,
+        "END_TO_END_TARGET": {"n_train": 30_000_000},
+        "STAGE1_SCALE_SUMMARY_PATH": stage1_path,
+        "stage1_scale_verified": pd.DataFrame([{"verified": True}]),
+        "stage1_robustness_verified": pd.DataFrame(),
+        "STAGE1_TARGET_PATH": target_path,
+        "STAGE1_SUITE_CONFIG": suite_path,
+        "STAGE2_FEASIBILITY_PATH": feasibility_path,
+        "selected_case_records": [
+            {
+                "suite_profile": "fixed_ab_selected_target",
+                "case_id": "fixed_ab_target",
+                "run_dir": run_dir,
+            }
+        ],
+        "display": lambda _value: None,
+    }
+    exec(compile(source, "stage2-report-cell", "exec"), namespace)
+    assert (tmp_path / "stage2_fixed_ab_solver_total.png").is_file()
+    summary = pd.read_csv(tmp_path / "stage2_fixed_ab_solver_summary.csv")
+    assert set(summary["method"]) == set(methods)
+    assert summary["system_id"].eq("one-hashed-system").all()
+    assert summary["headline_timing"].str.contains("selection").all()
+    observed_speedup = summary.set_index("method")[
+        "solver_total_speedup_over_cg_median"
+    ].to_dict()
+    assert observed_speedup == pytest.approx(canonical_speedups)
+    assert not summary["solver_total_speedup_over_cg_median"].eq(999.0).any()
+    raw_diagnostic = pd.read_csv(tmp_path / "stage2_fixed_ab_raw_diagnostic.csv")
+    assert raw_diagnostic["solver_total_speedup_over_cg_median"].eq(999.0).all()
+
+    bad = pd.read_csv(run_dir / "matched_summary.csv")
+    bad.loc[0, "method"] = "nystrom-krr"
+    bad.to_csv(run_dir / "matched_summary.csv", index=False)
+    with pytest.raises(RuntimeError, match="forbidden KRR/adaptation labels"):
+        exec(compile(source, "stage2-report-cell-bad", "exec"), namespace)

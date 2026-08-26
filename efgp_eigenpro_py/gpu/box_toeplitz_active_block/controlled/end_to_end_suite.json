@@ -1,0 +1,154 @@
+{
+  "schema_version": 1,
+  "protocol_family": "end_to_end_krr",
+  "description": "Stage 1 compares complete KRR pipelines. Each method owns landmark/eigenspace/model setup and solving; prediction is reported separately.",
+  "base": {
+    "dataset_stem": "synthetic_true_func_2d_n300000000",
+    "n_train": 10000000,
+    "subset_seed": 0,
+    "subset_mode": "prefix",
+    "max_test_rows": 2500000,
+    "kernel_family": "matern",
+    "lengthscale": 0.1,
+    "nu": 1.5,
+    "variance": 1.0,
+    "reg_lambda": 0.1,
+    "regularization_convention": "absolute",
+    "fourier_eps": 1e-5,
+    "nufft_tol": 1e-10,
+    "l2_scaled": true,
+    "tol": 1e-7,
+    "maxiter": 80000,
+    "precision": "fp64",
+    "methods": [
+      "nystrom-krr",
+      "rpcholesky-krr",
+      "efgp-standard-cg",
+      "efgp-standard-jacobi",
+      "efgp-standard-full-eig",
+      "ours-binned-default"
+    ],
+    "rank": 256,
+    "nystrom_rank": 256,
+    "rpcholesky_rank": 256,
+    "eig_tol": 0.001,
+    "eig_maxiter": 1280,
+    "score_tau": 1.0,
+    "box_budget": 8192,
+    "inverse_max_size": 1024,
+    "nystrom_seed": 17,
+    "rpcholesky_seed": 23,
+    "eig_seed": 0,
+    "method_order_seed": 20260826,
+    "warmup_repeats": 1,
+    "measured_repeats": 5,
+    "low_rank_chunk_size": 250000,
+    "low_rank_dtype": "fp64",
+    "rpcholesky_max_factor_bytes": 51539607552,
+    "accuracy_reference_method": "efgp-standard-full-eig",
+    "accuracy_relative_tolerance": 0.01,
+    "accuracy_max_rmse": 0.02,
+    "accuracy_min_r2": 0.95,
+    "nufft_backend": "cufinufft",
+    "precompute_chunk_size": 1000000
+  },
+  "target_selection": {
+    "cg_iteration_min": 3000,
+    "cg_iteration_max": 6000,
+    "dataset_priority": [
+      "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+      "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain30000000",
+      "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain100000000",
+      "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain300000000",
+      "synthetic_true_func_2d_n300000000"
+    ],
+    "allowed_resource_limit_methods": ["rpcholesky-krr"],
+    "rule": "Select the largest N with all six declared pipeline rows present, successful Nystrom/EFGP rows, full-eig/ours every-repeat relative and absolute accuracy eligibility, and standard EFGP-CG median iterations in [3000,6000]. An RPCholesky resource_limit row is a prospectively allowed scalability outcome and does not block solver-target selection; it never receives a speedup. Equal-N ties use the declared Winnebago-then-Synthetic priority. If no case qualifies, fail closed rather than substitute a post-hoc target."
+  },
+  "profiles": {
+    "scale_10m_300m": {
+      "description": "Primary end-to-end KRR scale comparison. Resource-limit rows remain visible and are never replaced by pilot or subsampled algorithms.",
+      "cases": [
+        {
+          "id": "synthetic_matern_n10m",
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_n300000000",
+          "n_train": 10000000,
+          "accuracy_max_rmse": 0.02
+        },
+        {
+          "id": "synthetic_matern_n30m",
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_n300000000",
+          "n_train": 30000000,
+          "accuracy_max_rmse": 0.02
+        },
+        {
+          "id": "synthetic_matern_n100m",
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_n300000000",
+          "n_train": 100000000,
+          "accuracy_max_rmse": 0.02
+        },
+        {
+          "id": "synthetic_matern_n300m",
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_n300000000",
+          "n_train": 300000000,
+          "accuracy_max_rmse": 0.02
+        },
+        {
+          "id": "winnebago_matern_n10m",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "n_train": 10000000,
+          "accuracy_max_rmse": 0.15
+        },
+        {
+          "id": "winnebago_matern_n30m",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain30000000",
+          "n_train": 30000000,
+          "accuracy_max_rmse": 0.15
+        },
+        {
+          "id": "winnebago_matern_n100m",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain100000000",
+          "n_train": 100000000,
+          "accuracy_max_rmse": 0.15
+        },
+        {
+          "id": "winnebago_matern_n300m",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain300000000",
+          "n_train": 300000000,
+          "accuracy_max_rmse": 0.15
+        }
+      ]
+    },
+    "robustness_at_selected_target": {
+      "description": "Prospectively materialized only after the target case is selected from the scale profile.",
+      "lambda_values": [0.01, 0.1, 1.0],
+      "lengthscale_values": [0.05, 0.1, 0.2],
+      "box_budget_values": [4096, 8192, 16384],
+      "datasets": [
+        {
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_n300000000",
+          "accuracy_max_rmse": 0.02
+        },
+        {
+          "dataset_family": "Winnebago",
+          "dataset_stems_by_n_train": {
+            "10000000": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+            "30000000": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain30000000",
+            "100000000": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain100000000",
+            "300000000": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain300000000"
+          },
+          "accuracy_max_rmse": 0.15
+        }
+      ]
+    }
+  }
+}

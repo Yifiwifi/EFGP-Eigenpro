@@ -15,23 +15,20 @@
     "l2_scaled": true,
     "tol": 1e-7,
     "maxiter": 20000,
+    "zero_initial_vector": true,
     "precision": "fp64",
     "allow_near_epsilon_tol": false,
-    "methods": ["cg", "jacobi", "default", "full-eig", "nystrom", "rpcholesky"],
+    "methods": ["cg", "jacobi", "default", "full-eig"],
     "score_tau": 1.0,
     "box_budget": 8192,
     "inverse_max_size": 1024,
     "rank": 256,
-    "nystrom_rank": 256,
-    "rpcholesky_rank": 256,
     "eig_tol": 1e-3,
     "eig_maxiter": 1280,
     "measured_repeats": 5,
     "warmup_repeats": 1,
     "method_order_seed": 20260823,
     "eig_seed": 0,
-    "nystrom_seed": 17,
-    "rpcholesky_seed": 23,
     "nufft_backend": "cufinufft",
     "precompute_chunk_size": 1000000,
     "post_diagnostic_mode": "cheap",
@@ -171,7 +168,7 @@
           "dataset_family": "Synthetic",
           "dataset_stem": "synthetic_true_func_2d_n300000000",
           "n_train": 100000000,
-          "methods": ["cg", "default", "full-eig", "nystrom", "rpcholesky"],
+          "methods": ["cg", "default", "full-eig"],
           "expected_n_train": 100000000,
           "scale_role": "nested master prefix"
         },
@@ -205,7 +202,7 @@
           "dataset_family": "Winnebago",
           "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain300000000",
           "n_train": 100000000,
-          "methods": ["cg", "default", "full-eig", "nystrom", "rpcholesky"],
+          "methods": ["cg", "default", "full-eig"],
           "expected_n_train": 100000000,
           "scale_role": "nested master prefix"
         },
@@ -246,7 +243,7 @@
           "dataset_family": "Synthetic",
           "dataset_stem": "synthetic_true_func_2d_ntrain100000000",
           "n_train": 0,
-          "methods": ["cg", "default", "full-eig", "nystrom", "rpcholesky"],
+          "methods": ["cg", "default", "full-eig"],
           "expected_n_train": 100000000,
           "scale_role": "archived data definition; independent exact artifact"
         },
@@ -280,7 +277,7 @@
           "dataset_family": "Winnebago",
           "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain100000000",
           "n_train": 0,
-          "methods": ["cg", "default", "full-eig", "nystrom", "rpcholesky"],
+          "methods": ["cg", "default", "full-eig"],
           "expected_n_train": 100000000,
           "scale_role": "archived spatial-selection artifact"
         },
@@ -321,7 +318,7 @@
           "dataset_family": "Manitowoc",
           "dataset_stem": "USGS_EPT_WI_2County_1_B23_full_workunit_ground_elevation_n300000000",
           "n_train": 100000000,
-          "methods": ["cg", "default", "full-eig", "nystrom", "rpcholesky"],
+          "methods": ["cg", "default", "full-eig"],
           "expected_n_train": 100000000,
           "scale_role": "nested EPT master prefix"
         },
@@ -333,6 +330,36 @@
           "methods": ["cg", "default", "full-eig"],
           "expected_n_train": 300000000,
           "scale_role": "complete EPT master"
+        }
+      ]
+    },
+    "fixed_system_inverse_control_n10m": {
+      "overrides": {
+        "kernel_family": "se",
+        "methods": [
+          "cg",
+          "jacobi",
+          "default",
+          "active-inverse",
+          "full-inverse",
+          "active-eig",
+          "full-eig"
+        ],
+        "box_budget": 1225,
+        "inverse_max_size": 1225,
+        "rank": 128,
+        "eig_maxiter": 1280,
+        "maxiter": 20000
+      },
+      "cases": [
+        {
+          "id": "winnebago_fixed_system_inverse_control_n10m",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "n_train": 0,
+          "subset_mode": "prefix",
+          "expected_n_train": 10000000,
+          "scale_role": "selected small-Fourier-grid fixed-A,b inverse/full-inverse control"
         }
       ]
     },

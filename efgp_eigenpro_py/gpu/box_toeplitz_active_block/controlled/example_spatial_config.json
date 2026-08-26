@@ -18,8 +18,8 @@
     "default",
     "active-eig",
     "full-eig",
-    "nystrom",
-    "rpcholesky"
+    "fourier-nystrom-precond",
+    "fourier-rpcholesky-precond"
   ],
   "score_tau": 1.0,
   "box_budget": 4096,

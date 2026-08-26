@@ -35,6 +35,10 @@ def _config_path() -> Path:
     )
 
 
+def _colab_config_path() -> Path:
+    return _config_path().with_name("colab_all_experiments_suite.json")
+
+
 def _set_metadata_path(metadata: dict, path: str, value: object) -> None:
     parent = metadata
     parts = path.split(".")
@@ -122,7 +126,12 @@ def test_three_dataset_profiles_use_exact_large_stems_without_replication(tmp_pa
     assert validation["geolife_n10000000"]["dataset_alias"] == "geolife_n10000000"
     assert configs["synthetic_n10000000"].n_train is None
     assert configs["usgs_n10000000"].precompute_chunk_size == 1_000_000
-    assert "rpcholesky" in configs["geolife_n10000000"].methods
+    assert configs["geolife_n10000000"].methods == (
+        "cg",
+        "jacobi",
+        "default",
+        "full-eig",
+    )
     assert configs["geolife_n10000000"].kernel_family == "se"
     assert configs["geolife_n10000000"].lengthscale == 0.02
     assert configs["synthetic_n10000000"].kernel_family == "matern"
@@ -131,6 +140,31 @@ def test_three_dataset_profiles_use_exact_large_stems_without_replication(tmp_pa
         case["id"] for case in suite["profiles"]["scale_100m"]["cases"]
     }
     assert scale_100m_ids == {"synthetic_n100000000", "usgs_n100000000"}
+
+
+def test_formal_colab_profiles_use_fixed_system_taxonomy() -> None:
+    suite = load_suite_config(_colab_config_path())
+    ambiguous = {"nystrom", "rpcholesky"}
+
+    assert tuple(suite["base"]["methods"]) == (
+        "cg",
+        "jacobi",
+        "default",
+        "full-eig",
+    )
+    for profile in suite["profiles"].values():
+        method_lists = [profile.get("overrides", {}).get("methods", ())]
+        method_lists.extend(case.get("methods", ()) for case in profile["cases"])
+        assert all(not (ambiguous & set(methods)) for methods in method_lists)
+
+    inverse_methods = set(
+        suite["profiles"]["fixed_system_inverse_control_n10m"]["overrides"][
+            "methods"
+        ]
+    )
+    assert {"active-inverse", "full-inverse", "active-eig", "full-eig"} <= (
+        inverse_methods
+    )
 
 
 def test_demo_profile_carries_synthetic_provenance(tmp_path) -> None:

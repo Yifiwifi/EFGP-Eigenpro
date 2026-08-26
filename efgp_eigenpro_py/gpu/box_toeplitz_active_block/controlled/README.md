@@ -1,4 +1,48 @@
-# Matched fixed-system experiments
+# Two-stage KRR and fixed-system experiments
+
+The experiment code deliberately separates two scientific questions.
+
+## Stage 1: complete KRR pipelines
+
+`end_to_end.py` compares data-space `nystrom-krr`, data-space
+`rpcholesky-krr`, complete standard-setup EFGP-CG/Jacobi/full-grid-EigenPro
+pipelines, and the proposed binned-setup pipeline. Every row pays for its own
+model setup and solve. The primary total is
+`train_total_seconds = setup_seconds + solving_phase_seconds`; prediction is
+reported separately. This is the method-owned algorithmic training total, not
+process wall clock: common dataset I/O, backend creation, and host-to-device
+staging are disclosed exclusions. A speedup is emitted only when every measured
+repeat passes both the paired full-eig-relative accuracy gate and the
+prospectively declared dataset-specific absolute RMSE/R2 gate.
+
+`end_to_end_suite.json` declares the 10M, 30M, 100M, and 300M scale matrix on
+Synthetic and Winnebago data. Exact RPCholesky keeps its published rank-by-N
+factor requirement: if that factor cannot fit, the row remains visible as
+`resource_limit` and is never replaced by a pilot-set approximation. The suite
+uses a frozen CG-iteration window and declared dataset tie priority to select
+the Stage-2 target. An RPCholesky `resource_limit` is a predeclared large-scale
+scalability outcome: it receives no timing/accuracy speedup, but it does not
+prevent selecting a fixed-Fourier solver target when all Nyström/EFGP rows and
+the proposed/full-eig accuracy gates succeed. Any other failed method still
+blocks selection. Only after `selected_target_regime.json` is written does it
+materialize the declared lambda, lengthscale, box-budget, and dataset checks,
+using the exact per-N Winnebago artifact. The command fails closed if no target
+satisfies that rule. It also refuses to select from a partial scale matrix:
+every declared case must exist, and its raw repeat file is revalidated before
+target selection or any downstream run begins.
+
+```bash
+python -m efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end_suite \
+  --dataset-dir /content/efgp_data \
+  --output-root /content/drive/MyDrive/EFGP_Colab/end_to_end_krr \
+  --run-robustness-after-selection
+```
+
+Do not append a shared Fourier setup time to the fixed-system results below
+and call the result an end-to-end Nystrom/RPCholesky KRR comparison. They are
+different algorithms and different protocols.
+
+## Stage 2: matched fixed-system experiments
 
 This folder answers one narrow question: how much does a preconditioner reduce
 the cost of solving one already constructed Fourier system? It does not compare
@@ -16,19 +60,44 @@ and zero initialization.
 The timed method unit is
 
 ```
-preconditioner construction + CG/PCG solve
+score selection (when used) + preconditioner construction + CG/PCG solve
 ```
 
-The common Fourier setup is reported once and excluded from the primary
-solver-only speedup. For `default`, the reported construction time also includes
-the score-box selection rule; explicitly requested sensitivity candidates do
-not pretend that an oracle search was free. The runner performs one warm-up by default, shuffles the
-method order independently in every round, synchronizes the whole CUDA device
-at all timing boundaries, and uses at least five measured repeats. The runner
-does not compute prediction or RMSE inside the timing harness; the separate
+This quantity is recorded canonically as `solver_total_seconds`; in outputs
+from the corrected runner, the older `build_plus_solve_seconds` field is an
+identical compatibility alias. The
+common Fourier setup is reported once and excluded from the primary
+fixed-system speedup. Every score-selected method (`default`,
+`active-inverse`, and `active-eig`) reruns and pays for its own score-box
+selection in every warm-up and measured invocation. Each repeated selection
+must reproduce the prospectively frozen box hash, rule, and effective rank.
+The runner performs one warm-up by default, shuffles the method order
+independently in every round, synchronizes the whole CUDA device at all timing
+boundaries, and uses at least five measured repeats. The runner does not compute
+prediction or RMSE inside the timing harness; the separate
 `prediction_audit.py` performs an explicitly untimed, chunked test-RMSE audit.
 True-residual recomputation, hashing, and post diagnostics are also outside the
 timed unit.
+
+The formal selected-target campaign writes `stage2_feasibility.json` before
+timing. CG, Jacobi, default, active-eig, and full-eig are mandatory.
+`active-inverse` is executed only when the frozen Stage-1 `box_budget` is no
+larger than the prospectively declared `inverse_max_size`; otherwise it is
+recorded as infeasible with a reason and is not allowed to abort the whole
+fixed-system case. The artifact is bound to all 15 system-building fields, not
+just dataset, N, and kernel parameters.
+
+The canonical reporter does not trust summary eligibility flags. It recomputes
+Stage-1 accuracy and timing eligibility from each case's `pipeline_runs.csv`,
+and Stage-2 convergence and totals from `matched_runs.csv`. For Stage 2 it also
+requires equal initial/final/per-repeat system IDs, verifies the saved timing
+system artifact and SHA-256, requires and rehashes its materialized
+weights/Gf/storage-RHS/solve-RHS arrays, and matches all embedded, nested, and
+external component hashes plus the canonical system-config hash to the frozen
+target. Every warm-up and measured row must also match the common configured
+tolerance and iteration limit and declare a zero initial vector. Formal plots
+are generated only from this repeat-recomputed output; an audit failure aborts
+before a headline artifact is written.
 
 Portable prepared-system artifacts preserve both the original system-build
 runtime and the current timing runtime. If a Colab resume loads an artifact on
@@ -66,7 +135,8 @@ given.
 - `active-eig`: the EigenPro preconditioner formula restricted to the fixed box.
 - `full-eig`: the same spectral formula with the box equal to the full Fourier
   grid. This is the direct ablation for strict localization.
-- `nystrom`: a Gaussian randomized Nyström preconditioner for the unregularized
+- `fourier-nystrom-precond`: an optional Gaussian randomized Nyström
+  preconditioner for the unregularized
   part `A - lambda I`, following the fixed-system access model of
   [Frangella--Tropp--Udell](https://tropp.caltech.edu/papers/FTU23-Randomized-Nystrom-SIMAX.pdf).
   All sketch products and factorization are charged to
@@ -74,7 +144,8 @@ given.
   Fourier-system adaptation of the real-symmetric construction. Timing repeats
   hold the sketch seed fixed; a publication stability check should repeat the
   experiment over at least five sketch seeds.
-- `rpcholesky`: simple randomized pivoted Cholesky (block size one) applied to
+- `fourier-rpcholesky-precond`: an optional simple randomized pivoted Cholesky
+  preconditioner (block size one) applied to
   the same Fourier-space positive-semidefinite part `A - lambda I`. It reads
   weighted-Toeplitz columns directly, stores a rank-`r` factor, and applies
   `(L L* + lambda I)^{-1}`. All pivoting, column gathers, factor updates, and
@@ -88,10 +159,20 @@ Fourier Gram matrix is Toeplitz, `A = D G D + lambda I` is generally not
 Toeplitz when `D` is nonconstant. A circulant baseline needs a separate SPD
 construction before it is a fair comparison.
 
-The published [RPCholesky KRR method](https://arxiv.org/abs/2304.12465) acts on
-the data-space kernel matrix. The `rpcholesky` row therefore carries the
-qualifier `Fourier-system adaptation`; it must not be reported as a direct run
-of the published \(N\)-dimensional solver.
+The two `fourier-*-precond` methods are exploratory Fourier-space
+preconditioners, not complete KRR algorithms and not formal defaults. The
+published [RPCholesky KRR method](https://arxiv.org/abs/2304.12465) acts on the
+data-space kernel matrix and belongs in the separate end-to-end KRR comparison.
+Archived outputs may retain the old ambiguous labels `nystrom` and
+`rpcholesky`; artifact readers can still audit those outputs, but new
+fixed-system configurations reject those names.
+
+The legacy base suite defaults to `cg,jacobi,default,full-eig`.  The corrected
+selected-target Stage-2 campaign instead requires
+`cg,jacobi,default,active-eig,full-eig`; it adds `active-inverse` only when the
+prospective box-budget feasibility rule permits it.  The older
+`fixed_system_inverse_control_n10m` profile remains an optional small-grid
+control and is not the formal selected-target result.
 
 The runner never selects the fastest measured configuration. Rows produced by
 `default` are marked `deployable_default`; explicitly requested active-box rows
@@ -144,9 +225,9 @@ python -m efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.benchmark `
   --dataset-stem GeoLife_Beijing_GPS_altitude_regression_ntrain100000 `
   --n-train 5000 --kernel se --lengthscale 0.02 `
   --lambda 0.1 --fourier-eps 1e-3 --tol 1e-7 --maxiter 6000 `
-  --methods cg,jacobi,default,active-eig,full-eig,nystrom,rpcholesky `
+  --methods cg,jacobi,default,active-eig,full-eig `
   --score-tau 1 --box-budget 4096 --inverse-max-size 256 `
-  --rank 32 --nystrom-rank 32 --rpcholesky-rank 32 --warmup-repeats 1 `
+  --rank 32 --warmup-repeats 1 `
   --measured-repeats 5 --post-diagnostic-mode full `
   --diagnostic-topk 64,256 --nufft-backend none
 ```
@@ -222,8 +303,9 @@ The road-network task was removed from the scale suite because it contains only
 347,899 training rows. MUR SST remains a separate negative control and is not a
 dataset alias or case in the main three-dataset profiles. Its fixed North
 Atlantic pilots did not pass the strict-box cold-time gate. Each ratio below is
-the paired median `reference build+solve / default build+solve`, so a value above
-one favors the strict default; common Fourier setup is excluded.
+the paired median `reference solver_total_seconds / default
+solver_total_seconds`, so a value above one favors the strict default; common
+Fourier setup is excluded.
 
 | frozen run | CG/default | full-eig/default | decision |
 |---|---:|---:|---|
@@ -323,11 +405,15 @@ The configuration bridge combines the restored Synthetic runs under
 under `outputs/original_data_n10m_matched_bridge_q128` and
 `outputs/original_data_n10m_se_full_inverse_control`. Matérn uses rank `q=128`
 and a fixed `|B|<=2601` cap; the separate SE full-inverse control uses the
-score-threshold box `|B|=841` on the `M=1225` grid. Entries below are median
-`build+solve` seconds followed by paired cold speedup over CG; all listed
+score-threshold box `|B|=841` on the `M=1225` grid. Entries below are legacy
+median `build+solve` seconds followed by paired cold speedup over CG; all listed
 preconditioned rows converged in all five repeats and won all five CG pairs.
+The explicit active rows predate the corrected rule that charges each active
+method for its own score-selection time, so this table is archival context
+rather than a formal `solver_total_seconds` comparison and must be rerun for a
+Stage-2 claim.
 
-| data/kernel | CG iter / solve | active inverse | active eig | full eig | Nyström | RPCholesky |
+| data/kernel | CG iter / solve | active inverse | active eig | full eig | Fourier Nyström precond | Fourier RPCholesky precond |
 |---|---:|---:|---:|---:|---:|---:|
 | Synthetic Matérn | 4246 / 8.657 | 2.514 / 3.464x | 2.465 / 3.522x | 3.144 / 2.754x | 4.515 / 1.931x | 4.480 / 1.957x |
 | USGS Matérn | 4905 / 10.158 | 5.667 / 1.793x | 4.622 / 2.198x | 1.846 / 5.528x | 2.380 / 4.278x | 2.148 / 4.714x |
@@ -342,8 +428,10 @@ The follow-up fixed-system control is stored under
 the archived task protocol, the squared-exponential
 kernel with `ell=lambda=0.1`, `M=1225`, fp64 arithmetic, one warm-up, and five
 shuffled measured repeats. The table reports medians from each case's
-`matched_summary.csv`; cold time is preconditioner build plus CG/PCG solve and
-excludes the one shared Fourier setup.
+`matched_summary.csv`; these archived cold times are preconditioner build plus
+CG/PCG solve and exclude both the one shared Fourier setup and the explicit
+active method's score-selection charge. Reruns use `solver_total_seconds` and
+include that selection charge.
 
 | data | method | box size | iterations | build (s) | solve (s) | cold build+solve (s) | cold speedup over CG |
 |---|---|---:|---:|---:|---:|---:|---:|
@@ -367,8 +455,9 @@ On Synthetic Matérn, active inverse uses fewer iterations (169 versus 733),
 but active eig has the lower cold time. On USGS Matérn, the archive's
 full-grid spectral preference survives the exact-system comparison. On the
 small SE grid, active inverse is the fastest proposed operation, but the fixed
-Nyström seed is faster on USGS; this is why the supplement reports strong
-baselines instead of only the proposed candidates. Jacobi is also retained:
+Fourier-Nyström-preconditioner seed is faster on USGS; this is why the archived
+supplement reports strong exploratory adapters instead of only the proposed
+candidates. Jacobi is also retained:
 it is slower than CG on both USGS systems, essentially tied on Synthetic SE,
 and 2.111x faster on Synthetic Matérn.
 
@@ -378,7 +467,8 @@ memory-capped box `|B|=8099`, `q=256`. Its six-method center runs are
 `outputs/integrated_usgs_n10000000_matern_q256_primary`. Default cold
 speedup is 3.881x on Synthetic and 3.238x on USGS, with 5/5 paired wins in
 both. It beats the same-rank full-grid correction on Synthetic, but not on
-USGS; RPCholesky is the fastest USGS cold-start row at 3.827x. The capped box
+USGS; the Fourier-RPCholesky preconditioner is the fastest archived USGS
+cold-start row at 3.827x. The capped box
 stores 64.6 MiB versus 282.3 MiB for full eig. It captures 99.9991% and
 98.6404% of same-rank full-grid leverage on Synthetic and USGS, respectively.
 
@@ -465,7 +555,8 @@ separate peak-memory profiler if that quantity is needed in a paper table.
 The main cold speedup is paired by repeat:
 
 ```
-CG solve / (preconditioner build + PCG solve).
+CG solver total / candidate solver total,
+where solver total = score selection + preconditioner build + CG/PCG solve.
 ```
 
 The reuse speedup excludes construction. `break_even_rhs` reports how many

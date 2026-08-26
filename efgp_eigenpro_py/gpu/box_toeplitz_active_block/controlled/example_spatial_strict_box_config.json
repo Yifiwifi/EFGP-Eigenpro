@@ -12,7 +12,14 @@
   "tol": 1e-7,
   "maxiter": 6000,
   "precision": "fp64",
-  "methods": ["cg", "jacobi", "default", "full-eig", "nystrom", "rpcholesky"],
+  "methods": [
+    "cg",
+    "jacobi",
+    "default",
+    "full-eig",
+    "fourier-nystrom-precond",
+    "fourier-rpcholesky-precond"
+  ],
   "score_tau": 1.0,
   "box_budget": 8192,
   "inverse_max_size": 1024,

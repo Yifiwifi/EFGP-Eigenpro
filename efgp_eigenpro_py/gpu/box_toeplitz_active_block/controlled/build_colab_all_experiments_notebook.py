@@ -45,17 +45,18 @@ def build_notebook() -> dict:
             r"""
             # EFGP / Active-Box 全实验 Colab 总控（10M–300M）
 
-            本 notebook 把原有实验和新增实验放在同一入口中，但保留三条**不可混表计时**的证据链：
+            本 notebook 的正式一键流程严格分成两个阶段；历史实验只保留为可选入口，**禁止跨阶段混表或混图**：
 
             | protocol | 内容 | 可以说明什么 |
             |---|---|---|
+            | `end_to_end_krr`（Stage 1） | true data-space Nyström/RPCholesky、标准 EFGP-CG/Jacobi/full-eig、以及 proposed binned full pipeline | 完整 KRR 的精度、setup、solving 和 train-total；10M–300M 规模性与 robustness |
+            | `controlled_fixed_system`（Stage 2） | Stage 1 冻结选出的 target 上，所有 solver/preconditioner 共享同一个哈希 (A\beta=b) | solver-total = selection + preconditioner build + solve 的严格配对比较 |
             | `archived_complete_pipeline` | 原 `group_a/group_b/group_c`，direct CG 与 binned-C1 candidates，含 setup/solve/prediction | 原论文探索性规模图与候选筛选 |
-            | `controlled_fixed_system` | 所有方法共享同一个哈希 (A\beta=b)，1 warm-up + 5 paired repeats | 方法间严格配对加速、构造/求解/存储权衡 |
             | `prediction_audit` | 读取 timed system 与保存的 canonical timed \(\beta\)，仅计算 test RMSE | 同一计时解的预测等价性；其中 prediction 时间不进入 speedup claim |
 
-            使用方式：选择 Colab 的 **A100 GPU + High-RAM** runtime，然后点击 **运行时 → 全部运行**。默认的 `RUN_ALL_FORMAL_EXPERIMENTS=True` 会自动完成 smoke、10M 主实验、prediction audit、OAT、box-budget 消融、Synthetic nested-prefix 10M–300M，以及 Winnebago archived-exact 10M–300M。每个规模是独立 job；失败会结构化记录并隔离，不会用 `CalledProcessError` 阻断后续实验。
+            使用方式：选择 Colab 的 **A100 GPU + High-RAM** runtime，然后点击 **运行时 → 全部运行**。默认的 `RUN_ALL_FORMAL_EXPERIMENTS=True` 先运行 Stage 1 的 10M/30M/100M/300M 完整 KRR 比较与 accuracy gate，再按预注册规则选出 target；只有 target 成功冻结后才生成 \(\lambda\)、\(\ell\)、box budget、dataset robustness，并进入 Stage 2 的 fixed-\(A,b\) solver comparison。资源不足或没有合格 target 时 fail closed，不会事后挑选替代点。
 
-            参考并保留了 `boxeig_inverse_diagnostics_experiment.ipynb` 中最关键的 direct/binned precompute policy；统一结果区重新整理 legacy、controlled 和 audit 三种 schema。
+            `nystrom-krr` 与 `rpcholesky-krr` 只出现在 Stage 1；Fourier-space randomized preconditioner adaptations 不得以 Nyström/RPCholesky KRR 的名字进入正式图。参考 notebook 的 legacy 路线默认关闭。
             """
         )
     )
@@ -81,6 +82,23 @@ def build_notebook() -> dict:
             RUN_ALL_FORMAL_EXPERIMENTS = True
             FORMAL_SCALE_SIZES = [10_000_000, 30_000_000, 100_000_000, 300_000_000]
 
+            # 正式证据链：Stage 1 完整 KRR，Stage 2 固定 A,b solver/preconditioner。
+            RUN_STAGE1_END_TO_END_KRR = RUN_ALL_FORMAL_EXPERIMENTS
+            RUN_STAGE1_ROBUSTNESS = RUN_ALL_FORMAL_EXPERIMENTS
+            RUN_STAGE2_FIXED_AB_SOLVERS = RUN_ALL_FORMAL_EXPERIMENTS
+            STAGE1_SCALE_PROFILE = "scale_10m_300m"
+            STAGE1_METHODS = [
+                "nystrom-krr", "rpcholesky-krr", "efgp-standard-cg",
+                "efgp-standard-jacobi", "efgp-standard-full-eig",
+                "ours-binned-default",
+            ]
+            STAGE2_METHODS = [
+                "cg", "jacobi", "default", "active-inverse", "active-eig", "full-eig",
+            ]
+            STAGE2_MANDATORY_METHODS = [
+                "cg", "jacobi", "default", "active-eig", "full-eig",
+            ]
+
             # 从 drive_manifest.json 自动选择正式 campaign 所需数据。
             DATA_BUNDLES = []
             CACHE_DATA_LOCALLY = True       # 正式计时推荐 True，避免 Drive FUSE 进入 timing
@@ -92,12 +110,12 @@ def build_notebook() -> dict:
             # 下列变量由一键模式统一设定；False 时仍可作为 advanced/manual 模式使用。
             RUN_PLUMBING_SMOKE = RUN_ALL_FORMAL_EXPERIMENTS
             RUN_CG_SCREEN_10M = False
-            RUN_Q256_CENTER_10M = RUN_ALL_FORMAL_EXPERIMENTS
-            RUN_BOX_BUDGET_ABLATION = RUN_ALL_FORMAL_EXPERIMENTS
-            RUN_ARCHIVED_EXACT_SCALE = RUN_ALL_FORMAL_EXPERIMENTS
-            RUN_DEVELOPMENT_MASTER_SCALE = RUN_ALL_FORMAL_EXPERIMENTS
+            RUN_Q256_CENTER_10M = False
+            RUN_BOX_BUDGET_ABLATION = False
+            RUN_ARCHIVED_EXACT_SCALE = False
+            RUN_DEVELOPMENT_MASTER_SCALE = False
             RUN_MANITOWOC_SCALE = False
-            RUN_WINNEBAGO_OAT_10M = RUN_ALL_FORMAL_EXPERIMENTS
+            RUN_WINNEBAGO_OAT_10M = False
             RUN_Q128_BRIDGE = False
             RUN_SE_FULL_INVERSE_CONTROL = False
             RUN_PREDICTION_AUDIT = RUN_ALL_FORMAL_EXPERIMENTS
@@ -106,7 +124,7 @@ def build_notebook() -> dict:
             ALLOW_100M = RUN_ALL_FORMAL_EXPERIMENTS
             ALLOW_300M = RUN_ALL_FORMAL_EXPERIMENTS
             PREDICTION_AUDIT_MAX_TEST_N = 2_500_000
-            PREDICTION_AUDIT_PROFILES = ["paper_10m", "scale_development_masters"]
+            PREDICTION_AUDIT_PROFILES = ["fixed_ab_selected_target"]
 
             # 一键模式中的 profile 级数据族过滤。尤其禁止把已知失败的
             # Winnebago raw-prefix development cases 混入 Synthetic scale job。
@@ -124,6 +142,9 @@ def build_notebook() -> dict:
             SYNC_GENERATED_DATA_TO_DRIVE = False
 
             required_bundles = []
+            if RUN_STAGE1_END_TO_END_KRR:
+                # Synthetic 300M nested master + Winnebago 10/30/100/300M exact artifacts.
+                required_bundles.extend(["development_scale_masters", "archived_exact_available"])
             if RUN_LEGACY_GROUPS:
                 required_bundles.append("legacy_named_route_inputs")
             if RUN_ARCHIVED_EXACT_SCALE:
@@ -790,17 +811,707 @@ def build_notebook() -> dict:
     cells.append(
         _markdown(
             r"""
-            # B. 新增 controlled fixed-system 实验
+            # Stage 1 — true end-to-end KRR（正式主结果）
 
-            每个 case 在单一 invocation 中构造一个不可变系统，所有方法共享系统哈希；每次从零初值开始，1 次预热后做 5 次随机顺序配对。Scale master 使用 `subset_mode='prefix'`：10M/30M/100M/300M 是同一 300M master 的严格行前缀。
+            本阶段比较的是**完整 KRR pipeline**，不是同一 Fourier 系统上的 preconditioner：`nystrom-krr`、`rpcholesky-krr`、`efgp-standard-cg`、`efgp-standard-jacobi`、`efgp-standard-full-eig`、`ours-binned-default` 各自承担自己的 setup 与 solve。正式计时字段固定为：
 
-            - `screen_10m`：CG-only difficulty gate，与正式表分开。
-            - `paper_10m`：archived Synthetic、Winnebago、Manitowoc 三个 10M q256 center。
-            - `winnebago_box_budget_n10m`：同一 10M Winnebago 系统上的 4096/8192/16384 memory-budget 消融。
-            - `scale_archived_exact`：一键模式只选择 Winnebago 原数据定义的 exact artifacts；不同 N 不宣称嵌套。
-            - `scale_development_masters`：一键模式只选择 low-noise Synthetic 的同一 300M master 前缀；已知失败的 Winnebago raw-prefix 不进入正式规模任务。
-            - `scale_manitowoc_master`：需先准备 Manitowoc 300M master。
-            - `winnebago_oat_n10m`：只改变一个 λ 或 ℓ，并配对比较 CG/default/full-eig。
+            - `setup_seconds`：数据空间 landmarks / RPCholesky factor 或 EFGP Fourier/precompute setup；
+            - `solving_phase_seconds`：solver build + iterative solve；
+            - `train_total_seconds = setup_seconds + solving_phase_seconds`；
+            - prediction 单列，只用于 accuracy gate，不并入训练加速。
+
+            首先运行 `end_to_end_suite.json::scale_10m_300m`。target 选择规则在看结果前冻结：六方法行必须全部存在，Nyström/EFGP 必须成功；RPCholesky 的预声明显存 `resource_limit` 可以作为真实 scalability outcome 保留，但不能获得 speedup，也不阻断后续 solver target。ours/full-eig 必须通过每个 repeat 的相对与绝对 accuracy gate，standard EFGP-CG median iterations 位于 3000–6000，随后取其中最大的 N；同 N 按 suite 中预先声明的 `dataset_priority` 决定。没有合格 case 时 fail closed，Stage 1 robustness 与 Stage 2 均不启动。
+            """
+        )
+    )
+    cells.append(
+        _code(
+            r"""
+            from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled import (
+                end_to_end_suite as stage1_suite,
+            )
+            from dataclasses import asdict
+
+            STAGE1_SUITE_CONFIG = (
+                LOCAL_REPO
+                / "efgp_eigenpro_py/gpu/box_toeplitz_active_block/controlled/end_to_end_suite.json"
+            )
+            STAGE1_OUTPUT_ROOT = DRIVE_RUN_ROOT / "stage1_end_to_end_krr"
+            STAGE1_RUNTIME_CONFIG_ROOT = DRIVE_RUN_ROOT / "runtime_configs" / "stage1"
+            STAGE1_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+            STAGE1_RUNTIME_CONFIG_ROOT.mkdir(parents=True, exist_ok=True)
+            STAGE1_TARGET_PATH = STAGE1_OUTPUT_ROOT / "selected_target_regime.json"
+            STAGE1_TARGET_REJECTIONS_PATH = (
+                STAGE1_OUTPUT_ROOT / "target_regime_rejections.json"
+            )
+            stage1_config = stage1_suite.load_suite_config(STAGE1_SUITE_CONFIG)
+            if list(stage1_config["base"].get("methods", [])) != list(STAGE1_METHODS):
+                raise RuntimeError(
+                    "Stage-1 suite method order differs from the frozen true-KRR method list."
+                )
+
+            stage1_scale_plan = stage1_suite.build_profile_plan(
+                stage1_config,
+                STAGE1_SCALE_PROFILE,
+                dataset_dir=str(LOCAL_DATA_DIR),
+                output_root=STAGE1_OUTPUT_ROOT,
+            )
+            planned_scale_sizes = sorted({int(item["config"].n_train) for item in stage1_scale_plan})
+            if planned_scale_sizes != list(FORMAL_SCALE_SIZES):
+                raise RuntimeError(
+                    f"Stage-1 scale sizes {planned_scale_sizes} != frozen {FORMAL_SCALE_SIZES}."
+                )
+
+            stage1_campaign_rows = []
+            stage1_selected_case_records = []
+
+            def normalize_stage1_config_value(value):
+                if isinstance(value, Path):
+                    return str(value)
+                if isinstance(value, dict):
+                    return {
+                        str(key): normalize_stage1_config_value(item)
+                        for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+                    }
+                if isinstance(value, (list, tuple)):
+                    return [normalize_stage1_config_value(item) for item in value]
+                return value
+
+            def declared_stage1_dataset_family(item):
+                declared = item.get("dataset_family")
+                if declared:
+                    return str(declared)
+                stem = str(item["config"].dataset_stem)
+                lower = stem.lower()
+                if "synthetic_true_func_2d" in lower:
+                    return "Synthetic"
+                if "winnebago" in lower:
+                    return "Winnebago"
+                if "usgs_ept_wi_2county_1_b23" in lower:
+                    return "Manitowoc"
+                raise RuntimeError(
+                    f"Stage-1 dataset family is undeclared for {stem!r}; refusing inference-free reporting."
+                )
+
+            def load_matching_stage1_artifact(item):
+                run_dir = Path(item["config"].output_dir)
+                completion_path = run_dir / "run_complete.json"
+                summary_path = run_dir / "pipeline_summary.csv"
+                config_path = run_dir / "experiment_config.json"
+                runs_path = run_dir / "pipeline_runs.csv"
+                if not (
+                    completion_path.is_file()
+                    and summary_path.is_file()
+                    and config_path.is_file()
+                    and runs_path.is_file()
+                ):
+                    return None
+                try:
+                    completion = json.loads(completion_path.read_text(encoding="utf-8"))
+                    saved_config = json.loads(config_path.read_text(encoding="utf-8"))
+                    summary = pd.read_csv(summary_path)
+                except (OSError, json.JSONDecodeError, ValueError, pd.errors.ParserError):
+                    return None
+                expected_config = normalize_stage1_config_value(asdict(item["config"]))
+                observed_config = normalize_stage1_config_value(saved_config)
+                required_summary_columns = {
+                    *stage1_suite.STAGE2_SYSTEM_CONFIG_FIELDS,
+                    "accuracy_relative_tolerance",
+                    "accuracy_max_rmse",
+                    "accuracy_min_r2",
+                    "expected_measured_repeats",
+                    "accuracy_evaluated_repeats",
+                    "accuracy_passed_repeats",
+                    "setup_seconds_at_median_total",
+                    "solving_phase_seconds_at_median_total",
+                }
+                artifact_matches = bool(
+                    completion.get("protocol_family") == "end_to_end_krr"
+                    and completion.get("timing_scope") == stage1_suite.TIMING_SCOPE
+                    and completion.get("artifact_complete") is True
+                    and completion.get("all_rows_present") is True
+                    and list(completion.get("methods", [])) == list(STAGE1_METHODS)
+                    and list(saved_config.get("methods", [])) == list(STAGE1_METHODS)
+                    and observed_config == expected_config
+                    and required_summary_columns.issubset(summary.columns)
+                    and set(summary.get("method", pd.Series(dtype=str)).astype(str))
+                    == set(STAGE1_METHODS)
+                )
+                return completion if artifact_matches else None
+
+            def stage1_completion_is_reusable(item):
+                completion = load_matching_stage1_artifact(item)
+                return bool(
+                    completion is not None
+                    and not completion.get("error_methods")
+                    and completion.get("formal_result_status") in {
+                        "claim_eligible_complete",
+                        "complete_with_resource_limits",
+                        "complete_with_accuracy_ineligible_methods",
+                    }
+                    and "proposed_performance_claim_eligible" in completion
+                )
+
+            def run_stage1_items(items, *, profile_label):
+                completed_items = []
+                for item in items:
+                    started = time.perf_counter()
+                    run_dir = Path(item["config"].output_dir)
+                    if (
+                        int(item["config"].n_train) >= 300_000_000
+                        and not bool(globals().get("CAN_RUN_300M", False))
+                    ):
+                        record = {
+                            "profile": profile_label,
+                            "case_id": item["case_id"],
+                            "dataset_family": declared_stage1_dataset_family(item),
+                            "robustness_axes": item.get("robustness_axes", []),
+                            "run_dir": run_dir,
+                        }
+                        stage1_selected_case_records.append(record)
+                        stage1_campaign_rows.append({
+                            "job_id": f"stage1_{profile_label}_{item['case_id']}",
+                            "profile": profile_label,
+                            "dataset_family": declared_stage1_dataset_family(item),
+                            "n_train": int(item["config"].n_train),
+                            "mandatory": True,
+                            "status": "SKIPPED_HARDWARE",
+                            "reason": "300M hardware preflight failed",
+                            "artifact_complete": False,
+                            "scientific_eligible": False,
+                            "ineligible_methods": "",
+                            "resource_limit_methods": "",
+                            "error_methods": "",
+                            "case_count": 0,
+                            "elapsed_seconds": time.perf_counter() - started,
+                            "invocation_mode": "skipped",
+                            "resumed_case_count": 0,
+                            "executed_case_count": 0,
+                        })
+                        print(f"[Stage 1/{item['case_id']}] SKIPPED_HARDWARE")
+                        continue
+                    reused = stage1_completion_is_reusable(item)
+                    status = "execution_error"
+                    reason = ""
+                    artifact_complete = False
+                    scientific_eligible = False
+                    ineligible_methods = []
+                    resource_limit_methods = []
+                    error_methods = []
+                    try:
+                        if not reused:
+                            runtime_base = asdict(item["config"])
+                            runtime_base.pop("dataset_dir", None)
+                            runtime_base.pop("output_dir", None)
+                            runtime_payload = {
+                                "schema_version": stage1_config.get("schema_version", 1),
+                                "protocol_family": "end_to_end_krr",
+                                "base": runtime_base,
+                                "profiles": {
+                                    profile_label: {
+                                        "cases": [{
+                                            "id": item["case_id"],
+                                            "dataset_family": declared_stage1_dataset_family(item),
+                                        }]
+                                    }
+                                },
+                            }
+                            runtime_path = (
+                                STAGE1_RUNTIME_CONFIG_ROOT
+                                / f"{profile_label}_{item['case_id']}.json"
+                            )
+                            runtime_path.write_text(
+                                json.dumps(runtime_payload, indent=2), encoding="utf-8"
+                            )
+                            completed = run_cmd([
+                                sys.executable, "-m",
+                                "efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end_suite",
+                                "--suite-config", str(runtime_path),
+                                "--profile", profile_label,
+                                "--dataset-dir", str(LOCAL_DATA_DIR),
+                                "--output-root", str(STAGE1_OUTPUT_ROOT),
+                                "--no-resume",
+                            ], cwd=LOCAL_REPO, check=False)
+                            if int(completed.returncode) != 0:
+                                raise RuntimeError(
+                                    f"end_to_end_suite exited with code {completed.returncode}"
+                                )
+                        completion_payload = load_matching_stage1_artifact(item)
+                        if completion_payload is None:
+                            raise RuntimeError("complete Stage-1 artifact set was not produced")
+                        artifact_complete = True
+                        completed_items.append(item)
+                        status = str(completion_payload["formal_result_status"])
+                        resource_limit_methods = [
+                            str(method)
+                            for method in completion_payload.get("resource_limit_methods", [])
+                        ]
+                        error_methods = [
+                            str(method)
+                            for method in completion_payload.get("error_methods", [])
+                        ]
+                        ineligible_methods = [
+                            str(method)
+                            for method in completion_payload.get(
+                                "performance_ineligible_methods", []
+                            )
+                        ]
+                        scientific_eligible = bool(
+                            not error_methods
+                            and status in {
+                                "claim_eligible_complete",
+                                "complete_with_resource_limits",
+                                "complete_with_accuracy_ineligible_methods",
+                            }
+                        )
+                        if resource_limit_methods:
+                            reason = "declared resource-limit methods: " + ",".join(
+                                resource_limit_methods
+                            )
+                        elif ineligible_methods:
+                            reason = "performance-ineligible methods: " + ",".join(
+                                ineligible_methods
+                            )
+                    except Exception as exc:
+                        status = "execution_error"
+                        reason = f"{type(exc).__name__}: {exc}"
+                    elapsed = time.perf_counter() - started
+                    record = {
+                        "profile": profile_label,
+                        "case_id": item["case_id"],
+                        "dataset_family": declared_stage1_dataset_family(item),
+                        "robustness_axes": item.get("robustness_axes", []),
+                        "run_dir": run_dir,
+                    }
+                    stage1_selected_case_records.append(record)
+                    stage1_campaign_rows.append({
+                        "job_id": f"stage1_{profile_label}_{item['case_id']}",
+                        "profile": profile_label,
+                        "dataset_family": declared_stage1_dataset_family(item),
+                        "n_train": int(item["config"].n_train),
+                        "mandatory": True,
+                        "status": status,
+                        "reason": reason,
+                        "artifact_complete": artifact_complete,
+                        "scientific_eligible": scientific_eligible,
+                        "ineligible_methods": ",".join(ineligible_methods),
+                        "resource_limit_methods": ",".join(resource_limit_methods),
+                        "error_methods": ",".join(error_methods),
+                        "case_count": 1,
+                        "elapsed_seconds": elapsed,
+                        "invocation_mode": "resumed_existing" if reused else "executed",
+                        "resumed_case_count": int(reused),
+                        "executed_case_count": int(not reused),
+                    })
+                    print(f"[Stage 1/{item['case_id']}] {status}: {reason or ('resumed' if reused else 'executed')}")
+                return completed_items
+
+            completed_stage1_scale_items = []
+            if RUN_STAGE1_END_TO_END_KRR:
+                completed_stage1_scale_items = run_stage1_items(
+                    stage1_scale_plan, profile_label=STAGE1_SCALE_PROFILE
+                )
+            else:
+                print("Stage 1 scale disabled in manual mode.")
+
+            def collect_stage1_summaries(items):
+                frames = []
+                for item in items:
+                    run_dir = Path(item["config"].output_dir)
+                    path = run_dir / "pipeline_summary.csv"
+                    if not path.is_file():
+                        continue
+                    frame = pd.read_csv(path)
+                    cfg = item["config"]
+                    frame["suite_profile"] = item["profile"]
+                    frame["case_id"] = item["case_id"]
+                    frame["declared_dataset_family"] = declared_stage1_dataset_family(item)
+                    frame["dataset_family"] = declared_stage1_dataset_family(item)
+                    robustness_axes = list(item.get("robustness_axes", []))
+                    frame["robustness_axes"] = json.dumps(
+                        robustness_axes, ensure_ascii=False
+                    )
+                    # Enriched campaign identity is authoritative for reporting;
+                    # raw per-case summaries do not carry all profile/target fields.
+                    frame["dataset_stem"] = cfg.dataset_stem
+                    frame["n_train"] = int(cfg.n_train)
+                    frame["kernel_family"] = cfg.kernel_family
+                    frame["nu"] = float(cfg.nu)
+                    frame["reg_lambda"] = float(cfg.reg_lambda)
+                    frame["lengthscale"] = float(cfg.lengthscale)
+                    frame["fourier_eps"] = float(cfg.fourier_eps)
+                    frame["box_budget"] = int(cfg.box_budget)
+                    frame["run_dir"] = str(run_dir)
+                    frames.append(frame)
+                return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+
+            stage1_scale_summary = collect_stage1_summaries(completed_stage1_scale_items)
+            STAGE1_SCALE_SUMMARY_PATH = STAGE1_OUTPUT_ROOT / "stage1_scale_summary.csv"
+            stage1_scale_summary.to_csv(STAGE1_SCALE_SUMMARY_PATH, index=False)
+
+            # Fail closed before target selection.  Presence of a summary file is
+            # not evidence completeness: the canonical loader replays every raw
+            # repeat, checks exact six-method/1+5 coverage, and recomputes all
+            # timing and accuracy eligibility fields.
+            from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled import (
+                two_stage_reporting as canonical_reporting,
+            )
+            stage1_scale_verified_rows = []
+            stage1_scale_verified = pd.DataFrame()
+            if RUN_STAGE1_END_TO_END_KRR:
+                if len(completed_stage1_scale_items) != len(stage1_scale_plan):
+                    missing_scale_cases = sorted(
+                        {item["case_id"] for item in stage1_scale_plan}
+                        - {item["case_id"] for item in completed_stage1_scale_items}
+                    )
+                    raise RuntimeError(
+                        "Stage-1 scale campaign is incomplete; refusing target "
+                        f"selection and Stage 2. Missing={missing_scale_cases}"
+                    )
+                stage1_scale_verified_rows = canonical_reporting.load_stage1_summaries(
+                    (STAGE1_SCALE_SUMMARY_PATH,)
+                )
+                stage1_scale_verified = pd.DataFrame(stage1_scale_verified_rows)
+
+            END_TO_END_TARGET = None
+            target_selection_error = ""
+            if RUN_STAGE1_END_TO_END_KRR and stage1_scale_verified_rows:
+                selection = stage1_config["target_selection"]
+                try:
+                    END_TO_END_TARGET = stage1_suite.select_target_regime(
+                        stage1_scale_verified_rows,
+                        required_methods=STAGE1_METHODS,
+                        cg_iteration_min=int(selection["cg_iteration_min"]),
+                        cg_iteration_max=int(selection["cg_iteration_max"]),
+                        dataset_priority=selection.get("dataset_priority", ()),
+                        allowed_resource_limit_methods=selection.get(
+                            "allowed_resource_limit_methods", ("rpcholesky-krr",)
+                        ),
+                    )
+                except RuntimeError as exc:
+                    target_selection_error = str(exc)
+                    rejection_payload = {
+                        "status": "NO_ELIGIBLE_TARGET_FAIL_CLOSED",
+                        "selection_rule": selection["rule"],
+                        "error": target_selection_error,
+                        "rejections": getattr(exc, "rejections", []),
+                        "scale_summary_csv": str(STAGE1_SCALE_SUMMARY_PATH),
+                    }
+                    STAGE1_TARGET_REJECTIONS_PATH.write_text(
+                        json.dumps(rejection_payload, indent=2), encoding="utf-8"
+                    )
+                    print(target_selection_error)
+                else:
+                    canonical_reporting._validate_stage1_scale_design(
+                        stage1_scale_verified_rows,
+                        END_TO_END_TARGET,
+                        stage1_config,
+                    )
+                    STAGE1_TARGET_PATH.write_text(
+                        json.dumps(END_TO_END_TARGET, indent=2), encoding="utf-8"
+                    )
+                    print("Frozen Stage-1 target:", END_TO_END_TARGET)
+
+            stage1_robustness_plan = []
+            completed_stage1_robustness_items = []
+            if RUN_STAGE1_ROBUSTNESS and END_TO_END_TARGET is not None:
+                stage1_robustness_plan = stage1_suite.materialize_robustness_plan(
+                    stage1_config,
+                    END_TO_END_TARGET,
+                    dataset_dir=str(LOCAL_DATA_DIR),
+                    output_root=STAGE1_OUTPUT_ROOT,
+                )
+                completed_stage1_robustness_items = run_stage1_items(
+                    stage1_robustness_plan,
+                    profile_label="robustness_at_selected_target",
+                )
+            elif RUN_STAGE1_ROBUSTNESS:
+                print("Stage 1 robustness skipped: frozen target is unavailable.")
+
+            stage1_robustness_summary = collect_stage1_summaries(
+                completed_stage1_robustness_items
+            )
+            STAGE1_ROBUSTNESS_SUMMARY_PATH = (
+                STAGE1_OUTPUT_ROOT / "stage1_robustness_summary.csv"
+            )
+            stage1_robustness_summary.to_csv(
+                STAGE1_ROBUSTNESS_SUMMARY_PATH, index=False
+            )
+            stage1_robustness_verified_rows = []
+            stage1_robustness_verified = pd.DataFrame()
+            if RUN_STAGE1_ROBUSTNESS and END_TO_END_TARGET is not None:
+                if len(completed_stage1_robustness_items) != len(stage1_robustness_plan):
+                    missing_robustness_cases = sorted(
+                        {item["case_id"] for item in stage1_robustness_plan}
+                        - {item["case_id"] for item in completed_stage1_robustness_items}
+                    )
+                    raise RuntimeError(
+                        "Stage-1 robustness campaign is incomplete; refusing Stage 2. "
+                        f"Missing={missing_robustness_cases}"
+                    )
+                stage1_robustness_verified_rows = (
+                    canonical_reporting.load_stage1_summaries(
+                        (STAGE1_ROBUSTNESS_SUMMARY_PATH,)
+                    )
+                )
+                stage1_robustness_verified = pd.DataFrame(
+                    stage1_robustness_verified_rows
+                )
+                _, stage1_robustness_design_claims = (
+                    canonical_reporting.build_stage1_robustness(
+                        stage1_robustness_verified_rows,
+                        END_TO_END_TARGET,
+                        stage1_config,
+                    )
+                )
+                design_claim = next(
+                    claim for claim in stage1_robustness_design_claims
+                    if claim["claim_id"] == "stage1_robustness_oat_design_complete"
+                )
+                if design_claim["status"] != "supported":
+                    raise RuntimeError(
+                        "Stage-1 robustness OAT design failed canonical validation; "
+                        "refusing Stage 2."
+                    )
+            stage1_case_index = pd.DataFrame([
+                {
+                    **{key: value for key, value in record.items() if key != "run_dir"},
+                    "run_dir": str(record["run_dir"]),
+                }
+                for record in stage1_selected_case_records
+            ])
+            STAGE1_CASE_INDEX_PATH = STAGE1_OUTPUT_ROOT / "stage1_case_index.csv"
+            stage1_case_index.to_csv(STAGE1_CASE_INDEX_PATH, index=False)
+            STAGE1_CASE_INDEX_PATH.with_suffix(".json").write_text(
+                json.dumps(stage1_case_index.to_dict(orient="records"), indent=2),
+                encoding="utf-8",
+            )
+            """
+        )
+    )
+    cells.append(
+        _markdown(
+            r"""
+            ## Stage 1 报告：accuracy gate、setup / solving、train total、robustness
+
+            下格只读取 `stage1_end_to_end_krr`，并对 method/protocol 做 allow-list 校验。正式 train-total 图仅绘制通过 accuracy gate 的完整 KRR 行；失败或 resource-limit 行仍保留在 CSV 中，不用 pilot/subsample 结果替代。Stage 2 的 fixed-system 数据不会进入这些图。
+            """
+        )
+    )
+    cells.append(
+        _code(
+            r"""
+            import matplotlib.pyplot as plt
+            import numpy as np
+
+            STAGE1_METHOD_ORDER = list(STAGE1_METHODS)
+            STAGE1_GENERATED_PLOT_PATHS = []
+            if not stage1_scale_verified.empty:
+                observed_protocols = set(stage1_scale_verified["protocol_family"].astype(str))
+                observed_methods = set(stage1_scale_verified["method"].astype(str))
+                if observed_protocols != {"end_to_end_krr"}:
+                    raise RuntimeError(f"Stage-1 report saw mixed protocols: {observed_protocols}")
+                if not observed_methods.issubset(set(STAGE1_METHOD_ORDER)):
+                    raise RuntimeError(
+                        f"Stage-1 report saw non-KRR methods: {sorted(observed_methods - set(STAGE1_METHOD_ORDER))}"
+                    )
+
+                # Plot only canonical values recomputed from pipeline_runs.csv;
+                # never trust persisted derived speedup/reference columns.
+                scale = stage1_scale_verified.copy()
+                scale["dataset_family"] = scale["dataset"].astype(str)
+                scale["N"] = pd.to_numeric(scale["n_train"], errors="coerce")
+                for column in (
+                    "train_total_seconds", "setup_seconds",
+                    "solving_phase_seconds", "test_rmse", "test_r2",
+                    "speedup_vs_ours",
+                ):
+                    scale[column] = pd.to_numeric(scale[column], errors="coerce")
+                claim_mask = (
+                    scale["status"].astype(str).eq("ok")
+                    & scale["speedup_claim_eligible"].astype(str).str.lower().eq("true")
+                )
+                claim_scale = scale.loc[claim_mask].copy()
+
+                families = list(dict.fromkeys(scale["dataset_family"].dropna().astype(str)))
+                fig, axes = plt.subplots(
+                    1, max(len(families), 1), figsize=(7 * max(len(families), 1), 5),
+                    squeeze=False,
+                )
+                for axis, family in zip(axes.ravel(), families):
+                    family_rows = claim_scale.loc[claim_scale["dataset_family"].eq(family)]
+                    for method in STAGE1_METHOD_ORDER:
+                        rows = family_rows.loc[family_rows["method"].eq(method)].sort_values("N")
+                        if rows.empty:
+                            continue
+                        axis.plot(
+                            rows["N"], rows["train_total_seconds"],
+                            marker="o", label=method,
+                        )
+                    axis.set_xscale("log")
+                    axis.set_yscale("log")
+                    axis.set_title(f"{family}: accuracy-eligible complete KRR")
+                    axis.set_xlabel("training samples N")
+                    axis.set_ylabel("train total (setup + solving), seconds")
+                    axis.grid(True, which="both", alpha=0.25)
+                if families:
+                    axes.ravel()[0].legend(fontsize=8)
+                fig.tight_layout()
+                total_plot = DRIVE_RUN_ROOT / "stage1_krr_train_total_10m_300m.png"
+                fig.savefig(total_plot, dpi=180, bbox_inches="tight")
+                STAGE1_GENERATED_PLOT_PATHS.append(total_plot)
+                plt.show()
+                plt.close(fig)
+
+                reference_rmse = scale.loc[
+                    scale["method"].eq("efgp-standard-full-eig"),
+                    ["case_id", "test_rmse"],
+                ].rename(columns={"test_rmse": "recomputed_reference_rmse"})
+                if reference_rmse["case_id"].duplicated().any():
+                    raise RuntimeError("duplicate full-eig accuracy references")
+                scale = scale.merge(reference_rmse, on="case_id", how="left", validate="many_to_one")
+                scale["rmse_ratio_to_full_eig"] = (
+                    scale["test_rmse"] / scale["recomputed_reference_rmse"]
+                )
+                ours_components = scale.loc[
+                    scale["method"].eq("ours-binned-default"),
+                    ["case_id", "setup_seconds", "solving_phase_seconds", "train_total_seconds"],
+                ].rename(columns={
+                    "setup_seconds": "ours_setup_seconds",
+                    "solving_phase_seconds": "ours_solving_phase_seconds",
+                    "train_total_seconds": "ours_train_total_seconds",
+                })
+                if ours_components["case_id"].duplicated().any():
+                    raise RuntimeError("duplicate proposed-pipeline timing references")
+                scale = scale.merge(
+                    ours_components, on="case_id", how="left", validate="many_to_one"
+                )
+                scale["setup_speedup_vs_ours"] = (
+                    scale["setup_seconds"] / scale["ours_setup_seconds"]
+                )
+                scale["solving_speedup_vs_ours"] = (
+                    scale["solving_phase_seconds"]
+                    / scale["ours_solving_phase_seconds"]
+                )
+                scale["total_speedup_vs_ours_recomputed"] = (
+                    scale["train_total_seconds"] / scale["ours_train_total_seconds"]
+                )
+                fig, ax = plt.subplots(figsize=(9, 5))
+                for (family, method), rows in scale.groupby(["dataset_family", "method"], dropna=False):
+                    rows = rows.sort_values("N")
+                    ax.plot(
+                        rows["N"], rows["rmse_ratio_to_full_eig"], marker="o",
+                        label=f"{family} / {method}",
+                    )
+                ax.axhline(
+                    1.0 + float(stage1_config["base"]["accuracy_relative_tolerance"]),
+                    color="black", linestyle="--", label="accuracy gate",
+                )
+                ax.set_xscale("log")
+                ax.set_xlabel("training samples N")
+                ax.set_ylabel("test RMSE / standard EFGP full-eig RMSE")
+                ax.set_title("Stage 1 accuracy gate (prediction time excluded from train total)")
+                ax.grid(True, which="both", alpha=0.25)
+                ax.legend(fontsize=7, ncol=2)
+                fig.tight_layout()
+                accuracy_plot = DRIVE_RUN_ROOT / "stage1_krr_accuracy_gate.png"
+                fig.savefig(accuracy_plot, dpi=180, bbox_inches="tight")
+                STAGE1_GENERATED_PLOT_PATHS.append(accuracy_plot)
+                plt.show()
+                plt.close(fig)
+
+                if END_TO_END_TARGET is not None:
+                    target_rows = claim_scale.loc[
+                        claim_scale["dataset_stem"].astype(str).eq(str(END_TO_END_TARGET["dataset_stem"]))
+                        & claim_scale["N"].eq(int(END_TO_END_TARGET["n_train"]))
+                    ].copy()
+                    target_rows["method_order"] = target_rows["method"].map(
+                        {method: index for index, method in enumerate(STAGE1_METHOD_ORDER)}
+                    )
+                    target_rows = target_rows.sort_values("method_order")
+                    fig, ax = plt.subplots(figsize=(10, 5))
+                    x = np.arange(len(target_rows))
+                    setup = target_rows["setup_seconds"].to_numpy(dtype=float)
+                    solving = target_rows["solving_phase_seconds"].to_numpy(dtype=float)
+                    ax.bar(x, setup, label="setup")
+                    ax.bar(x, solving, bottom=setup, label="solving phase")
+                    ax.set_xticks(x, target_rows["method"], rotation=30, ha="right")
+                    ax.set_ylabel("seconds")
+                    ax.set_title("Stage 1 selected target: complete-KRR time decomposition")
+                    ax.legend()
+                    ax.grid(True, axis="y", alpha=0.25)
+                    fig.tight_layout()
+                    split_plot = DRIVE_RUN_ROOT / "stage1_krr_setup_solving_breakdown.png"
+                    fig.savefig(split_plot, dpi=180, bbox_inches="tight")
+                    STAGE1_GENERATED_PLOT_PATHS.append(split_plot)
+                    plt.show()
+                    plt.close(fig)
+
+                stage1_accuracy_audit = scale[[
+                    "protocol_family", "suite_profile", "case_id", "dataset_family", "dataset_stem", "N",
+                    "method", "status", "accuracy_eligible", "performance_claim_eligible",
+                    "speedup_claim_eligible", "test_rmse", "test_r2",
+                    "recomputed_reference_rmse", "rmse_ratio_to_full_eig",
+                    "setup_seconds", "solving_phase_seconds", "train_total_seconds",
+                    "setup_speedup_vs_ours", "solving_speedup_vs_ours",
+                    "total_speedup_vs_ours_recomputed", "speedup_vs_ours",
+                ]].copy()
+                stage1_accuracy_audit.to_csv(
+                    DRIVE_RUN_ROOT / "stage1_krr_accuracy_timing_audit.csv", index=False
+                )
+                display(stage1_accuracy_audit)
+            else:
+                print("No completed Stage-1 scale rows; formal KRR plots skipped.")
+
+            if not stage1_robustness_verified.empty:
+                robustness = stage1_robustness_verified.copy()
+                robustness["speedup_vs_ours"] = pd.to_numeric(
+                    robustness["speedup_vs_ours"], errors="coerce"
+                )
+                robustness.to_csv(
+                    DRIVE_RUN_ROOT / "stage1_krr_robustness_all_axes.csv", index=False
+                )
+                case_order = list(dict.fromkeys(robustness["case_id"].astype(str)))
+                fig, ax = plt.subplots(figsize=(10, 4.5))
+                for method in STAGE1_METHOD_ORDER:
+                    if method == "ours-binned-default":
+                        continue
+                    rows = robustness.loc[robustness["method"].eq(method)].copy()
+                    rows = rows.loc[
+                        rows["speedup_claim_eligible"].astype(str).str.lower().eq("true")
+                    ]
+                    rows["case_order"] = rows["case_id"].astype(str).map(
+                        {case_id: index for index, case_id in enumerate(case_order)}
+                    )
+                    rows = rows.sort_values("case_order")
+                    ax.plot(
+                        rows["case_order"], rows["speedup_vs_ours"],
+                        marker="o", label=method,
+                    )
+                ax.axhline(1.0, color="black", linestyle="--")
+                ax.set_xticks(np.arange(len(case_order)), case_order, rotation=45, ha="right")
+                ax.set_ylabel("baseline train total / ours train total")
+                ax.set_title("Stage 1 robustness: accuracy-gated complete-KRR speedup")
+                ax.grid(True, axis="y", alpha=0.25)
+                ax.legend(fontsize=8, ncol=2)
+                fig.tight_layout()
+                robustness_plot = DRIVE_RUN_ROOT / "stage1_krr_robustness.png"
+                fig.savefig(robustness_plot, dpi=180, bbox_inches="tight")
+                STAGE1_GENERATED_PLOT_PATHS.append(robustness_plot)
+                plt.show()
+                plt.close(fig)
+            print("Stage-1 plot paths:", [str(path) for path in STAGE1_GENERATED_PLOT_PATHS])
+            """
+        )
+    )
+    cells.append(
+        _markdown(
+            r"""
+            # Stage 2 — fixed identical hashed \(A,b\) solver/preconditioner comparison
+
+            只有 Stage 1 target 成功冻结后，本阶段才在同一 invocation 中构造一个不可变 Fourier 系统；所有方法共享 weights/Gf/RHS/λ 哈希，每次从零初值开始，1 次预热后做 5 次随机顺序配对。正式 headline 是 `solver_total_seconds = score selection + preconditioner construction + CG/PCG solve`。
+
+            正式 mandatory 方法为 CG、Jacobi、proposed default、active-eig 与 full-eig。`active-inverse` 只在 Stage 2 计时开始前，根据冻结 target 的预声明 `box_budget <= inverse_max_size` 规则判为可行时才执行；决定与 benchmark 的 15 个 system-defining 字段一并写入 `stage2_feasibility.json`，不得依据 timing outcome 回填。`fourier-nystrom-precond` / `fourier-rpcholesky-precond` 是可选 exploratory Fourier adaptations，默认不运行，也绝不能标成 Stage 1 的 Nyström/RPCholesky KRR。旧 `paper_10m`、OAT、fixed-system scale profiles 仍可在 `RUN_ALL_FORMAL_EXPERIMENTS=False` 时手动启用。
             """
         )
     )
@@ -812,12 +1523,79 @@ def build_notebook() -> dict:
             SUITE_TEMPLATE = CONTROLLED_DIR / "colab_all_experiments_suite.json"
             CONTROLLED_OUTPUT_ROOT = DRIVE_RUN_ROOT / "controlled_fixed_system"
             RUNTIME_CONFIG_ROOT = DRIVE_RUN_ROOT / "runtime_configs"
+            STAGE2_FEASIBILITY_PATH = DRIVE_RUN_ROOT / "stage2_feasibility.json"
             CONTROLLED_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
             RUNTIME_CONFIG_ROOT.mkdir(parents=True, exist_ok=True)
             expected_controlled_case_count = 0
             selected_case_records = []
             base_suite = json.loads(SUITE_TEMPLATE.read_text(encoding="utf-8"))
             controlled_profile_outputs = []
+            STAGE2_FEASIBILITY = None
+            STAGE2_FEASIBLE_METHODS = []
+            STAGE2_SYSTEM_CONFIG_FIELDS = (
+                "dataset_stem", "n_train", "subset_seed", "subset_mode",
+                "kernel_family", "lengthscale", "nu", "variance",
+                "reg_lambda", "fourier_eps", "nufft_tol", "l2_scaled",
+                "precision", "nufft_backend", "precompute_chunk_size",
+            )
+
+            def build_prospective_stage2_feasibility(
+                frozen_target, *, box_budget, inverse_max_size,
+            ):
+                box_budget = int(box_budget)
+                inverse_max_size = int(inverse_max_size)
+                if box_budget <= 0 or inverse_max_size <= 0:
+                    raise RuntimeError(
+                        "Stage-2 declared box_budget/inverse_max_size must be positive."
+                    )
+                candidates = list(STAGE2_METHODS)
+                mandatory = list(STAGE2_MANDATORY_METHODS)
+                if set(candidates) != set([*mandatory, "active-inverse"]):
+                    raise RuntimeError(
+                        "Frozen Stage-2 candidates must be the five mandatory methods "
+                        "plus conditional active-inverse."
+                    )
+                inverse_feasible = box_budget <= inverse_max_size
+                methods = {
+                    method: {
+                        "feasible": True,
+                        "reason": "prospectively mandatory fixed-A,b method",
+                    }
+                    for method in mandatory
+                }
+                methods["active-inverse"] = {
+                    "feasible": bool(inverse_feasible),
+                    "reason": (
+                        "declared box_budget is within inverse_max_size; every "
+                        "score-selected box allowed by the frozen cap fits exact inverse"
+                        if inverse_feasible else
+                        "declared box_budget exceeds inverse_max_size, so exact inverse "
+                        "feasibility is not guaranteed before timing; method omitted"
+                    ),
+                }
+                missing = [
+                    field for field in STAGE2_SYSTEM_CONFIG_FIELDS
+                    if frozen_target.get(field) is None
+                ]
+                if missing:
+                    raise RuntimeError(
+                        "Frozen target is missing Stage-2 feasibility fields: "
+                        + ",".join(missing)
+                    )
+                return {
+                    "schema_version": 1,
+                    "protocol_family": "controlled_fixed_system",
+                    "decision_basis": (
+                        "prospective configured box-budget cap before timing"
+                    ),
+                    **{
+                        field: frozen_target[field]
+                        for field in STAGE2_SYSTEM_CONFIG_FIELDS
+                    },
+                    "box_budget": box_budget,
+                    "inverse_max_size": inverse_max_size,
+                    "methods": methods,
+                }
 
             def select_profile_cases(profile, *, sizes, families=(), case_ids=()):
                 size_set = {int(n) for n in sizes}
@@ -836,29 +1614,111 @@ def build_notebook() -> dict:
 
             formal_jobs = []
             if RUN_ALL_FORMAL_EXPERIMENTS:
-                formal_jobs.extend([
-                    {"job_id": "paper_10m", "profile": "paper_10m", "sizes": [10_000_000], "mandatory": True},
-                    {"job_id": "winnebago_oat_n10m", "profile": "winnebago_oat_n10m", "sizes": [10_000_000], "mandatory": True},
-                    {"job_id": "winnebago_box_budget_n10m", "profile": "winnebago_box_budget_n10m", "sizes": [10_000_000], "mandatory": True},
-                ])
-                for family, profile_name, series in [
-                    ("Synthetic", "scale_development_masters", "synthetic_nested"),
-                    ("Winnebago", "scale_archived_exact", "winnebago_exact"),
-                ]:
-                    for n_train in FORMAL_SCALE_SIZES:
-                        formal_jobs.append({
-                            "job_id": f"{series}_{n_train // 1_000_000}m",
-                            "profile": profile_name,
-                            "sizes": [int(n_train)],
-                            "families": [family],
-                            "mandatory": True,
-                            "gate_series": series,
-                            "requires_gate_n": (
-                                30_000_000 if n_train == 100_000_000
-                                else 100_000_000 if n_train == 300_000_000
-                                else None
-                            ),
-                        })
+                frozen_target = globals().get("END_TO_END_TARGET")
+                if RUN_STAGE2_FIXED_AB_SOLVERS and frozen_target is not None:
+                    target_n = int(frozen_target["n_train"])
+                    target_stem = str(frozen_target["dataset_stem"])
+                    frozen_stage1_suite = globals().get("stage1_config")
+                    if not isinstance(frozen_stage1_suite, dict):
+                        raise RuntimeError(
+                            "Stage-2 feasibility requires the frozen Stage-1 suite config."
+                        )
+                    declared_scale_cases = frozen_stage1_suite["profiles"][
+                        STAGE1_SCALE_PROFILE
+                    ]["cases"]
+                    matching_declared_cases = [
+                        case for case in declared_scale_cases
+                        if str(case.get("dataset_stem", frozen_stage1_suite["base"].get("dataset_stem")))
+                        == target_stem
+                        and int(case.get("n_train", frozen_stage1_suite["base"].get("n_train")))
+                        == target_n
+                    ]
+                    if len(matching_declared_cases) != 1:
+                        raise RuntimeError(
+                            "Frozen target must match exactly one predeclared Stage-1 scale case."
+                        )
+                    declared_target_config = dict(frozen_stage1_suite["base"])
+                    declared_target_config.update(matching_declared_cases[0])
+                    target_box_budget = int(declared_target_config["box_budget"])
+                    target_inverse_max_size = int(
+                        declared_target_config["inverse_max_size"]
+                    )
+                    STAGE2_FEASIBILITY = build_prospective_stage2_feasibility(
+                        frozen_target,
+                        box_budget=target_box_budget,
+                        inverse_max_size=target_inverse_max_size,
+                    )
+                    STAGE2_FEASIBILITY_PATH.write_text(
+                        json.dumps(STAGE2_FEASIBILITY, indent=2), encoding="utf-8"
+                    )
+                    STAGE2_FEASIBLE_METHODS = [
+                        method for method in STAGE2_METHODS
+                        if STAGE2_FEASIBILITY["methods"][method]["feasible"]
+                    ]
+                    if not set(STAGE2_MANDATORY_METHODS).issubset(
+                        STAGE2_FEASIBLE_METHODS
+                    ):
+                        raise RuntimeError(
+                            "Stage-2 prospective feasibility removed a mandatory method."
+                        )
+                    print(
+                        "Prospective Stage-2 feasibility:", STAGE2_FEASIBILITY_PATH,
+                        STAGE2_FEASIBLE_METHODS,
+                    )
+                    target_family_rows = globals().get(
+                        "stage1_scale_summary", pd.DataFrame()
+                    )
+                    target_lower = target_stem.lower()
+                    target_family = (
+                        "Synthetic" if "synthetic_true_func_2d" in target_lower
+                        else "Winnebago" if "winnebago" in target_lower
+                        else "Manitowoc" if "usgs_ept_wi_2county_1_b23" in target_lower
+                        else target_stem
+                    )
+                    if not target_family_rows.empty:
+                        family_match = target_family_rows.loc[
+                            target_family_rows["dataset_stem"].astype(str).eq(target_stem)
+                            & pd.to_numeric(target_family_rows["n_train"], errors="coerce").eq(target_n)
+                        ]
+                        if not family_match.empty:
+                            target_family = str(family_match.iloc[0]["dataset_family"])
+                    target_profile_name = "fixed_ab_selected_target"
+                    base_suite["profiles"][target_profile_name] = {
+                        "description": (
+                            "Stage 2 fixed identical hashed A,b at the prospectively selected "
+                            "Stage-1 target; solver total includes selection/build+solve."
+                        ),
+                        "overrides": {
+                            "methods": list(STAGE2_FEASIBLE_METHODS),
+                            **{
+                                field: frozen_target[field]
+                                for field in STAGE2_SYSTEM_CONFIG_FIELDS
+                                if field not in {"dataset_stem", "n_train"}
+                            },
+                            "box_budget": target_box_budget,
+                            "inverse_max_size": target_inverse_max_size,
+                        },
+                        "cases": [{
+                            "id": f"fixed_ab_target_n{target_n}",
+                            "dataset_family": target_family,
+                            "dataset_stem": target_stem,
+                            "n_train": target_n,
+                            "subset_mode": frozen_target["subset_mode"],
+                            "expected_n_train": target_n,
+                            "scale_role": "Stage-2 solver comparison at frozen Stage-1 target",
+                        }],
+                    }
+                    formal_jobs.append({
+                        "job_id": "fixed_ab_selected_target",
+                        "profile": target_profile_name,
+                        "sizes": [target_n],
+                        "families": [target_family],
+                        "mandatory": True,
+                        "planned_methods": list(STAGE2_FEASIBLE_METHODS),
+                        "stage2_feasibility_path": str(STAGE2_FEASIBILITY_PATH),
+                    })
+                elif RUN_STAGE2_FIXED_AB_SOLVERS:
+                    print("Stage 2 skipped: Stage 1 did not yield an eligible frozen target.")
             else:
                 manual_profiles = []
                 if RUN_CG_SCREEN_10M: manual_profiles.append("screen_10m")
@@ -895,8 +1755,10 @@ def build_notebook() -> dict:
                     }
                 except (OSError, json.JSONDecodeError, TypeError):
                     print("WARNING: previous campaign ledger is unreadable; first-run timing cannot be carried forward.")
-            campaign_job_rows = []
+            campaign_job_rows = list(globals().get("stage1_campaign_rows", []))
             planned_campaign_job_ids = (
+                [str(row["job_id"]) for row in globals().get("stage1_campaign_rows", [])]
+                +
                 (["plumbing_smoke"] if RUN_PLUMBING_SMOKE else [])
                 + [str(job["job_id"]) for job in formal_jobs]
                 + (
@@ -1081,6 +1943,10 @@ def build_notebook() -> dict:
                     "dataset_family": ",".join(families),
                     "n_train": ",".join(str(n) for n in sizes),
                     "mandatory": bool(job.get("mandatory", True)),
+                    "planned_methods": ",".join(job.get("planned_methods", [])),
+                    "stage2_feasibility_path": job.get(
+                        "stage2_feasibility_path", ""
+                    ),
                 }
 
                 skip_reason = ""
@@ -1272,7 +2138,7 @@ def build_notebook() -> dict:
             r"""
             ## B.2 正式 controlled artifact 审计
 
-            cuFINUFFT adapter 可能在运行期失败后回退 CPU，因此不能只检查请求参数；必须同时检查 manifest 的 `nufft_backend_resolved` 和 `nufft_stage`。下格也检查 fp64、system unchanged、strict GPU eig 和完整 `run_complete.json`。
+            cuFINUFFT adapter 可能在运行期失败后回退 CPU，因此不能只检查请求参数；必须同时检查 manifest 的 `nufft_backend_resolved` 和 `nufft_stage`。下格先检查 fp64、system unchanged、strict GPU eig 和完整 `run_complete.json`；随后 canonical reporter 还会强制读取并重哈希 timing NPZ 中的 weights/Gf/storage-RHS/solve-RHS，核对共同 tolerance、maxiter 和零初值。任一检查失败都会在正式图生成前终止。
             """
         )
     )
@@ -1450,15 +2316,19 @@ def build_notebook() -> dict:
             if ignored_stale_dirs:
                 print(f"Ignored {len(ignored_stale_dirs)} stale/non-selected controlled run directories.")
             if len(controlled_artifact_audit) != expected_controlled_case_count:
-                print(
+                raise RuntimeError(
                     "CONTROLLED AUDIT COUNT MISMATCH: "
                     f"Expected exactly {expected_controlled_case_count} controlled cases, "
                     f"but found {len(controlled_artifact_audit)} manifests."
                 )
             if not controlled_artifact_audit.empty and not controlled_artifact_audit["status"].eq("PASS").all():
-                print(
-                    "CONTROLLED ARTIFACT AUDIT CONTAINS FAILURES. "
-                    "Failed rows remain in the diagnostic tables and are excluded from performance plots."
+                failed_controlled = controlled_artifact_audit.loc[
+                    ~controlled_artifact_audit["status"].eq("PASS"),
+                    ["case", "status"],
+                ].to_dict(orient="records")
+                raise RuntimeError(
+                    "CONTROLLED ARTIFACT AUDIT FAILED; refusing every formal "
+                    f"Stage-2 table/plot: {failed_controlled}"
                 )
             """
         )
@@ -1466,9 +2336,290 @@ def build_notebook() -> dict:
     cells.append(
         _markdown(
             r"""
-            # C. Prediction-equivalence audit（复用 timed system/solution；单独、非计时）
+            ## Stage 2 正式结果：solver total（selection/build + solve）
 
-            Audit 必须读取 timing case 保存的 exact system 与 canonical timed \(\beta\)，不得重建系统或重解。它只按 GPU chunk 计算预测，prediction 时间明确排除在 speedup claim 外。目标包括 `paper_10m` 三个 case 的全部 timed methods，以及 Synthetic nested-prefix 的 100M/300M（`cg/default`）；每个 case 最多使用测试集的前 2.5M 行。
+            本表和图只接收 `fixed_ab_selected_target`，并显式拒绝 Stage 1 KRR 方法名及 Fourier Nyström/RPCholesky adaptations。柱高是实际 `solver_total_seconds_median`；shared Fourier setup 和 prediction 不进入本阶段 headline。是否“更快”由该 total 直接决定，不会从 iteration count 推断。
+            """
+        )
+    )
+    cells.append(
+        _code(
+            r"""
+            import matplotlib.pyplot as plt
+            import numpy as np
+
+            STAGE2_FORMAL_METHODS = list(
+                globals().get("STAGE2_FEASIBLE_METHODS", STAGE2_METHODS)
+            )
+            STAGE2_FORBIDDEN_METHODS = {
+                "nystrom", "rpcholesky", "fourier-nystrom-precond",
+                "fourier-rpcholesky-precond", "nystrom-krr", "rpcholesky-krr",
+            }
+            STAGE2_GENERATED_PLOT_PATHS = []
+            stage2_frames = []
+            stage2_system_ids = set()
+            for record in selected_case_records:
+                if record.get("suite_profile") != "fixed_ab_selected_target":
+                    continue
+                run_dir = Path(record["run_dir"])
+                summary_path = run_dir / "matched_summary.csv"
+                manifest_path = run_dir / "system_manifest.json"
+                if not (summary_path.is_file() and manifest_path.is_file()):
+                    continue
+                frame = pd.read_csv(summary_path)
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                frame["case_id"] = record["case_id"]
+                frame["run_dir"] = str(run_dir)
+                frame["system_id"] = manifest.get("system_id")
+                frame["N"] = manifest.get("n_train")
+                frame["protocol_family"] = "controlled_fixed_system"
+                frame["headline_timing"] = (
+                    "solver_total_seconds = selection + preconditioner build + solve"
+                )
+                stage2_system_ids.add(manifest.get("system_id"))
+                stage2_frames.append(frame)
+            stage2_solver_summary = (
+                pd.concat(stage2_frames, ignore_index=True, sort=False)
+                if stage2_frames else pd.DataFrame()
+            )
+            if not stage2_solver_summary.empty:
+                raw_stage2_methods = set(stage2_solver_summary["method"].astype(str))
+                forbidden_raw_methods = raw_stage2_methods.intersection(
+                    STAGE2_FORBIDDEN_METHODS
+                )
+                if forbidden_raw_methods:
+                    raise RuntimeError(
+                        "Stage-2 formal table contains forbidden KRR/adaptation "
+                        f"labels: {sorted(forbidden_raw_methods)}"
+                    )
+            # Keep the direct matched-summary aggregation only as an explicitly
+            # non-authoritative diagnostic.  The public summary path is written
+            # below *after* the canonical reporter has recomputed every timing
+            # component and speedup from verified repeat rows.
+            RAW_STAGE2_DIAGNOSTIC_PATH = (
+                DRIVE_RUN_ROOT / "stage2_fixed_ab_raw_diagnostic.csv"
+            )
+            stage2_solver_summary.to_csv(RAW_STAGE2_DIAGNOSTIC_PATH, index=False)
+            STAGE2_SOLVER_SUMMARY_PATH = (
+                DRIVE_RUN_ROOT / "stage2_fixed_ab_solver_summary.csv"
+            )
+
+            # Run the authoritative cross-artifact audit *before* constructing
+            # a formal table or figure.  The chart below consumes only its
+            # repeat-recomputed output, never derived fields from matched_summary.
+            from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.two_stage_reporting import (
+                TwoStageReportConfig,
+                build_two_stage_report,
+            )
+            TWO_STAGE_FORMAL_REPORT_ROOT = DRIVE_RUN_ROOT / "two_stage_formal_report"
+            TWO_STAGE_FORMAL_REPORT_RESULT = None
+            TWO_STAGE_GENERATED_PLOT_PATHS = []
+            stage1_formal_input_paths = [
+                str(path)
+                for path, frame in (
+                    (
+                        globals().get("STAGE1_SCALE_SUMMARY_PATH"),
+                        globals().get("stage1_scale_verified", pd.DataFrame()),
+                    ),
+                    (
+                        globals().get("STAGE1_ROBUSTNESS_SUMMARY_PATH"),
+                        globals().get("stage1_robustness_verified", pd.DataFrame()),
+                    ),
+                )
+                if path is not None and not frame.empty and Path(path).is_file()
+            ]
+            stage2_formal_input_paths = [
+                str(Path(record["run_dir"]) / "matched_summary.csv")
+                for record in selected_case_records
+                if record.get("suite_profile") == "fixed_ab_selected_target"
+                and (Path(record["run_dir"]) / "matched_summary.csv").is_file()
+            ]
+            formal_artifacts_ready = bool(
+                stage1_formal_input_paths
+                and stage2_formal_input_paths
+                and STAGE1_TARGET_PATH.is_file()
+                and STAGE2_FEASIBILITY_PATH.is_file()
+            )
+            if formal_artifacts_ready:
+                TWO_STAGE_FORMAL_REPORT_RESULT = build_two_stage_report(
+                    TwoStageReportConfig(
+                        stage1_paths=tuple(stage1_formal_input_paths),
+                        stage2_paths=tuple(stage2_formal_input_paths),
+                        output_dir=str(TWO_STAGE_FORMAL_REPORT_ROOT),
+                        selected_target_path=str(STAGE1_TARGET_PATH),
+                        stage1_suite_path=str(STAGE1_SUITE_CONFIG),
+                        stage2_feasibility_path=str(STAGE2_FEASIBILITY_PATH),
+                        include_fourier_adaptations_in_formal_stage2=False,
+                        make_plots=True,
+                    )
+                )
+                TWO_STAGE_GENERATED_PLOT_PATHS = [
+                    TWO_STAGE_FORMAL_REPORT_ROOT / name
+                    for name in TWO_STAGE_FORMAL_REPORT_RESULT["manifest"]["artifacts"]
+                    if str(name).lower().endswith(".png")
+                ]
+                canonical_stage2_path = (
+                    TWO_STAGE_FORMAL_REPORT_ROOT / "stage2_formal_solver_totals.csv"
+                )
+                stage2_solver_summary = pd.read_csv(canonical_stage2_path)
+                stage2_solver_summary["solver_total_seconds_median"] = pd.to_numeric(
+                    stage2_solver_summary["solver_total_seconds"], errors="coerce"
+                )
+                stage2_solver_summary["selection_seconds_median"] = pd.to_numeric(
+                    stage2_solver_summary["selection_seconds"], errors="coerce"
+                )
+                stage2_solver_summary["preconditioner_build_seconds_median"] = pd.to_numeric(
+                    stage2_solver_summary["preconditioner_build_seconds"], errors="coerce"
+                )
+                stage2_solver_summary["solve_seconds_median"] = pd.to_numeric(
+                    stage2_solver_summary["solve_seconds"], errors="coerce"
+                )
+                stage2_solver_summary["protocol_family"] = "controlled_fixed_system"
+                stage2_solver_summary["headline_timing"] = (
+                    "solver_total_seconds = selection + preconditioner build + solve"
+                )
+                print(
+                    "Canonical two-stage claim audit:",
+                    TWO_STAGE_FORMAL_REPORT_ROOT / "claim_audit.csv",
+                )
+            elif RUN_ALL_FORMAL_EXPERIMENTS and END_TO_END_TARGET is not None:
+                raise RuntimeError(
+                    "Formal target exists but canonical Stage-1/Stage-2 artifacts are "
+                    "incomplete; refusing headline output."
+                )
+            else:
+                stage2_solver_summary = pd.DataFrame()
+
+            if not stage2_solver_summary.empty:
+                observed = set(stage2_solver_summary["method"].astype(str))
+                forbidden = observed.intersection(STAGE2_FORBIDDEN_METHODS)
+                if forbidden:
+                    raise RuntimeError(
+                        f"Stage-2 formal table contains forbidden KRR/adaptation labels: {sorted(forbidden)}"
+                    )
+                if observed != set(STAGE2_FORMAL_METHODS):
+                    raise RuntimeError(
+                        f"Stage-2 method coverage {sorted(observed)} != frozen {STAGE2_FORMAL_METHODS}"
+                    )
+                if len(stage2_system_ids) != 1 or None in stage2_system_ids:
+                    raise RuntimeError(
+                        f"Stage-2 methods do not share one verified system_id: {stage2_system_ids}"
+                    )
+                stage2_solver_summary["solver_total_seconds_median"] = pd.to_numeric(
+                    stage2_solver_summary["solver_total_seconds_median"], errors="coerce"
+                )
+                stage2_solver_summary["selection_seconds_median"] = pd.to_numeric(
+                    stage2_solver_summary["selection_seconds_median"], errors="coerce"
+                )
+                stage2_solver_summary["preconditioner_build_seconds_median"] = pd.to_numeric(
+                    stage2_solver_summary["preconditioner_build_seconds_median"], errors="coerce"
+                )
+                stage2_solver_summary["solve_seconds_median"] = pd.to_numeric(
+                    stage2_solver_summary["solve_seconds_median"], errors="coerce"
+                )
+                canonical_speedup_fields = {
+                    "measured_repeats",
+                    "solver_total_speedup_over_cg_median",
+                    "paired_comparisons",
+                    "solver_total_speedup_source",
+                }
+                missing_speedup_fields = canonical_speedup_fields.difference(
+                    stage2_solver_summary.columns
+                )
+                if missing_speedup_fields:
+                    raise RuntimeError(
+                        "canonical Stage-2 output lacks matched-repeat speedup fields: "
+                        f"{sorted(missing_speedup_fields)}"
+                    )
+                for numeric_field in (
+                    "measured_repeats",
+                    "solver_total_speedup_over_cg_median",
+                    "paired_comparisons",
+                ):
+                    stage2_solver_summary[numeric_field] = pd.to_numeric(
+                        stage2_solver_summary[numeric_field], errors="coerce"
+                    )
+                eligible_mask = (
+                    stage2_solver_summary["performance_claim_eligible"]
+                    .astype(str).str.lower().eq("true")
+                )
+                eligible_rows = stage2_solver_summary.loc[eligible_mask]
+                if (
+                    eligible_rows.empty
+                    or not np.isfinite(
+                        eligible_rows["solver_total_speedup_over_cg_median"].to_numpy(
+                            dtype=float
+                        )
+                    ).all()
+                    or not (
+                        eligible_rows["paired_comparisons"]
+                        == eligible_rows["measured_repeats"]
+                    ).all()
+                ):
+                    raise RuntimeError(
+                        "canonical Stage-2 speedup must use every eligible matched repeat"
+                    )
+                cg_speedup = eligible_rows.loc[
+                    eligible_rows["method"].astype(str).eq("cg"),
+                    "solver_total_speedup_over_cg_median",
+                ]
+                if len(cg_speedup) != 1 or not np.isclose(
+                    float(cg_speedup.iloc[0]), 1.0, rtol=1e-12, atol=1e-12
+                ):
+                    raise RuntimeError(
+                        "canonical Stage-2 matched-repeat CG self-speedup must equal 1"
+                    )
+                stage2_solver_summary.to_csv(
+                    STAGE2_SOLVER_SUMMARY_PATH, index=False
+                )
+                order = {method: index for index, method in enumerate(STAGE2_FORMAL_METHODS)}
+                stage2_solver_summary["method_order"] = stage2_solver_summary["method"].map(order)
+                plot_rows = stage2_solver_summary.loc[
+                    stage2_solver_summary["performance_claim_eligible"].astype(str).str.lower().eq("true")
+                ].sort_values("method_order")
+                fig, (ax_total, ax_speedup) = plt.subplots(1, 2, figsize=(13, 5))
+                x = np.arange(len(plot_rows))
+                canonical_total = plot_rows["solver_total_seconds_median"].to_numpy(dtype=float)
+                ax_total.bar(x, canonical_total)
+                ax_total.set_xticks(x, plot_rows["method"], rotation=30, ha="right")
+                ax_total.set_ylabel("solver total, seconds")
+                ax_total.set_title(
+                    "Stage 2: canonical median solver total on identical hashed A,b"
+                )
+                ax_total.grid(True, axis="y", alpha=0.25)
+
+                speedup = pd.to_numeric(
+                    plot_rows["solver_total_speedup_over_cg_median"], errors="coerce"
+                )
+                ax_speedup.bar(x, speedup)
+                ax_speedup.axhline(1.0, color="black", linestyle="--")
+                ax_speedup.set_xticks(x, plot_rows["method"], rotation=30, ha="right")
+                ax_speedup.set_ylabel("median matched CG_i / method_i total")
+                ax_speedup.set_title("Paired total speedup (>1 is faster than CG)")
+                ax_speedup.grid(True, axis="y", alpha=0.25)
+                fig.tight_layout()
+                stage2_plot = DRIVE_RUN_ROOT / "stage2_fixed_ab_solver_total.png"
+                fig.savefig(stage2_plot, dpi=180, bbox_inches="tight")
+                STAGE2_GENERATED_PLOT_PATHS.append(stage2_plot)
+                plt.show()
+                plt.close(fig)
+                display(stage2_solver_summary[[
+                    "method", "system_id", "selection_seconds_median",
+                    "preconditioner_build_seconds_median", "solve_seconds_median",
+                    "solver_total_seconds_median", "solver_total_speedup_over_cg_median",
+                    "paired_comparisons", "performance_claim_eligible",
+                ]])
+            else:
+                print("No Stage-2 fixed-target rows; solver-total plot skipped.")
+            """
+        )
+    )
+    cells.append(
+        _markdown(
+            r"""
+            # Stage 2 prediction-equivalence audit（复用 timed system/solution；单独、非计时）
+
+            Audit 必须读取 Stage 2 timing case 保存的 exact system 与 canonical timed \(\beta\)，不得重建系统或重解。它只按 GPU chunk 计算预测，prediction 时间明确排除在 solver-total claim 外；每个 case 最多使用测试集的前 2.5M 行。Stage 1 已经在各完整 KRR pipeline 内独立完成 test accuracy gate，因此两种 accuracy 证据不混用。
             """
         )
     )
@@ -1492,17 +2643,7 @@ def build_notebook() -> dict:
                 prediction_resumed_count = 0
                 prediction_records = [
                     record for record in selected_case_records
-                    if (
-                        record.get("suite_profile") in set(PREDICTION_AUDIT_PROFILES)
-                        and (
-                        record.get("suite_profile") == "paper_10m"
-                        or (
-                            record.get("suite_profile") == "scale_development_masters"
-                            and record.get("dataset_family") == "Synthetic"
-                            and record.get("job_id") in {"synthetic_nested_100m", "synthetic_nested_300m"}
-                        )
-                        )
-                    )
+                    if record.get("suite_profile") in set(PREDICTION_AUDIT_PROFILES)
                 ]
                 expected_prediction_case_count = len(prediction_records)
                 prediction_targets = []
@@ -1661,11 +2802,7 @@ def build_notebook() -> dict:
                             "problems": message,
                         })
                         continue
-                    required_methods = (
-                        [str(method) for method in config.get("methods", [])]
-                        if record.get("suite_profile") == "paper_10m"
-                        else ["cg", "default"]
-                    )
+                    required_methods = [str(method) for method in config.get("methods", [])]
                     expected_n_test = min(int(PREDICTION_AUDIT_MAX_TEST_N), n_train // 4)
                     prediction_targets.append(
                         (record, config_path, manifest, required_methods, expected_n_test)
@@ -1729,8 +2866,7 @@ def build_notebook() -> dict:
                         "--max-test", str(expected_n_test),
                         "--output-dir", str(audit_out),
                     ]
-                    if record.get("suite_profile") != "paper_10m":
-                        command.extend(["--methods", ",".join(required_methods)])
+                    command.extend(["--methods", ",".join(required_methods)])
                     completed = run_cmd(command, cwd=LOCAL_REPO, check=False)
                     final_payload = {}
                     final_problems = ["prediction audit JSON missing"]
@@ -1840,9 +2976,9 @@ def build_notebook() -> dict:
     cells.append(
         _markdown(
             r"""
-            # D. 统一结果索引与图
+            # Legacy / diagnostic 统一索引与图（不进入两阶段正式图）
 
-            统一索引只负责查找和展示，不跨 protocol 计算 speedup。每行保留 `output_group/case_id`、科学配置哈希、数据与源码哈希；历史 profile 可以共存在 catalog 中，但作图必须按 profile 隔离。Controlled 表的 `cold_speedup_median` 是 selection/build+solve、排除公共 Fourier setup；`shared_fourier_setup_plus_method_speedup_median` 才是把公共 setup 加回两边后的比值。
+            统一索引只负责查找和展示，不跨 protocol 计算 speedup。正式结论应使用前面的 `stage1_krr_*` 和 `stage2_fixed_ab_*` artifacts；本节保留历史 profile 的诊断/复现图。每行保留 `output_group/case_id`、科学配置哈希、数据与源码哈希，且作图必须按 profile 隔离。
 
             `paper_10m` 是固定规模的方法比较，单独画带范围的分组图和速度–内存 Pareto 图；三种 `scale_*` protocol 各自分图。旧的 `controlled_scale_speedup.png` 会被标记为 deprecated，不再作为论文证据。
             """
@@ -2176,14 +3312,21 @@ def build_notebook() -> dict:
             import numpy as np
             from matplotlib.lines import Line2D
 
-            METHOD_ORDER = ["cg", "jacobi", "default", "full-eig", "nystrom", "rpcholesky"]
+            # Legacy plot allow-list deliberately excludes true KRR method names and
+            # exploratory Fourier Nyström/RPCholesky adaptations. Formal Stage 2 uses
+            # STAGE2_FORMAL_METHODS and solver_total_seconds in the dedicated cell above.
+            METHOD_ORDER = [
+                "cg", "jacobi", "default", "active-inverse", "full-inverse",
+                "active-eig", "full-eig",
+            ]
             METHOD_COLORS = {
                 "cg": "#4C78A8",
                 "jacobi": "#9D9D9D",
                 "default": "#E45756",
                 "full-eig": "#72B7B2",
-                "nystrom": "#54A24B",
-                "rpcholesky": "#B279A2",
+                "active-inverse": "#B279A2",
+                "full-inverse": "#F58518",
+                "active-eig": "#54A24B",
             }
             DATASET_ORDER = ["Manitowoc", "Winnebago", "Synthetic"]
             GENERATED_PLOT_PATHS = []
@@ -2792,11 +3935,27 @@ def build_notebook() -> dict:
                     prior_final_manifest = {}
                     print("WARNING: prior final manifest is unreadable; first-run total cannot be carried forward.")
             non_smoke_jobs = [row for row in campaign_job_rows if row.get("job_id") != "plumbing_smoke"]
+
+            def formal_campaign_job_passed(row):
+                if str(row.get("profile")) in {
+                    STAGE1_SCALE_PROFILE, "robustness_at_selected_target"
+                }:
+                    return bool(
+                        row.get("artifact_complete")
+                        and row.get("scientific_eligible")
+                        and str(row.get("status")) in {
+                            "claim_eligible_complete",
+                            "complete_with_resource_limits",
+                            "complete_with_accuracy_ineligible_methods",
+                        }
+                    )
+                return str(row.get("status")) == "PASS"
+
             all_campaign_jobs_fresh = bool(
                 non_smoke_jobs
                 and all(
                     row.get("invocation_mode") == "executed"
-                    and row.get("status") == "PASS"
+                    and formal_campaign_job_passed(row)
                     for row in non_smoke_jobs
                 )
             )
@@ -2853,7 +4012,9 @@ def build_notebook() -> dict:
                         "never a per-method timing claim"
                     ),
                     "paper_method_timing": (
-                        "use matched_summary.csv paired selection/build+solve columns, not campaign wall time"
+                        "use the canonical Stage-1 verified summaries and "
+                        "stage2_fixed_ab_solver_summary.csv matched-repeat paired totals; "
+                        "never use raw matched_summary.csv or campaign wall time"
                     ),
                 },
                 "git_sha": GIT_SHA,
@@ -2904,7 +4065,49 @@ def build_notebook() -> dict:
                 "prediction_accuracy_summary": str(PREDICTION_ACCURACY_SUMMARY_PATH),
                 "prediction_accuracy_plot": str(DRIVE_RUN_ROOT / "prediction_accuracy_vs_cg.png"),
                 "scale_method_availability": str(SCALE_METHOD_AVAILABILITY_PATH),
-                "generated_plots": [str(path) for path in GENERATED_PLOT_PATHS],
+                "stage1_protocol_family": "end_to_end_krr",
+                "stage1_suite_config": str(STAGE1_SUITE_CONFIG),
+                "stage1_case_index": str(STAGE1_CASE_INDEX_PATH),
+                "stage1_scale_summary": str(STAGE1_SCALE_SUMMARY_PATH),
+                "stage1_robustness_summary": str(STAGE1_ROBUSTNESS_SUMMARY_PATH),
+                "stage1_target_regime": (
+                    str(STAGE1_TARGET_PATH) if END_TO_END_TARGET is not None else None
+                ),
+                "stage1_target_selection_error": target_selection_error,
+                "stage1_methods": list(STAGE1_METHOD_ORDER),
+                "stage2_protocol_family": "controlled_fixed_system",
+                "stage2_headline_timing": (
+                    "solver_total_seconds = selection + preconditioner build + solve"
+                ),
+                "stage2_method_candidates": list(STAGE2_METHODS),
+                "stage2_methods": list(STAGE2_FORMAL_METHODS),
+                "stage2_feasibility": (
+                    str(STAGE2_FEASIBILITY_PATH)
+                    if STAGE2_FEASIBILITY is not None else None
+                ),
+                "stage2_feasibility_decision": STAGE2_FEASIBILITY,
+                "stage2_solver_summary": (
+                    str(STAGE2_SOLVER_SUMMARY_PATH)
+                    if TWO_STAGE_FORMAL_REPORT_RESULT is not None
+                    and STAGE2_SOLVER_SUMMARY_PATH.is_file()
+                    else None
+                ),
+                "two_stage_formal_report": (
+                    str(TWO_STAGE_FORMAL_REPORT_ROOT / "report_manifest.json")
+                    if TWO_STAGE_FORMAL_REPORT_RESULT is not None else None
+                ),
+                "two_stage_claim_audit": (
+                    str(TWO_STAGE_FORMAL_REPORT_ROOT / "claim_audit.csv")
+                    if TWO_STAGE_FORMAL_REPORT_RESULT is not None else None
+                ),
+                "generated_plots": [
+                    str(path) for path in [
+                        *STAGE1_GENERATED_PLOT_PATHS,
+                        *STAGE2_GENERATED_PLOT_PATHS,
+                        *TWO_STAGE_GENERATED_PLOT_PATHS,
+                        *GENERATED_PLOT_PATHS,
+                    ]
+                ],
                 "expected_prediction_case_count": int(expected_prediction_case_count),
                 "box_budget_fixed_system_match": BOX_BUDGET_SYSTEM_MATCH,
             }
@@ -3028,6 +4231,24 @@ def build_notebook() -> dict:
                 if not selected_controlled.empty else set()
             )
             expected_plot_paths = []
+            if RUN_STAGE1_END_TO_END_KRR and not stage1_scale_summary.empty:
+                expected_plot_paths.extend([
+                    DRIVE_RUN_ROOT / "stage1_krr_train_total_10m_300m.png",
+                    DRIVE_RUN_ROOT / "stage1_krr_accuracy_gate.png",
+                ])
+            if END_TO_END_TARGET is not None:
+                expected_plot_paths.append(
+                    DRIVE_RUN_ROOT / "stage1_krr_setup_solving_breakdown.png"
+                )
+            if RUN_STAGE1_ROBUSTNESS and not stage1_robustness_summary.empty:
+                expected_plot_paths.append(
+                    DRIVE_RUN_ROOT / "stage1_krr_robustness.png"
+                )
+            if not stage2_solver_summary.empty:
+                expected_plot_paths.append(
+                    DRIVE_RUN_ROOT / "stage2_fixed_ab_solver_total.png"
+                )
+            expected_plot_paths.extend(TWO_STAGE_GENERATED_PLOT_PATHS)
             if "paper_10m" in selected_output_groups:
                 expected_plot_paths.extend([
                     DRIVE_RUN_ROOT / "controlled_10m_method_speedup.png",
@@ -3069,7 +4290,13 @@ def build_notebook() -> dict:
                     DRIVE_RUN_ROOT / "prediction_accuracy_vs_cg.png"
                 )
             generated_plot_keys = {
-                str(Path(path).resolve()) for path in GENERATED_PLOT_PATHS
+                str(Path(path).resolve())
+                for path in [
+                    *STAGE1_GENERATED_PLOT_PATHS,
+                    *STAGE2_GENERATED_PLOT_PATHS,
+                    *TWO_STAGE_GENERATED_PLOT_PATHS,
+                    *GENERATED_PLOT_PATHS,
+                ]
             }
             plot_artifacts_complete = bool(
                 setup_timing_coverage_complete
@@ -3085,15 +4312,107 @@ def build_notebook() -> dict:
                 setup_timing_coverage_complete
             )
             final_manifest["plot_artifacts_complete"] = plot_artifacts_complete
+            stage1_scale_job_rows = [
+                row for row in stage1_campaign_rows
+                if row.get("profile") == STAGE1_SCALE_PROFILE
+            ]
+            stage1_scale_artifacts_complete = bool(
+                not RUN_STAGE1_END_TO_END_KRR
+                or (
+                    len(completed_stage1_scale_items) == len(stage1_scale_plan)
+                    and len(stage1_scale_summary)
+                    == len(stage1_scale_plan) * len(STAGE1_METHOD_ORDER)
+                    and len(stage1_scale_job_rows) == len(stage1_scale_plan)
+                    and all(bool(row.get("artifact_complete")) for row in stage1_scale_job_rows)
+                )
+            )
+            stage1_scale_scientifically_eligible = bool(
+                not RUN_STAGE1_END_TO_END_KRR
+                or (
+                    stage1_scale_job_rows
+                    and all(
+                        formal_campaign_job_passed(row)
+                        for row in stage1_scale_job_rows
+                    )
+                )
+            )
+            stage1_scale_complete = bool(
+                stage1_scale_artifacts_complete
+                and stage1_scale_scientifically_eligible
+            )
+            stage1_robustness_job_rows = [
+                row for row in stage1_campaign_rows
+                if row.get("profile") == "robustness_at_selected_target"
+            ]
+            stage1_robustness_artifacts_complete = bool(
+                not RUN_STAGE1_ROBUSTNESS
+                or (
+                    END_TO_END_TARGET is not None
+                    and len(completed_stage1_robustness_items) == len(stage1_robustness_plan)
+                    and len(stage1_robustness_summary)
+                    == len(stage1_robustness_plan) * len(STAGE1_METHOD_ORDER)
+                    and len(stage1_robustness_job_rows) == len(stage1_robustness_plan)
+                    and all(
+                        bool(row.get("artifact_complete"))
+                        for row in stage1_robustness_job_rows
+                    )
+                )
+            )
+            stage1_robustness_scientifically_eligible = bool(
+                not RUN_STAGE1_ROBUSTNESS
+                or (
+                    stage1_robustness_job_rows
+                    and all(
+                        formal_campaign_job_passed(row)
+                        for row in stage1_robustness_job_rows
+                    )
+                )
+            )
+            stage1_robustness_complete = bool(
+                stage1_robustness_artifacts_complete
+                and stage1_robustness_scientifically_eligible
+            )
+            stage2_formal_complete = bool(
+                not RUN_STAGE2_FIXED_AB_SOLVERS
+                or (
+                    END_TO_END_TARGET is not None
+                    and STAGE2_FEASIBILITY is not None
+                    and STAGE2_FEASIBILITY_PATH.is_file()
+                    and not stage2_solver_summary.empty
+                    and set(stage2_solver_summary["method"].astype(str))
+                    == set(STAGE2_FORMAL_METHODS)
+                )
+            )
+            two_stage_report_complete = bool(
+                not RUN_STAGE2_FIXED_AB_SOLVERS
+                or (
+                    TWO_STAGE_FORMAL_REPORT_RESULT is not None
+                    and (TWO_STAGE_FORMAL_REPORT_ROOT / "report_manifest.json").is_file()
+                    and (TWO_STAGE_FORMAL_REPORT_ROOT / "claim_audit.csv").is_file()
+                )
+            )
+            final_manifest["stage1_scale_complete"] = stage1_scale_complete
+            final_manifest["stage1_scale_artifacts_complete"] = stage1_scale_artifacts_complete
+            final_manifest["stage1_scale_scientifically_eligible"] = stage1_scale_scientifically_eligible
+            final_manifest["stage1_robustness_complete"] = stage1_robustness_complete
+            final_manifest["stage1_robustness_artifacts_complete"] = stage1_robustness_artifacts_complete
+            final_manifest["stage1_robustness_scientifically_eligible"] = stage1_robustness_scientifically_eligible
+            final_manifest["stage2_formal_complete"] = stage2_formal_complete
+            final_manifest["two_stage_report_complete"] = two_stage_report_complete
             workload_requested = bool(
-                RUN_LEGACY_GROUPS or selected_profiles or extra_suites or RUN_PREDICTION_AUDIT
+                RUN_STAGE1_END_TO_END_KRR or RUN_STAGE2_FIXED_AB_SOLVERS
+                or RUN_LEGACY_GROUPS or selected_profiles or extra_suites
+                or RUN_PREDICTION_AUDIT
             )
             mandatory_jobs = [row for row in campaign_job_rows if bool(row.get("mandatory", True))]
             campaign_complete = bool(
-                mandatory_jobs and all(str(row.get("status")) == "PASS" for row in mandatory_jobs)
+                mandatory_jobs and all(formal_campaign_job_passed(row) for row in mandatory_jobs)
             )
             run_verified = bool(
-                workload_requested and legacy_complete and controlled_complete
+                workload_requested and stage1_scale_complete
+                and stage1_robustness_complete and stage2_formal_complete
+                and two_stage_report_complete
+                and legacy_complete and controlled_complete
                 and prediction_complete and campaign_complete and INDEX_PATH.is_file()
                 and plot_artifacts_complete
                 and (BOX_BUDGET_SYSTEM_MATCH is not False)
@@ -3138,13 +4457,15 @@ def build_notebook() -> dict:
             r"""
             ## 运行后检查清单
 
-            1. 每个 controlled case 的 `system_manifest.json`：`system_unchanged=true`、`nufft_stage=cufinufft`，且 weights/Gf/solve-RHS/storage-RHS/λ 哈希完整。
-            2. 每个正式方法：5/5 repeats 满足 independently recomputed residual (<10^{-7})。
-            3. 300M 若只跑 core methods，表中明确列出方法集合；不要与另一次 invocation 的随机方法拼成 paired table。
-            4. Legacy、controlled、prediction audit 保持不同 `protocol_family`。
-            5. Synthetic 表中明确区分 archived noise=.3 `_ntrainN` 与 development noise=.02 `_nN`。
-            6. Prediction 必须同时有 JSON、CSV 和 completion manifest，严格使用 cuFINUFFT，并保持 audit solve count=0。
-            7. 记录完整 timing-runtime SHA（GPU、compute capability、CuPy/CUDA/NUFFT）、Git SHA、数据 SHA、实际 (M)、box size/rank 和 timing scope；artifact 恢复的 setup 时间不得进入 setup-inclusive 图。
+            1. Stage 1 的 `pipeline_summary.csv` 只能含六个 true end-to-end KRR 方法；每行分别保留 setup、solving phase、train total、prediction accuracy 与 accuracy gate。
+            2. 10M/30M/100M/300M 的失败/resource-limit 行原样保留，不以 pilot 或子采样算法冒充大规模结果。
+            3. `selected_target_regime.json` 必须来自冻结规则；没有合格 target 时检查 `target_regime_rejections.json`，不得事后换点。
+            4. \(\lambda\)、\(\ell\)、box budget、dataset robustness 只在 target 冻结后 materialize，且仍运行完整六 pipeline。
+            5. Stage 2 每个 case 的 `system_manifest.json` 必须有 `system_unchanged=true` 和完整 weights/Gf/RHS/λ 哈希；方法仅为 solver/preconditioner family。
+            6. `stage2_feasibility.json` 必须在 Stage 2 timing 前生成；mandatory 五方法恒为 feasible，`active-inverse` 仅在冻结的 `box_budget <= inverse_max_size` 时运行。
+            7. Stage 2 headline 必须读取 `solver_total_seconds`（selection + preconditioner build + solve），不能用 iteration-only 或排除 build 的 solve-only 数字代替。
+            8. `nystrom-krr` / `rpcholesky-krr` 只属于 Stage 1；Fourier adaptations 即使手动运行，也必须使用 `fourier-*-precond` 标签并排除在正式两阶段图外。
+            9. Prediction audit 同时有 JSON、CSV 和 completion manifest，严格复用 timed system/solutions，audit solve count=0。
             """
         )
     )

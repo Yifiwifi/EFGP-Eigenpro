@@ -50,6 +50,46 @@ def _fake_system() -> PreparedSystem:
     )
 
 
+def test_formal_default_methods_are_fixed_system_controls() -> None:
+    assert ControlledConfig().methods == ("cg", "jacobi", "default", "full-eig")
+
+
+def test_new_configs_reject_ambiguous_krr_method_names_but_artifacts_can_load() -> None:
+    legacy = ControlledConfig(methods=("cg", "nystrom"), measured_repeats=5)
+
+    with pytest.raises(ValueError, match="ambiguous fixed-system method"):
+        _validate_config(legacy)
+
+    _validate_config(legacy, allow_legacy_method_names=True)
+
+
+def test_fourier_adaptations_use_explicit_names_and_roles() -> None:
+    system = _fake_system()
+    cfg = ControlledConfig(
+        methods=(
+            "cg",
+            "fourier-nystrom-precond",
+            "fourier-rpcholesky-precond",
+        ),
+        nystrom_rank=2,
+        rpcholesky_rank=2,
+        measured_repeats=5,
+    )
+
+    _validate_config(cfg)
+    specs, _ = resolve_method_specs(system, cfg)
+    adaptations = [spec for spec in specs if spec.label != "cg"]
+
+    assert [spec.kind for spec in adaptations] == [
+        "fourier-nystrom-precond",
+        "fourier-rpcholesky-precond",
+    ]
+    assert all(
+        spec.result_role == "exploratory_fourier_adaptation"
+        for spec in adaptations
+    )
+
+
 def test_score_rule_uses_only_declared_memory_cap() -> None:
     system = _fake_system()
     cfg = ControlledConfig(
@@ -69,6 +109,29 @@ def test_score_rule_uses_only_declared_memory_cap() -> None:
     assert rule.selection_rule == "score_ranked_memory_capped_box"
     default = next(spec for spec in specs if spec.label == "default")
     assert default.kind == "active-inverse"
+
+
+def test_explicit_active_methods_are_charged_shared_score_selection() -> None:
+    system = _fake_system()
+    cfg = ControlledConfig(
+        methods=("cg", "active-inverse", "active-eig"),
+        score_tau=1.0,
+        box_budget=3,
+        inverse_max_size=3,
+        rank=2,
+        measured_repeats=5,
+    )
+
+    specs, rule = resolve_method_specs(system, cfg)
+    selected = {
+        spec.label: spec for spec in specs if spec.label.startswith("active-")
+    }
+
+    assert set(selected) == {"active-inverse", "active-eig"}
+    assert all(
+        spec.selection_seconds == rule.selection_seconds
+        for spec in selected.values()
+    )
 
 
 def test_full_inverse_spec_uses_the_complete_fourier_grid() -> None:
@@ -277,11 +340,14 @@ def test_summary_uses_paired_cold_speedup_and_requested_order() -> None:
     assert [row["method"] for row in summary] == ["cg", "pcg"]
     pcg = summary[1]
     assert pcg["cold_speedup_median"] == pytest.approx(3.0)
+    assert pcg["solver_total_speedup_over_cg_median"] == pytest.approx(3.0)
+    assert pcg["solver_total_seconds_median"] == pytest.approx(5.0)
     assert pcg["paired_wins_over_cg"] == 2
     comparison = pairwise_comparisons(rows)[0]
     assert comparison["reference_method"] == "cg"
     assert comparison["candidate_method"] == "pcg"
     assert comparison["total_speedup_median"] == pytest.approx(3.0)
+    assert comparison["solver_total_speedup_median"] == pytest.approx(3.0)
 
     restored_rows = [
         {**row, "setup_inclusive_timing_eligible": False}
@@ -298,6 +364,96 @@ def test_summary_uses_paired_cold_speedup_and_requested_order() -> None:
         np.isnan(row["shared_fourier_setup_plus_method_speedup_median"])
         for row in restored_summary
     )
+
+
+def test_solver_total_seconds_is_canonical_over_legacy_alias() -> None:
+    rows = [
+        {
+            "method": "cg",
+            "repeat_idx": 0,
+            "is_warmup": False,
+            "build_seconds": 0.0,
+            "solve_seconds": 12.0,
+            "solver_total_seconds": 12.0,
+            "build_plus_solve_seconds": 120.0,
+            "true_relres": 1e-9,
+            "status": "converged",
+        },
+        {
+            "method": "candidate",
+            "repeat_idx": 0,
+            "is_warmup": False,
+            "build_seconds": 2.0,
+            "solve_seconds": 4.0,
+            "solver_total_seconds": 6.0,
+            "build_plus_solve_seconds": 1.0,
+            "true_relres": 1e-9,
+            "status": "converged",
+        },
+    ]
+
+    summaries = summarize_rows(rows, 1.0, 1e-7, method_order=("cg", "candidate"))
+    candidate = summaries[1]
+    comparison = pairwise_comparisons(rows, 1e-7)[0]
+
+    assert candidate["solver_total_seconds_median"] == pytest.approx(6.0)
+    assert candidate["solver_total_speedup_over_cg_median"] == pytest.approx(2.0)
+    assert comparison["solver_total_speedup_median"] == pytest.approx(2.0)
+
+
+def test_run_row_normalizes_selection_build_and_solve_total(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    system = _fake_system()
+    cfg = ControlledConfig(methods=("cg", "jacobi"), measured_repeats=5)
+    spec = benchmark_module.MethodSpec(
+        label="jacobi",
+        kind="jacobi",
+        selection_seconds=1.25,
+    )
+    elapsed = iter((2.5, 4.0))
+
+    monkeypatch.setattr(
+        benchmark_module,
+        "_timed",
+        lambda backend, operation: (operation(), next(elapsed)),
+    )
+    monkeypatch.setattr(
+        benchmark_module,
+        "_build_preconditioner",
+        lambda supplied_system, supplied_cfg, supplied_spec: (
+            lambda vector, out: None,
+            object(),
+            {},
+        ),
+    )
+    monkeypatch.setattr(
+        benchmark_module,
+        "pcg_solve_gpu",
+        lambda *args, **kwargs: (
+            np.zeros_like(system.rhs_gpu),
+            3,
+            1e-9,
+            {"status": "converged", "n_matvec": 3},
+        ),
+    )
+    monkeypatch.setattr(benchmark_module, "_true_residual", lambda *args: 1e-9)
+
+    row, _ = benchmark_module.run_one_method(
+        system,
+        cfg,
+        spec,
+        repeat_idx=0,
+        order_position=0,
+        is_warmup=False,
+    )
+
+    assert row["selection_seconds"] == pytest.approx(1.25)
+    assert row["preconditioner_build_seconds"] == pytest.approx(2.5)
+    assert row["build_seconds"] == pytest.approx(3.75)
+    assert row["solve_seconds"] == pytest.approx(4.0)
+    assert row["solver_total_seconds"] == pytest.approx(7.75)
+    assert row["build_plus_solve_seconds"] == pytest.approx(7.75)
 
 
 def test_unconverged_candidate_is_excluded_from_speedup_claims() -> None:
