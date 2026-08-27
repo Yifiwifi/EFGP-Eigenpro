@@ -111,6 +111,63 @@ def test_score_rule_uses_only_declared_memory_cap() -> None:
     assert default.kind == "active-inverse"
 
 
+def test_frozen_topk_and_method_specific_full_eig_rank_are_preserved() -> None:
+    system = _fake_system()
+    cfg = ControlledConfig(
+        methods=("cg", "default", "full-eig"),
+        active_topk=3,
+        box_budget=system.manifest["M"],
+        inverse_max_size=1,
+        rank=2,
+        full_eig_rank=4,
+        measured_repeats=5,
+        parameter_selection_policy="frozen_original_best",
+        parameter_source="paper_table1_selected.csv",
+    )
+
+    specs, rule = resolve_method_specs(system, cfg)
+
+    assert rule.selection_rule == "frozen_score_topk"
+    assert rule.active.active_mode == "topk"
+    assert rule.active.active_topk == 3
+    assert next(spec for spec in specs if spec.label == "default").rank == 2
+    assert next(spec for spec in specs if spec.label == "full-eig").rank == 4
+
+
+def test_frozen_topk_checks_declared_observed_box_size() -> None:
+    system = _fake_system()
+    cfg = ControlledConfig(
+        methods=("cg", "default"),
+        active_topk=3,
+        expected_active_box_size=system.manifest["M"] + 1,
+        box_budget=system.manifest["M"],
+        rank=2,
+        measured_repeats=5,
+    )
+
+    with pytest.raises(ValueError, match="provenance check failed"):
+        resolve_score_box_rule(system, cfg)
+
+
+def test_frozen_topk_clamps_to_a_smaller_robustness_grid_without_rescanning() -> None:
+    system = _fake_system()
+    cfg = ControlledConfig(
+        methods=("cg", "default"),
+        active_topk=20,
+        expected_active_box_size=None,
+        box_budget=20,
+        inverse_max_size=1,
+        rank=2,
+        measured_repeats=5,
+        parameter_selection_policy="historical_selected_transfer_no_current_scan",
+    )
+
+    rule = resolve_score_box_rule(system, cfg)
+
+    assert rule.config.active_topk == system.manifest["M"]
+    assert rule.selection_rule == "frozen_score_topk_clamped_to_grid"
+
+
 def test_explicit_active_methods_are_charged_shared_score_selection() -> None:
     system = _fake_system()
     cfg = ControlledConfig(
@@ -132,6 +189,29 @@ def test_explicit_active_methods_are_charged_shared_score_selection() -> None:
         spec.selection_seconds == rule.selection_seconds
         for spec in selected.values()
     )
+    assert all(spec.active_set is rule.active for spec in selected.values())
+
+
+def test_default_route_cap_is_independent_from_explicit_inverse_cap() -> None:
+    system = _fake_system()
+    cfg = ControlledConfig(
+        methods=("default", "active-inverse", "active-eig"),
+        active_topk=3,
+        box_budget=system.manifest["M"],
+        inverse_max_size=system.manifest["M"],
+        default_inverse_max_size=1,
+        rank=2,
+        measured_repeats=5,
+    )
+
+    specs, rule = resolve_method_specs(system, cfg)
+    by_label = {spec.label: spec for spec in specs}
+
+    assert int(rule.active.box_idx.size) > cfg.default_inverse_max_size
+    assert by_label["default"].kind == "active-eig"
+    assert by_label["active-inverse"].kind == "active-inverse"
+    assert by_label["default"].active_set is rule.active
+    assert by_label["active-inverse"].active_set is rule.active
 
 
 def test_full_inverse_spec_uses_the_complete_fourier_grid() -> None:

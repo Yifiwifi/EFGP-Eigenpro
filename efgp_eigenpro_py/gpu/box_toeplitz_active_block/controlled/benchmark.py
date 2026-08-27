@@ -131,7 +131,20 @@ class ControlledConfig:
     score_tau: float = 1.0
     box_budget: int = 1024
     inverse_max_size: int = 1024
+    # Optional deployment threshold for ``default``.  Keeping it distinct from
+    # ``inverse_max_size`` lets a campaign retain a frozen active-eig default
+    # while also timing an explicit larger active-inverse sensitivity route.
+    default_inverse_max_size: int | None = None
+    # ``active_topk`` freezes the score-ranked active set selected by an
+    # external/pilot experiment. ``None`` retains the deployable tau rule.
+    active_topk: int | None = None
     rank: int = 32
+    # Full-grid EigenPro and the active/default method may use different
+    # ranks. ``None`` preserves the historical shared-rank behaviour.
+    full_eig_rank: int | None = None
+    expected_active_box_size: int | None = None
+    parameter_selection_policy: str = "deployable_score_rule"
+    parameter_source: str = ""
     nystrom_rank: int = 32
     rpcholesky_rank: int = 32
     eig_tol: float = 1e-3
@@ -183,6 +196,10 @@ class MethodSpec:
     selection_rule: str = ""
     result_role: str = ""
     selection_seconds: float = 0.0
+    # Active methods consume the exact set produced by their separately timed
+    # score-selection pass. This prevents the preconditioner builder from
+    # sorting scores and constructing the enclosing box a second time.
+    active_set: BoxActiveSet | None = None
 
 
 def _json_default(value: Any) -> Any:
@@ -1102,10 +1119,24 @@ def _validate_config(
         int(value) <= 0 for value in (cfg.rank, cfg.nystrom_rank, cfg.rpcholesky_rank)
     ):
         raise ValueError("rank, nystrom_rank, and rpcholesky_rank must be positive.")
+    if cfg.full_eig_rank is not None and int(cfg.full_eig_rank) <= 0:
+        raise ValueError("full_eig_rank must be positive or None.")
+    if cfg.active_topk is not None and int(cfg.active_topk) <= 0:
+        raise ValueError("active_topk must be positive or None.")
+    if (
+        cfg.expected_active_box_size is not None
+        and int(cfg.expected_active_box_size) <= 0
+    ):
+        raise ValueError("expected_active_box_size must be positive or None.")
     if cfg.precompute_chunk_size is not None and int(cfg.precompute_chunk_size) <= 0:
         raise ValueError("precompute_chunk_size must be positive or None.")
     if int(cfg.box_budget) <= 0 or int(cfg.inverse_max_size) <= 0:
         raise ValueError("box_budget and inverse_max_size must be positive.")
+    if (
+        cfg.default_inverse_max_size is not None
+        and int(cfg.default_inverse_max_size) <= 0
+    ):
+        raise ValueError("default_inverse_max_size must be positive or None.")
     if any(int(value) <= 0 for value in cfg.diagnostic_topk):
         raise ValueError("diagnostic_topk values must be positive.")
     _, _, machine_eps = _precision_dtypes(np, cfg.precision)
@@ -1293,8 +1324,53 @@ def _active_from_cfg(system: PreparedSystem, btab_cfg: BTABConfig) -> BoxActiveS
 def resolve_score_box_rule(
     system: PreparedSystem, cfg: ControlledConfig
 ) -> ResolvedBoxRule:
-    """Apply the predeclared score threshold, then only a memory-cap fallback."""
+    """Resolve either a frozen top-k rule or the deployable tau-plus-cap rule."""
     M = int(system.manifest["M"])
+    budget = min(int(cfg.box_budget), M)
+    if cfg.active_topk is not None:
+        requested_topk = int(cfg.active_topk)
+        # Robustness changes such as a longer lengthscale can legitimately
+        # shrink the Fourier grid.  Clipping a predeclared top-k to all
+        # available modes is deterministic capacity adaptation, not a rescan.
+        effective_topk = min(requested_topk, M)
+        selected_cfg = BTABConfig(
+            active_mode="topk",
+            active_topk=effective_topk,
+            active_tau=None,
+            box_budget=budget,
+            solve_mode="exact",
+            exact_box_max_size=int(cfg.inverse_max_size),
+            exact_apply_mode="inverse",
+            eig_q=int(cfg.rank),
+            eig_tol=float(cfg.eig_tol),
+            eig_maxiter=cfg.eig_maxiter,
+            diagnostic_mode="none",
+        )
+        active = _active_from_cfg(system, selected_cfg)
+        box_size = int(active.box_idx.size)
+        if (
+            cfg.expected_active_box_size is not None
+            and box_size != int(cfg.expected_active_box_size)
+        ):
+            raise ValueError(
+                "frozen active-topk provenance check failed: "
+                f"expected |B|={int(cfg.expected_active_box_size)}, observed {box_size}."
+            )
+        q = min(int(cfg.rank), max(box_size - 1, 0))
+        selected_cfg = replace(selected_cfg, eig_q=int(q))
+        return ResolvedBoxRule(
+            config=selected_cfg,
+            active=active,
+            raw_tau_box_size=box_size,
+            requested_rank=int(cfg.rank),
+            effective_rank=int(q),
+            selection_rule=(
+                "frozen_score_topk"
+                if effective_topk == requested_topk
+                else "frozen_score_topk_clamped_to_grid"
+            ),
+        )
+
     base = BTABConfig(
         active_mode="tau",
         active_topk=None,
@@ -1309,7 +1385,6 @@ def resolve_score_box_rule(
         diagnostic_mode="none",
     )
     raw = _active_from_cfg(system, base)
-    budget = min(int(cfg.box_budget), M)
     selected_cfg = replace(base, box_budget=budget)
     selection_rule = "score_tau"
     if int(raw.box_idx.size) > budget:
@@ -1365,7 +1440,17 @@ def resolve_method_specs(
     )
     rule = replace(rule, selection_seconds=float(selection_seconds))
     M = int(system.manifest["M"])
-    full_rank = min(int(cfg.rank), M - 1)
+    requested_full_rank = (
+        int(cfg.full_eig_rank)
+        if cfg.full_eig_rank is not None
+        else int(cfg.rank)
+    )
+    full_rank = min(requested_full_rank, M - 1)
+    default_inverse_max_size = int(
+        cfg.inverse_max_size
+        if cfg.default_inverse_max_size is None
+        else cfg.default_inverse_max_size
+    )
     specs: list[MethodSpec] = []
     for method in cfg.methods:
         if method in {"cg", "jacobi"}:
@@ -1381,7 +1466,7 @@ def resolve_method_specs(
                         selection_seconds=rule.selection_seconds,
                     )
                 )
-            elif int(rule.active.box_idx.size) <= int(cfg.inverse_max_size):
+            elif int(rule.active.box_idx.size) <= default_inverse_max_size:
                 specs.append(
                     MethodSpec(
                         label="default",
@@ -1389,12 +1474,13 @@ def resolve_method_specs(
                         btab_config=replace(
                             rule.config,
                             solve_mode="exact",
-                            exact_box_max_size=int(cfg.inverse_max_size),
+                            exact_box_max_size=default_inverse_max_size,
                             exact_apply_mode="inverse",
                         ),
                         selection_rule=rule.selection_rule + "_inverse_if_fits",
                         result_role="deployable_default",
                         selection_seconds=rule.selection_seconds,
+                        active_set=rule.active,
                     )
                 )
             else:
@@ -1407,6 +1493,7 @@ def resolve_method_specs(
                         selection_rule=rule.selection_rule + "_eigenpro_if_not",
                         result_role="deployable_default",
                         selection_seconds=rule.selection_seconds,
+                        active_set=rule.active,
                     )
                 )
         elif method == "active-inverse":
@@ -1432,6 +1519,7 @@ def resolve_method_specs(
                     selection_rule=rule.selection_rule,
                     result_role="sensitivity_candidate",
                     selection_seconds=rule.selection_seconds,
+                    active_set=rule.active,
                 )
             )
         elif method == "full-inverse":
@@ -1468,6 +1556,7 @@ def resolve_method_specs(
                     selection_rule=rule.selection_rule,
                     result_role="sensitivity_candidate",
                     selection_seconds=rule.selection_seconds,
+                    active_set=rule.active,
                 )
             )
         elif method == "full-eig":
@@ -1625,6 +1714,7 @@ def _build_preconditioner(
             float(system.reg_lambda),
             spec.btab_config,
             profile_apply_components=False,
+            precomputed_active_set=spec.active_set,
         )
 
         def apply(v: Any, out: Any) -> None:
@@ -1662,6 +1752,7 @@ def _build_preconditioner(
             spec.btab_config,
             q=int(spec.rank),
             profile_apply_components=False,
+            precomputed_active_set=spec.active_set,
         )
         eig_backend = str(pre.diagnostics.get("btab_eig_backend", ""))
         if bool(cfg.strict_gpu_eig) and eig_backend.lower() != "cupy":
@@ -2714,7 +2805,7 @@ def run_controlled_experiment(
 
     def with_repeated_selection_timing(spec: MethodSpec) -> MethodSpec:
         """Rerun and time active-set selection for each cold method repeat."""
-        if float(spec.selection_seconds) <= 0.0:
+        if spec.label not in {"default", "active-inverse", "active-eig"}:
             return spec
         fresh_rule, selection_seconds = _timed(
             system.backend,
@@ -2731,7 +2822,11 @@ def run_controlled_experiment(
                 "score-box selection changed during repeated timing: "
                 f"frozen={frozen_box_hash}, fresh={fresh_hash}"
             )
-        return replace(spec, selection_seconds=float(selection_seconds))
+        return replace(
+            spec,
+            selection_seconds=float(selection_seconds),
+            active_set=fresh_rule.active,
+        )
 
     order_rng = np.random.default_rng(int(cfg.method_order_seed))
     rows: list[dict[str, Any]] = []
@@ -2889,6 +2984,29 @@ def run_controlled_experiment(
             "final_system_id": final_system_id,
             "system_unchanged": True,
             "score_rule": rule.selection_rule,
+            "active_selection_mode": (
+                "frozen_topk" if cfg.active_topk is not None else "score_tau"
+            ),
+            "configured_active_topk": (
+                None if cfg.active_topk is None else int(cfg.active_topk)
+            ),
+            "effective_active_topk": (
+                None
+                if rule.config.active_topk is None
+                else int(rule.config.active_topk)
+            ),
+            "expected_active_box_size": (
+                None
+                if cfg.expected_active_box_size is None
+                else int(cfg.expected_active_box_size)
+            ),
+            "parameter_selection_policy": str(cfg.parameter_selection_policy),
+            "parameter_source": str(cfg.parameter_source),
+            "default_inverse_max_size": int(
+                cfg.inverse_max_size
+                if cfg.default_inverse_max_size is None
+                else cfg.default_inverse_max_size
+            ),
             "score_tau": float(cfg.score_tau),
             "score_tau_raw_box_size": int(rule.raw_tau_box_size),
             "score_box_size": int(rule.active.box_idx.size),
@@ -2898,7 +3016,8 @@ def run_controlled_experiment(
             "score_effective_rank": int(rule.effective_rank),
             "score_induced_tail_threshold": induced_tail_threshold,
             "score_cap_excludes_requested_threshold_modes": bool(
-                induced_tail_threshold > float(cfg.score_tau)
+                cfg.active_topk is None
+                and induced_tail_threshold > float(cfg.score_tau)
             ),
             "score_protocol_freeze_selection_seconds": float(rule.selection_seconds),
             "score_selection_seconds": (
@@ -2915,7 +3034,7 @@ def run_controlled_experiment(
                 else 0.0
             ),
             "selection_timing_protocol": (
-                "score-box selection is rerun and synchronized for every warmup and "
+                "active-set selection is rerun and synchronized for every warmup and "
                 "measured active-method invocation; the frozen box hash/rule/rank "
                 "must remain unchanged"
             ),
@@ -3128,9 +3247,44 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--score-tau", type=float, default=ControlledConfig.score_tau)
     parser.add_argument("--box-budget", type=int, default=ControlledConfig.box_budget)
     parser.add_argument(
+        "--active-topk",
+        type=int,
+        default=None,
+        help="Freeze the active score prefix; omit to use score_tau plus box_budget.",
+    )
+    parser.add_argument(
+        "--expected-active-box-size",
+        type=int,
+        default=None,
+        help="Optional provenance assertion for the enclosing frozen active box.",
+    )
+    parser.add_argument(
+        "--parameter-selection-policy",
+        default=ControlledConfig.parameter_selection_policy,
+    )
+    parser.add_argument(
+        "--parameter-source",
+        default=ControlledConfig.parameter_source,
+    )
+    parser.add_argument(
         "--inverse-max-size", type=int, default=ControlledConfig.inverse_max_size
     )
+    parser.add_argument(
+        "--default-inverse-max-size",
+        type=int,
+        default=None,
+        help=(
+            "Optional exact-inverse threshold used only by method 'default'; "
+            "the explicit active-inverse route still uses --inverse-max-size."
+        ),
+    )
     parser.add_argument("--rank", type=int, default=ControlledConfig.rank)
+    parser.add_argument(
+        "--full-eig-rank",
+        type=int,
+        default=None,
+        help="Optional full-grid EigenPro rank distinct from the active/default rank.",
+    )
     parser.add_argument(
         "--fourier-nystrom-rank",
         "--nystrom-rank",

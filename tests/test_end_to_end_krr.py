@@ -14,6 +14,7 @@ from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end import
     STAGE2_SYSTEM_CONFIG_FIELDS,
     TIMING_SCOPE,
     EndToEndConfig,
+    _run_efgp_method,
     _validate_config,
     choose_rpcholesky_landmarks,
     choose_uniform_landmarks,
@@ -45,6 +46,69 @@ def test_protocol_methods_are_complete_krr_pipelines() -> None:
     assert "cg" not in END_TO_END_METHODS
     assert "nystrom" not in END_TO_END_METHODS
     assert "rpcholesky" not in END_TO_END_METHODS
+
+
+def test_efgp_pipeline_total_charges_score_selection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The frozen active-box choice is timed work, not free preprocessing."""
+
+    class FakeBackend:
+        xp = np
+
+    class FakeSystem:
+        backend = FakeBackend()
+        rhs_gpu = np.asarray([1.0])
+        data_ctx = object()
+        setup_seconds = 7.0
+        manifest = {"M": 1, "mtot": 1}
+        system_id = "fixed-system"
+
+    fake_system = FakeSystem()
+    fake_spec = type("Spec", (), {"label": "default"})()
+    method_row = {
+        "status": "ok",
+        "selection_seconds": 2.0,
+        "preconditioner_build_seconds": 3.0,
+        # The fixed-A,b runner's compatibility field already includes selection.
+        "build_seconds": 5.0,
+        "solve_seconds": 5.0,
+    }
+
+    monkeypatch.setattr(
+        "efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end._fixed_config",
+        lambda cfg, methods: object(),
+    )
+    monkeypatch.setattr(
+        "efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end._prepare_binned_system",
+        lambda cfg, dataset: (fake_system, {}),
+    )
+    monkeypatch.setattr(
+        "efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end.fixed_ab.resolve_method_specs",
+        lambda system, cfg: ([fake_spec], {}),
+    )
+    monkeypatch.setattr(
+        "efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end.fixed_ab.run_one_method",
+        lambda *args, **kwargs: (method_row, np.asarray([1.0])),
+    )
+    monkeypatch.setattr(
+        "efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end.predict_v1",
+        lambda *args, **kwargs: np.asarray([0.0]),
+    )
+    monkeypatch.setattr(
+        "efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end._sync",
+        lambda xp: None,
+    )
+
+    row = _run_efgp_method(
+        "ours-binned-default",
+        EndToEndConfig(),
+        {"x_test": np.asarray([[0.0]]), "y_test": np.asarray([0.0])},
+        repeat_idx=0,
+        is_warmup=False,
+    )
+
+    assert row["solver_build_seconds"] == 3.0
+    assert row["solving_phase_seconds"] == 10.0
+    assert row["train_total_seconds"] == 17.0
 
 
 def test_mixed_pipeline_config_rejects_mismatched_regularization_scaling() -> None:
@@ -165,7 +229,7 @@ def test_rpcholesky_stops_cleanly_when_residual_is_exhausted() -> None:
     assert diagnostics["relative_trace_final"] <= 1e-12
 
 
-def test_summary_speedup_requires_accuracy_gate() -> None:
+def test_summary_retains_speedup_for_usable_non_equivalent_method() -> None:
     cfg = EndToEndConfig(
         methods=(
             "nystrom-krr",
@@ -174,6 +238,8 @@ def test_summary_speedup_requires_accuracy_gate() -> None:
         ),
         measured_repeats=1,
         accuracy_relative_tolerance=0.01,
+        accuracy_max_rmse=1.5,
+        accuracy_min_r2=0.5,
     )
     common = {
         "protocol_family": PROTOCOL_FAMILY,
@@ -226,7 +292,8 @@ def test_summary_speedup_requires_accuracy_gate() -> None:
         },
     ]
     summary = {row["method"]: row for row in summarize_pipeline_rows(rows, cfg)}
-    assert summary["ours-binned-default"]["accuracy_eligible"] is True
+    assert summary["ours-binned-default"]["usability_eligible"] is True
+    assert summary["ours-binned-default"]["reference_equivalent"] is True
     assert summary["efgp-standard-full-eig"]["ours_total_speedup"] == 2.5
     assert summary["efgp-standard-full-eig"]["fourier_eps"] == cfg.fourier_eps
     assert (
@@ -234,11 +301,20 @@ def test_summary_speedup_requires_accuracy_gate() -> None:
         + summary["efgp-standard-full-eig"]["solving_phase_seconds_at_median_total"]
         == summary["efgp-standard-full-eig"]["train_total_seconds_median"]
     )
-    assert summary["nystrom-krr"]["accuracy_eligible"] is False
-    assert math.isnan(summary["nystrom-krr"]["ours_total_speedup"])
+    assert summary["nystrom-krr"]["usability_eligible"] is True
+    assert summary["nystrom-krr"]["reference_equivalent"] is False
+    assert summary["nystrom-krr"]["quality_qualified_performance_eligible"] is True
+    assert summary["nystrom-krr"]["ours_total_speedup"] == 0.5
+    assert summary["nystrom-krr"]["comparison_rmse_ratio_to_ours"] == pytest.approx(
+        1.2 / 1.005
+    )
+    assert summary["nystrom-krr"]["comparison_rmse_delta_from_ours"] == pytest.approx(
+        0.195
+    )
+    assert summary["nystrom-krr"]["ours_speedup_claim_eligible"] is True
 
 
-def test_accuracy_gate_requires_every_paired_repeat_and_absolute_quality() -> None:
+def test_usability_requires_every_repeat_and_absolute_quality() -> None:
     cfg = EndToEndConfig(
         methods=("efgp-standard-full-eig", "ours-binned-default"),
         measured_repeats=3,
@@ -292,12 +368,17 @@ def test_accuracy_gate_requires_every_paired_repeat_and_absolute_quality() -> No
             }
         )
     summary = {row["method"]: row for row in summarize_pipeline_rows(rows, cfg)}
-    assert summary["efgp-standard-full-eig"]["accuracy_eligible"] is True
+    assert summary["efgp-standard-full-eig"]["usability_eligible"] is True
+    assert summary["efgp-standard-full-eig"]["reference_equivalent"] is True
     assert summary["ours-binned-default"]["test_rmse_median"] == 0.9
+    assert summary["ours-binned-default"]["usability_passed_repeats"] == 2
     assert summary["ours-binned-default"]["accuracy_passed_repeats"] == 2
+    assert summary["ours-binned-default"]["usability_eligible"] is False
     assert summary["ours-binned-default"]["accuracy_eligible"] is False
+    assert summary["ours-binned-default"]["reference_equivalent"] is False
     assert summary["ours-binned-default"]["performance_claim_eligible"] is False
-    assert math.isnan(summary["ours-binned-default"]["ours_total_speedup"])
+    assert summary["ours-binned-default"]["ours_total_speedup"] == 1.0
+    assert summary["ours-binned-default"]["ours_speedup_claim_eligible"] is False
 
 
 def _target_rows(n_train: int, cg_iterations: int) -> list[dict[str, object]]:
@@ -310,7 +391,9 @@ def _target_rows(n_train: int, cg_iterations: int) -> list[dict[str, object]]:
         "reg_lambda": 0.1,
         "fourier_eps": 1e-5,
         "status": "ok",
-        "accuracy_eligible": True,
+        "usability_eligible": True,
+        # The legacy reference-equivalence gate must not control target selection.
+        "accuracy_eligible": False,
     }
     rows = [{**common, "method": method} for method in END_TO_END_METHODS]
     for row in rows:
@@ -426,6 +509,60 @@ def test_shipped_suite_covers_10m_to_300m_and_materializes_robustness(
         "synthetic_true_func_2d_n300000000",
         "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
     }
+    adaptive = [
+        cfg
+        for cfg in configs
+        if cfg.parameter_selection_policy == "budget_adaptive_score_rule"
+    ]
+    frozen = [cfg for cfg in configs if cfg not in adaptive]
+    assert {cfg.box_budget for cfg in adaptive} == {4096, 8192, 16384}
+    assert all(cfg.active_topk is None for cfg in adaptive)
+    assert all(cfg.expected_active_box_size is None for cfg in configs)
+    assert all(
+        cfg.parameter_selection_policy
+        == "historical_selected_transfer_no_current_scan"
+        for cfg in frozen
+    )
+
+
+def test_shipped_suite_freezes_archived_full_eig_and_ours_winners(
+    tmp_path: Path,
+) -> None:
+    suite = load_suite_config()
+    scale = build_profile_plan(
+        suite,
+        "scale_10m_300m",
+        dataset_dir=str(tmp_path / "data"),
+        output_root=tmp_path / "out",
+    )
+    observed = {
+        item["case_id"]: (
+            item["config"].rank,
+            item["config"].full_eig_rank,
+            item["config"].active_topk,
+            item["config"].expected_active_box_size,
+        )
+        for item in scale
+    }
+    assert observed == {
+        "synthetic_matern_n10m": (256, 256, 4096, 5329),
+        "synthetic_matern_n30m": (320, 256, 8192, 10609),
+        "synthetic_matern_n100m": (320, 320, 35721, 35721),
+        "synthetic_matern_n300m": (320, 384, 35721, 35721),
+        "winnebago_matern_n10m": (320, 128, 8192, 10609),
+        "winnebago_matern_n30m": (256, 128, 4096, 5329),
+        "winnebago_matern_n100m": (320, 256, 35721, 35721),
+        "winnebago_matern_n300m": (384, 320, 35721, 35721),
+    }
+    assert all(
+        item["config"].parameter_selection_policy
+        == "historical_selected_transfer_no_current_scan"
+        for item in scale
+    )
+    assert all("0D6827265" in item["config"].parameter_source for item in scale)
+    assert suite["base"]["inverse_max_size"] == 1024
+    assert suite["stage2_fixed_ab"]["inverse_max_size"] == 16384
+    assert suite["stage2_fixed_ab"]["default_inverse_max_size"] == 1024
 
 
 def test_robustness_uses_exact_dataset_artifact_at_selected_n(tmp_path: Path) -> None:
@@ -465,6 +602,14 @@ def test_resume_reuses_resource_outcome_but_not_execution_error(tmp_path: Path) 
         "expected_measured_repeats": cfg.measured_repeats,
         "accuracy_evaluated_repeats": 0,
         "accuracy_passed_repeats": 0,
+        "usability_evaluated_repeats": 0,
+        "usability_passed_repeats": 0,
+        "usability_eligible": False,
+        "execution_eligible": False,
+        "quality_qualified_performance_eligible": False,
+        "reference_evaluated_repeats": 0,
+        "reference_equivalent_repeats": 0,
+        "reference_equivalent": False,
         "setup_seconds_at_median_total": None,
         "solving_phase_seconds_at_median_total": None,
     }

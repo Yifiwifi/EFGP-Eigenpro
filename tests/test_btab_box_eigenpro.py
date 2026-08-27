@@ -3,6 +3,14 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
+
+from efgp_eigenpro_py.gpu.box_toeplitz_active_block import (
+    box_eigenpro as box_eigenpro_module,
+)
+from efgp_eigenpro_py.gpu.box_toeplitz_active_block import (
+    preconditioner as preconditioner_module,
+)
 
 from efgp_eigenpro_py.gpu.box_toeplitz_active_block.box_eigenpro import (
     apply_box_eigenpro_local,
@@ -172,3 +180,59 @@ def test_box_eigenpro_spectral_action_uses_theta_q_plus_one():
     got = np.sort(np.real(np.linalg.eigvals(P @ A)))[::-1]
     expected = np.sort(np.array([1.0, theta[1] / theta[1], theta[2] / theta[1]], dtype=np.float64))[::-1]
     np.testing.assert_allclose(got, expected, rtol=1e-10, atol=1e-10)
+
+
+@pytest.mark.parametrize(
+    ("builder", "module", "extra"),
+    [
+        (build_box_toeplitz_preconditioner, preconditioner_module, {}),
+        (build_box_eigenpro_preconditioner, box_eigenpro_module, {"q": 1}),
+    ],
+)
+def test_precomputed_active_set_skips_second_score_box_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    builder,
+    module,
+    extra,
+) -> None:
+    backend, data_ctx, cfg = _fake_problem()
+    first = builder(
+        backend,
+        data_ctx,
+        0.1,
+        cfg,
+        profile_apply_components=False,
+        **extra,
+    )
+
+    def fail_if_reselected(*args, **kwargs):
+        raise AssertionError("score-box selection ran twice")
+
+    monkeypatch.setattr(module, "build_box_active_set", fail_if_reselected)
+    second = builder(
+        backend,
+        data_ctx,
+        0.1,
+        cfg,
+        profile_apply_components=False,
+        precomputed_active_set=first.active,
+        **extra,
+    )
+
+    assert second.active is first.active
+    assert second.diagnostics["time_active_set"] == 0.0
+
+    _, different_data_ctx, _ = _fake_problem()
+    different_data_ctx.weights_np_flat = different_data_ctx.weights_np_flat.copy()
+    different_data_ctx.weights_np_flat[0] *= 1.5
+    different_data_ctx.weights_gpu_flat = different_data_ctx.weights_np_flat.copy()
+    with pytest.raises(ValueError, match="current system"):
+        builder(
+            backend,
+            different_data_ctx,
+            0.1,
+            cfg,
+            profile_apply_components=False,
+            precomputed_active_set=first.active,
+            **extra,
+        )

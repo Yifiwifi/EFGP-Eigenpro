@@ -136,7 +136,14 @@ class EndToEndConfig:
     maxiter: int = 80_000
     precision: str = "fp64"
     methods: tuple[str, ...] = END_TO_END_METHODS
+    # Active/ours and full-grid EigenPro may use distinct parameters selected
+    # by a predeclared pilot or transferred from the archived experiment.
     rank: int = 256
+    full_eig_rank: int | None = None
+    active_topk: int | None = None
+    expected_active_box_size: int | None = None
+    parameter_selection_policy: str = "deployable_score_rule"
+    parameter_source: str = ""
     nystrom_rank: int = 256
     rpcholesky_rank: int = 256
     eig_tol: float = 1e-3
@@ -158,10 +165,11 @@ class EndToEndConfig:
     rpcholesky_max_factor_bytes: int = 48 * 2**30
     accuracy_reference_method: str = "efgp-standard-full-eig"
     accuracy_relative_tolerance: float = 0.01
-    # A relative equivalence gate alone cannot support an absolute "high accuracy"
-    # statement because the reference can itself be poor.  Formal suite cases set a
-    # dataset-specific RMSE ceiling prospectively; every measured repeat must meet
-    # both it and the paired reference-relative gate.
+    # Relative equivalence is descriptive: it identifies nearly equal-accuracy
+    # runs, but never suppresses an otherwise valid time/accuracy trade-off.
+    # Formal suite cases set a broad, dataset-specific usable-quality range with
+    # these absolute thresholds.  That range, not relative equivalence, controls
+    # eligibility for quality-qualified headline comparisons and target selection.
     accuracy_max_rmse: float | None = None
     accuracy_min_r2: float | None = None
     nufft_backend: str = "cufinufft"
@@ -241,6 +249,15 @@ def _validate_config(cfg: EndToEndConfig) -> None:
         int(rank) <= 0 for rank in (cfg.rank, cfg.nystrom_rank, cfg.rpcholesky_rank)
     ):
         raise ValueError("all ranks must be positive.")
+    if cfg.full_eig_rank is not None and int(cfg.full_eig_rank) <= 0:
+        raise ValueError("full_eig_rank must be positive or None.")
+    if cfg.active_topk is not None and int(cfg.active_topk) <= 0:
+        raise ValueError("active_topk must be positive or None.")
+    if (
+        cfg.expected_active_box_size is not None
+        and int(cfg.expected_active_box_size) <= 0
+    ):
+        raise ValueError("expected_active_box_size must be positive or None.")
     if float(cfg.reg_lambda) <= 0.0:
         raise ValueError("reg_lambda must be positive.")
     convention = str(cfg.regularization_convention).strip().lower()
@@ -578,6 +595,9 @@ def load_end_to_end_dataset(cfg: EndToEndConfig) -> dict[str, Any]:
 def _fixed_config(
     cfg: EndToEndConfig, methods: tuple[str, ...]
 ) -> fixed_ab.ControlledConfig:
+    uses_active_rule = any(
+        method in {"default", "active-eig", "active-inverse"} for method in methods
+    )
     return fixed_ab.ControlledConfig(
         dataset_stem=cfg.dataset_stem,
         dataset_dir=cfg.dataset_dir,
@@ -599,7 +619,14 @@ def _fixed_config(
         score_tau=cfg.score_tau,
         box_budget=cfg.box_budget,
         inverse_max_size=cfg.inverse_max_size,
+        active_topk=cfg.active_topk if uses_active_rule else None,
         rank=cfg.rank,
+        full_eig_rank=cfg.full_eig_rank,
+        expected_active_box_size=(
+            cfg.expected_active_box_size if uses_active_rule else None
+        ),
+        parameter_selection_policy=cfg.parameter_selection_policy,
+        parameter_source=cfg.parameter_source,
         eig_tol=cfg.eig_tol,
         eig_maxiter=cfg.eig_maxiter,
         measured_repeats=max(5, cfg.measured_repeats),
@@ -707,9 +734,11 @@ def _run_efgp_method(
     )
     _sync(xp)
     prediction_seconds = float(time.perf_counter() - t_pred)
-    build = float(method_row["build_seconds"])
+    selection = float(method_row.get("selection_seconds", 0.0))
+    preconditioner_build = float(method_row["preconditioner_build_seconds"])
     solve = float(method_row["solve_seconds"])
     setup = float(system.setup_seconds)
+    solving = selection + preconditioner_build + solve
     return {
         **method_row,
         **_metrics(dataset["y_test"], prediction),
@@ -717,10 +746,10 @@ def _run_efgp_method(
         "pipeline_family": "efgp",
         "setup_route": setup_route,
         "setup_seconds": setup,
-        "solver_build_seconds": build,
+        "solver_build_seconds": preconditioner_build,
         "iterative_solve_seconds": solve,
-        "solving_phase_seconds": build + solve,
-        "train_total_seconds": setup + build + solve,
+        "solving_phase_seconds": solving,
+        "train_total_seconds": setup + solving,
         "prediction_seconds": prediction_seconds,
         "setup_route_diagnostics": setup_extra,
         "M": int(system.manifest["M"]),
@@ -833,6 +862,18 @@ def _base_row(
         "precompute_chunk_size": cfg.precompute_chunk_size,
         "tol": float(cfg.tol),
         "box_budget": int(cfg.box_budget),
+        "configured_active_rank": int(cfg.rank),
+        "configured_full_eig_rank": int(cfg.full_eig_rank or cfg.rank),
+        "configured_active_topk": (
+            None if cfg.active_topk is None else int(cfg.active_topk)
+        ),
+        "configured_expected_active_box_size": (
+            None
+            if cfg.expected_active_box_size is None
+            else int(cfg.expected_active_box_size)
+        ),
+        "parameter_selection_policy": str(cfg.parameter_selection_policy),
+        "parameter_source": str(cfg.parameter_source),
         "accuracy_max_rmse": cfg.accuracy_max_rmse,
         "accuracy_min_r2": cfg.accuracy_min_r2,
         "gpu_allocator_cache_reset_between_pipelines": True,
@@ -966,6 +1007,12 @@ def summarize_pipeline_rows(
                     "nufft_backend",
                     "precompute_chunk_size",
                     "box_budget",
+                    "configured_active_rank",
+                    "configured_full_eig_rank",
+                    "configured_active_topk",
+                    "configured_expected_active_box_size",
+                    "parameter_selection_policy",
+                    "parameter_source",
                     "accuracy_max_rmse",
                     "accuracy_min_r2",
                     "resource_required_bytes",
@@ -997,6 +1044,8 @@ def summarize_pipeline_rows(
             "nufft_backend",
             "precompute_chunk_size",
             "box_budget",
+            "parameter_selection_policy",
+            "parameter_source",
             "accuracy_max_rmse",
             "accuracy_min_r2",
         ):
@@ -1060,67 +1109,140 @@ def summarize_pipeline_rows(
             for row in grouped.get(method, [])
             if successful(row)
         }
-        evaluated: list[dict[str, float | bool]] = []
+        usability_evaluated: list[dict[str, float | bool]] = []
+        reference_evaluated: list[dict[str, float | bool]] = []
         for repeat_idx in sorted(expected_repeat_ids):
             method_row = method_rows.get(repeat_idx)
-            reference_row = reference_rows.get(repeat_idx)
-            if method_row is None or reference_row is None:
+            if method_row is None:
                 continue
             rmse = float(method_row["test_rmse"])
-            reference_rmse = float(reference_row["test_rmse"])
             r2 = float(method_row["test_r2"])
-            relative_ratio = rmse / max(reference_rmse, np.finfo(float).tiny)
-            relative_pass = bool(
-                rmse <= (1.0 + float(cfg.accuracy_relative_tolerance)) * reference_rmse
-            )
             absolute_pass = bool(
                 cfg.accuracy_max_rmse is None or rmse <= float(cfg.accuracy_max_rmse)
             )
             r2_pass = bool(
                 cfg.accuracy_min_r2 is None or r2 >= float(cfg.accuracy_min_r2)
             )
-            evaluated.append(
+            usability_evaluated.append(
+                {"rmse": rmse, "r2": r2, "passed": absolute_pass and r2_pass}
+            )
+
+            reference_row = reference_rows.get(repeat_idx)
+            if reference_row is None:
+                continue
+            reference_rmse = float(reference_row["test_rmse"])
+            relative_ratio = rmse / max(reference_rmse, np.finfo(float).tiny)
+            reference_evaluated.append(
                 {
                     "rmse": rmse,
                     "reference_rmse": reference_rmse,
-                    "r2": r2,
                     "relative_ratio": relative_ratio,
-                    "passed": relative_pass and absolute_pass and r2_pass,
+                    "relative_delta": relative_ratio - 1.0,
+                    "absolute_delta": rmse - reference_rmse,
+                    "passed": bool(
+                        rmse
+                        <= (1.0 + float(cfg.accuracy_relative_tolerance))
+                        * reference_rmse
+                    ),
                 }
             )
-        passed = sum(bool(item["passed"]) for item in evaluated)
+
+        execution_eligible = bool(
+            summary["status"] == "ok"
+            and summary["successful_repeats"] == int(cfg.measured_repeats)
+            and summary["measured_repeats"] == int(cfg.measured_repeats)
+        )
+        usability_passed = sum(
+            bool(item["passed"]) for item in usability_evaluated
+        )
+        reference_equivalent_repeats = sum(
+            bool(item["passed"]) for item in reference_evaluated
+        )
         summary["accuracy_reference_method"] = cfg.accuracy_reference_method
         summary["accuracy_relative_tolerance"] = float(cfg.accuracy_relative_tolerance)
         summary["accuracy_max_rmse"] = cfg.accuracy_max_rmse
         summary["accuracy_min_r2"] = cfg.accuracy_min_r2
-        summary["accuracy_gate_definition"] = (
-            "Every measured repeat must be paired with the reference repeat, have "
-            "RMSE <= (1 + relative_tolerance) * reference RMSE, and satisfy the "
-            "prospectively declared absolute RMSE/R2 thresholds when present."
+        summary["execution_eligible"] = execution_eligible
+        summary["usability_range_declared"] = bool(
+            cfg.accuracy_max_rmse is not None or cfg.accuracy_min_r2 is not None
         )
-        summary["accuracy_evaluated_repeats"] = len(evaluated)
-        summary["accuracy_passed_repeats"] = passed
+        summary["usability_definition"] = (
+            "Every measured repeat must execute successfully and satisfy the "
+            "prospectively declared absolute RMSE ceiling and R2 floor when present; "
+            "reference-relative equivalence is not part of this usable-quality range."
+        )
+        summary["usability_evaluated_repeats"] = len(usability_evaluated)
+        summary["usability_passed_repeats"] = usability_passed
+        summary["usability_eligible"] = bool(
+            execution_eligible
+            and len(usability_evaluated) == int(cfg.measured_repeats)
+            and usability_passed == int(cfg.measured_repeats)
+        )
+        summary["reference_equivalence_definition"] = (
+            "Descriptive near-equal-accuracy label: every measured repeat must be "
+            "paired with the declared reference and have RMSE <= "
+            "(1 + relative_tolerance) * reference RMSE. It does not suppress raw "
+            "timing or time/accuracy trade-off results."
+        )
+        summary["reference_evaluated_repeats"] = len(reference_evaluated)
+        summary["reference_equivalent_repeats"] = reference_equivalent_repeats
+        summary["reference_equivalent"] = bool(
+            execution_eligible
+            and len(reference_evaluated) == int(cfg.measured_repeats)
+            and reference_equivalent_repeats == int(cfg.measured_repeats)
+        )
+        reference_ratios = [
+            float(item["relative_ratio"]) for item in reference_evaluated
+        ]
+        reference_relative_deltas = [
+            float(item["relative_delta"]) for item in reference_evaluated
+        ]
+        reference_absolute_deltas = [
+            float(item["absolute_delta"]) for item in reference_evaluated
+        ]
         summary["rmse_ratio_to_reference_median"] = (
-            float(np.median([float(item["relative_ratio"]) for item in evaluated]))
-            if evaluated
-            else math.nan
+            float(np.median(reference_ratios)) if reference_ratios else math.nan
+        )
+        summary["rmse_ratio_to_reference_min"] = (
+            float(np.min(reference_ratios)) if reference_ratios else math.nan
         )
         summary["rmse_ratio_to_reference_max"] = (
-            max(float(item["relative_ratio"]) for item in evaluated)
-            if evaluated
+            float(np.max(reference_ratios)) if reference_ratios else math.nan
+        )
+        summary["rmse_relative_delta_to_reference_median"] = (
+            float(np.median(reference_relative_deltas))
+            if reference_relative_deltas
             else math.nan
         )
-        summary["accuracy_eligible"] = bool(
-            summary["status"] == "ok"
-            and len(evaluated) == int(cfg.measured_repeats)
-            and passed == int(cfg.measured_repeats)
+        summary["rmse_delta_from_reference_median"] = (
+            float(np.median(reference_absolute_deltas))
+            if reference_absolute_deltas
+            else math.nan
         )
-        summary["performance_claim_eligible"] = bool(
-            summary["status"] == "ok"
-            and summary["successful_repeats"] == int(cfg.measured_repeats)
-            and summary["measured_repeats"] == int(cfg.measured_repeats)
-            and summary["accuracy_eligible"]
+
+        # Backward-compatible aliases for older report readers. Their semantics
+        # are deliberately the broad absolute usable-quality range, not the
+        # reference-equivalence label. New code should consume usability_*.
+        summary["accuracy_gate_definition"] = (
+            "Deprecated compatibility alias: accuracy_eligible equals "
+            "usability_eligible; see usability_definition and "
+            "reference_equivalence_definition for the separated semantics."
         )
+        summary["accuracy_eligible_legacy_alias_for"] = "usability_eligible"
+        summary["accuracy_evaluated_repeats"] = len(usability_evaluated)
+        summary["accuracy_passed_repeats"] = usability_passed
+        summary["accuracy_eligible"] = summary["usability_eligible"]
+        summary["quality_qualified_performance_eligible"] = bool(
+            execution_eligible and summary["usability_eligible"]
+        )
+        summary["performance_claim_eligible_definition"] = (
+            "Execution-complete and inside the broad absolute usable-quality range; "
+            "reference equivalence is descriptive and is not required."
+        )
+        # Compatibility alias used by existing campaign/reporting code.
+        summary["performance_claim_eligible"] = summary[
+            "quality_qualified_performance_eligible"
+        ]
 
     summaries_by_method = {str(row["method"]): row for row in summaries}
     ours = summaries_by_method.get("ours-binned-default")
@@ -1136,14 +1258,7 @@ def summarize_pipeline_rows(
             for row in grouped.get(method, [])
             if successful(row)
         }
-        speedup_eligible = bool(
-            summary.get("performance_claim_eligible")
-            and ours is not None
-            and ours.get("performance_claim_eligible")
-        )
         paired_ids = sorted(set(method_rows).intersection(ours_rows))
-        if not speedup_eligible or set(paired_ids) != expected_repeat_ids:
-            paired_ids = []
 
         def paired_ratios(key: str) -> list[float]:
             ratios: list[float] = []
@@ -1155,19 +1270,45 @@ def summarize_pipeline_rows(
                 ratios.append(numerator / denominator)
             return ratios
 
+        def paired_differences(key: str) -> list[float]:
+            differences: list[float] = []
+            for repeat_idx in paired_ids:
+                ours_value = _finite(ours_rows[repeat_idx], key)
+                comparison_value = _finite(method_rows[repeat_idx], key)
+                if ours_value is None or comparison_value is None:
+                    return []
+                differences.append(comparison_value - ours_value)
+            return differences
+
         total_ratios = paired_ratios("train_total_seconds")
         setup_ratios = paired_ratios("setup_seconds")
         solve_ratios = paired_ratios("solving_phase_seconds")
+        rmse_ratios = paired_ratios("test_rmse")
+        rmse_deltas = paired_differences("test_rmse")
         summary["ours_speedup_definition"] = (
-            "paired comparison-method time / ours-binned-default time; values above "
-            "one favor ours; all measured repeats of both methods must pass the "
-            "accuracy and execution gates"
+            "Raw matched-repeat comparison-method time / ours-binned-default time; "
+            "values above one favor ours. These descriptive timings are retained "
+            "whenever both runs succeeded, independent of usability or reference "
+            "equivalence; use ours_speedup_claim_eligible for a quality-qualified "
+            "headline comparison."
         )
         summary["ours_speedup_paired_repeats"] = len(total_ratios)
+        summary["ours_speedup_complete_pairing"] = bool(
+            set(paired_ids) == expected_repeat_ids
+            and len(total_ratios) == int(cfg.measured_repeats)
+        )
+        summary["ours_speedup_claim_eligible"] = bool(
+            summary["ours_speedup_complete_pairing"]
+            and summary.get("quality_qualified_performance_eligible")
+            and ours is not None
+            and ours.get("quality_qualified_performance_eligible")
+        )
         for label, values in (
             ("ours_total_speedup", total_ratios),
             ("ours_setup_speedup", setup_ratios),
             ("ours_solving_speedup", solve_ratios),
+            ("comparison_rmse_ratio_to_ours", rmse_ratios),
+            ("comparison_rmse_delta_from_ours", rmse_deltas),
         ):
             summary[label] = float(np.median(values)) if values else math.nan
             summary[f"{label}_min"] = float(np.min(values)) if values else math.nan
@@ -1275,7 +1416,7 @@ def run_end_to_end_experiment(cfg: EndToEndConfig) -> dict[str, Any]:
     elif resource_limit_methods:
         formal_result_status = "complete_with_resource_limits"
     elif ineligible_methods:
-        formal_result_status = "complete_with_accuracy_ineligible_methods"
+        formal_result_status = "complete_with_usability_ineligible_methods"
     else:
         formal_result_status = "claim_eligible_complete"
     completion = {
@@ -1344,6 +1485,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--maxiter", type=int, default=defaults.maxiter)
     parser.add_argument("--methods", default=",".join(defaults.methods))
     parser.add_argument("--rank", type=int, default=defaults.rank)
+    parser.add_argument("--full-eig-rank", type=int, default=None)
+    parser.add_argument("--active-topk", type=int, default=None)
+    parser.add_argument("--expected-active-box-size", type=int, default=None)
+    parser.add_argument(
+        "--parameter-selection-policy",
+        default=defaults.parameter_selection_policy,
+    )
+    parser.add_argument("--parameter-source", default=defaults.parameter_source)
     parser.add_argument("--nystrom-rank", type=int, default=defaults.nystrom_rank)
     parser.add_argument("--rpcholesky-rank", type=int, default=defaults.rpcholesky_rank)
     parser.add_argument("--box-budget", type=int, default=defaults.box_budget)
@@ -1399,6 +1548,17 @@ def config_from_args(args: argparse.Namespace) -> EndToEndConfig:
         maxiter=int(args.maxiter),
         methods=_parse_methods(args.methods),
         rank=int(args.rank),
+        full_eig_rank=(
+            None if args.full_eig_rank is None else int(args.full_eig_rank)
+        ),
+        active_topk=None if args.active_topk is None else int(args.active_topk),
+        expected_active_box_size=(
+            None
+            if args.expected_active_box_size is None
+            else int(args.expected_active_box_size)
+        ),
+        parameter_selection_policy=str(args.parameter_selection_policy),
+        parameter_source=str(args.parameter_source),
         nystrom_rank=int(args.nystrom_rank),
         rpcholesky_rank=int(args.rpcholesky_rank),
         box_budget=int(args.box_budget),

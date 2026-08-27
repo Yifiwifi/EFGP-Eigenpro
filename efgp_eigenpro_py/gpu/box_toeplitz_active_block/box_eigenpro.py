@@ -6,7 +6,11 @@ from typing import Any
 
 import numpy as np
 
-from .active_set import BoxActiveSet, build_box_active_set
+from .active_set import (
+    BoxActiveSet,
+    build_box_active_set,
+    validate_precomputed_active_set,
+)
 from .config import BTABConfig
 from .preconditioner import (
     _apply_local_box_operator,
@@ -264,6 +268,7 @@ def build_box_eigenpro_preconditioner(
     *,
     q: int,
     profile_apply_components: bool = True,
+    precomputed_active_set: BoxActiveSet | None = None,
 ) -> BoxEigenProPreconditionerData:
     xp = backend.xp
     if data_ctx.xtxcol_gpu is None:
@@ -278,19 +283,38 @@ def build_box_eigenpro_preconditioner(
     global_shape = (int(mtot),) * int(dim)
 
     t0 = _now_synced(backend)
-    gamma = _gamma_from_xtxcol(xp, data_ctx.xtxcol_gpu, mtot, dim)
-    active = build_box_active_set(
-        gamma=gamma,
-        weights=weights_np,
-        reg_lambda=reg_lambda,
-        mtot=mtot,
-        dim=dim,
-        active_mode=cfg.active_mode,
-        active_topk=cfg.active_topk,
-        active_tau=cfg.active_tau,
-        box_budget=cfg.box_budget,
-    )
-    t1 = _now_synced(backend)
+    if precomputed_active_set is None:
+        gamma = _gamma_from_xtxcol(xp, data_ctx.xtxcol_gpu, mtot, dim)
+        active = build_box_active_set(
+            gamma=gamma,
+            weights=weights_np,
+            reg_lambda=reg_lambda,
+            mtot=mtot,
+            dim=dim,
+            active_mode=cfg.active_mode,
+            active_topk=cfg.active_topk,
+            active_tau=cfg.active_tau,
+            box_budget=cfg.box_budget,
+        )
+        t1 = _now_synced(backend)
+    else:
+        active = precomputed_active_set
+        gamma = _gamma_from_xtxcol(xp, data_ctx.xtxcol_gpu, mtot, dim)
+        validate_precomputed_active_set(
+            active,
+            gamma=gamma,
+            weights=weights_np,
+            reg_lambda=reg_lambda,
+            mtot=mtot,
+            dim=dim,
+            active_mode=cfg.active_mode,
+            active_topk=cfg.active_topk,
+            active_tau=cfg.active_tau,
+            box_budget=cfg.box_budget,
+        )
+        # Selection was timed by the controlled runner and its result is being
+        # consumed directly; no second score sort/box construction occurs here.
+        t1 = t0
 
     box_size = int(active.box_idx.size)
     if box_size <= 0:

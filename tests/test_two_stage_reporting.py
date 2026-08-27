@@ -19,14 +19,22 @@ from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end import
     END_TO_END_METHODS,
     EndToEndConfig,
     TIMING_SCOPE as RUNNER_STAGE1_TIMING_SCOPE,
+    summarize_pipeline_rows,
+)
+from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end_suite import (
+    BUDGET_ADAPTIVE_PARAMETER_POLICY,
+    BUDGET_ADAPTIVE_PARAMETER_SOURCE,
 )
 from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.two_stage_reporting import (
     EXPECTED_SOLVER_TOTAL_DEFINITION,
     EXPECTED_STAGE1_TIMING_SCOPE,
     ReportSchemaError,
     STAGE1_FORMAL_METHODS,
+    STAGE1_PROTOCOL,
+    STAGE1_TABLE_COLUMNS,
     TwoStageReportConfig,
     build_two_stage_report,
+    load_stage1_summaries,
 )
 
 
@@ -50,6 +58,16 @@ def _write_json(path: Path, payload: object) -> Path:
     return path
 
 
+FROZEN_METHOD_CONFIG = {
+    "rank": 256,
+    "full_eig_rank": 256,
+    "active_topk": 4096,
+    "expected_active_box_size": 5329,
+    "parameter_selection_policy": "historical_selected_transfer_no_current_scan",
+    "parameter_source": "test fixture: frozen historical selected configuration",
+}
+
+
 def _suite_payload() -> dict[str, object]:
     base = {
         "dataset_stem": "synthetic_master",
@@ -68,7 +86,8 @@ def _suite_payload() -> dict[str, object]:
         "nufft_backend": "cufinufft",
         "precompute_chunk_size": 1_000_000,
         "box_budget": 8192,
-        "inverse_max_size": 16384,
+        **FROZEN_METHOD_CONFIG,
+        "inverse_max_size": 1024,
         "accuracy_max_rmse": 1.1,
         "accuracy_min_r2": 0.5,
     }
@@ -76,6 +95,10 @@ def _suite_payload() -> dict[str, object]:
         "schema_version": 1,
         "protocol_family": "end_to_end_krr",
         "base": base,
+        "stage2_fixed_ab": {
+            "inverse_max_size": 16384,
+            "default_inverse_max_size": 1024,
+        },
         "profiles": {
             "scale_10m_300m": {
                 "cases": [
@@ -133,13 +156,17 @@ def _target_payload() -> dict[str, object]:
         "precision": "fp64",
         "nufft_backend": "cufinufft",
         "precompute_chunk_size": 1_000_000,
+        **FROZEN_METHOD_CONFIG,
+        "box_budget": 8192,
         "accuracy_max_rmse": 1.1,
         "accuracy_min_r2": 0.5,
         "selection_rule": (
             "largest N with all six declared pipeline rows present; successful "
             "EFGP/Nystrom rows (a declared RPCholesky hardware resource-limit row "
-            "is retained as a valid scalability outcome); full-eig/ours accuracy "
-            "eligibility; and EFGP-CG iterations in the predeclared [3000,6000] interval"
+            "is retained as a valid scalability outcome); full-eig/ours inside "
+            "the declared broad absolute usable-quality range (the "
+            "reference-equivalence label is descriptive only); and EFGP-CG "
+            "iterations in the predeclared [3000,6000] interval"
         ),
     }
 
@@ -165,6 +192,26 @@ def _stage1_method_rows(
         "efgp-standard-full-eig": 10.0,
         "ours-binned-default": 5.0,
     }
+    is_robustness = profile == "robustness_at_selected_target"
+    is_box_budget_axis = any(str(axis).startswith("box_budget_") for axis in axes)
+    configured_active_topk = (
+        None if is_box_budget_axis else FROZEN_METHOD_CONFIG["active_topk"]
+    )
+    configured_expected_box_size = (
+        None
+        if is_robustness
+        else FROZEN_METHOD_CONFIG["expected_active_box_size"]
+    )
+    parameter_policy = (
+        BUDGET_ADAPTIVE_PARAMETER_POLICY
+        if is_box_budget_axis
+        else FROZEN_METHOD_CONFIG["parameter_selection_policy"]
+    )
+    parameter_source = (
+        BUDGET_ADAPTIVE_PARAMETER_SOURCE
+        if is_box_budget_axis
+        else FROZEN_METHOD_CONFIG["parameter_source"]
+    )
     output: list[dict[str, object]] = []
     for method in sorted(STAGE1_FORMAL_METHODS):
         total = totals[method]
@@ -194,8 +241,29 @@ def _stage1_method_rows(
                 "nufft_backend": "cufinufft",
                 "precompute_chunk_size": 1_000_000,
                 "box_budget": box_budget,
+                "configured_active_rank": FROZEN_METHOD_CONFIG["rank"],
+                "configured_full_eig_rank": FROZEN_METHOD_CONFIG["full_eig_rank"],
+                "configured_active_topk": configured_active_topk,
+                "configured_expected_active_box_size": configured_expected_box_size,
+                "parameter_selection_policy": parameter_policy,
+                "parameter_source": parameter_source,
                 "method": method,
                 "status": "ok",
+                "execution_eligible": True,
+                "usability_eligible": accuracy,
+                "usability_evaluated_repeats": 5,
+                "usability_passed_repeats": 5 if accuracy else 0,
+                "reference_equivalent": accuracy,
+                "reference_evaluated_repeats": 5,
+                "reference_equivalent_repeats": 5 if accuracy else 0,
+                "quality_qualified_performance_eligible": accuracy,
+                "ours_speedup_complete_pairing": True,
+                "ours_speedup_claim_eligible": accuracy,
+                "ours_total_speedup": total / 5.0,
+                "ours_setup_speedup": total / 5.0,
+                "ours_solving_speedup": total / 5.0,
+                "comparison_rmse_ratio_to_ours": 1.0 if accuracy else 1.5,
+                "comparison_rmse_delta_from_ours": 0.0 if accuracy else 0.5,
                 "accuracy_eligible": accuracy,
                 "performance_claim_eligible": accuracy,
                 "accuracy_max_rmse": accuracy_max_rmse,
@@ -243,7 +311,17 @@ def _all_stage1_rows() -> list[dict[str, object]]:
     robust_cases = [
         (
             "reference",
-            ["lambda_0p1", "lengthscale_0p1", "box_budget_8192", "dataset_synthetic"],
+            ["lambda_0p1", "lengthscale_0p1", "dataset_synthetic"],
+            "synthetic_master",
+            "Synthetic",
+            0.1,
+            0.1,
+            8192,
+            1.1,
+        ),
+        (
+            "box_budget_8192",
+            ["box_budget_8192"],
             "synthetic_master",
             "Synthetic",
             0.1,
@@ -444,7 +522,9 @@ def _stage2_artifacts(root: Path) -> Path:
         summaries.append(
             {
                 "method": method,
-                "method_kind": method,
+                "method_kind": (
+                    "active-eig" if method == "default" else method
+                ),
                 "result_role": (
                     "deployable_default" if method == "default" else "baseline"
                 ),
@@ -557,6 +637,10 @@ def _stage2_artifacts(root: Path) -> Path:
         run_dir / "experiment_config.json",
         {
             "methods": list(STAGE2_METHODS),
+            **FROZEN_METHOD_CONFIG,
+            "box_budget": 8192,
+            "inverse_max_size": 16384,
+            "default_inverse_max_size": 1024,
             "warmup_repeats": 1,
             "measured_repeats": 5,
             "tol": 1e-7,
@@ -608,7 +692,21 @@ def _materialize_stage1_evidence(root: Path, rows: list[dict[str, object]]) -> N
             l2_scaled=bool(first["l2_scaled"]),
             precision=str(first["precision"]),
             methods=END_TO_END_METHODS,
+            rank=int(first["configured_active_rank"]),
+            full_eig_rank=int(first["configured_full_eig_rank"]),
+            active_topk=(
+                None
+                if first["configured_active_topk"] in (None, "")
+                else int(first["configured_active_topk"])
+            ),
+            expected_active_box_size=(
+                None
+                if first["configured_expected_active_box_size"] in (None, "")
+                else int(first["configured_expected_active_box_size"])
+            ),
             box_budget=int(first["box_budget"]),
+            parameter_selection_policy=str(first["parameter_selection_policy"]),
+            parameter_source=str(first["parameter_source"]),
             inverse_max_size=16384,
             warmup_repeats=1,
             measured_repeats=5,
@@ -649,6 +747,19 @@ def _materialize_stage1_evidence(root: Path, rows: list[dict[str, object]]) -> N
                         "precision": cfg.precision,
                         "nufft_backend": cfg.nufft_backend,
                         "precompute_chunk_size": cfg.precompute_chunk_size,
+                        "box_budget": cfg.box_budget,
+                        "configured_active_rank": cfg.rank,
+                        "configured_full_eig_rank": cfg.full_eig_rank,
+                        "configured_active_topk": cfg.active_topk,
+                        "configured_expected_active_box_size": (
+                            cfg.expected_active_box_size
+                        ),
+                        "parameter_selection_policy": (
+                            cfg.parameter_selection_policy
+                        ),
+                        "parameter_source": cfg.parameter_source,
+                        "accuracy_max_rmse": cfg.accuracy_max_rmse,
+                        "accuracy_min_r2": cfg.accuracy_min_r2,
                         "setup_seconds": total * 0.4,
                         "solving_phase_seconds": total * 0.6,
                         "train_total_seconds": total,
@@ -660,6 +771,12 @@ def _materialize_stage1_evidence(root: Path, rows: list[dict[str, object]]) -> N
                             4000 if int(cfg.n_train or 0) == 10_000_000 else 7000
                         )
                     run_rows.append(record)
+        recomputed = {
+            str(summary["method"]): summary
+            for summary in summarize_pipeline_rows(run_rows, cfg)
+        }
+        for row in case_rows:
+            row.update(recomputed[str(row["method"])])
         _write_csv(run_dir / "pipeline_runs.csv", run_rows)
         _write_json(run_dir / "experiment_config.json", asdict(cfg))
         expected_count = len(END_TO_END_METHODS) * 6
@@ -684,6 +801,31 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     stage1 = _write_csv(tmp_path / "stage1" / "pipeline_summary.csv", stage1_rows)
     stage2 = _stage2_artifacts(tmp_path)
     return suite, target, stage1, stage2
+
+
+def test_stage1_loader_preserves_protocol_and_timing_reporting_contract(
+    tmp_path: Path,
+) -> None:
+    raw_rows = _all_stage1_rows()
+    _materialize_stage1_evidence(tmp_path, raw_rows)
+    summary_path = _write_csv(tmp_path / "stage1" / "pipeline_summary.csv", raw_rows)
+
+    normalized = load_stage1_summaries((summary_path,))
+
+    assert normalized
+    assert {row["protocol_family"] for row in normalized} == {STAGE1_PROTOCOL}
+    assert {row["timing_scope"] for row in normalized} == {
+        EXPECTED_STAGE1_TIMING_SCOPE
+    }
+    # Exercise the same canonical projection used by the Stage 1 report tables.
+    projected = [
+        {column: row[column] for column in STAGE1_TABLE_COLUMNS}
+        for row in normalized
+    ]
+    assert all(row["protocol_family"] == STAGE1_PROTOCOL for row in projected)
+    assert all(
+        row["timing_scope"] == EXPECTED_STAGE1_TIMING_SCOPE for row in projected
+    )
 
 
 def _sync_stage2_artifact_sha(stage2: Path, artifact_path: Path) -> None:
@@ -712,14 +854,27 @@ def _build(
         target_payload = json.loads(target.read_text(encoding="utf-8"))
         suite_payload = json.loads(suite.read_text(encoding="utf-8"))
         box_budget = int(suite_payload["base"]["box_budget"])
-        inverse_max_size = int(suite_payload["base"]["inverse_max_size"])
+        active_box_upper_bound = int(
+            suite_payload["base"].get("expected_active_box_size", box_budget)
+        )
+        inverse_max_size = int(
+            suite_payload.get("stage2_fixed_ab", {}).get(
+                "inverse_max_size", suite_payload["base"]["inverse_max_size"]
+            )
+        )
+        default_inverse_max_size = int(
+            suite_payload.get("stage2_fixed_ab", {}).get(
+                "default_inverse_max_size",
+                suite_payload["base"]["inverse_max_size"],
+            )
+        )
         feasibility = _write_json(
             tmp_path / "stage2_feasibility.json",
             {
                 "schema_version": 1,
                 "protocol_family": "controlled_fixed_system",
                 "decision_basis": (
-                    "prospective configured box-budget cap before timing"
+                    "prospective declared active-box upper bound before timing"
                 ),
                 **{
                     field: target_payload[field]
@@ -741,8 +896,19 @@ def _build(
                         "precompute_chunk_size",
                     )
                 },
+                **{
+                    field: target_payload[field]
+                    for field in FROZEN_METHOD_CONFIG
+                },
                 "box_budget": box_budget,
+                "active_box_upper_bound": active_box_upper_bound,
                 "inverse_max_size": inverse_max_size,
+                "default_inverse_max_size": default_inverse_max_size,
+                "default_resolved_kind": (
+                    "active-inverse"
+                    if active_box_upper_bound <= default_inverse_max_size
+                    else "active-eig"
+                ),
                 "methods": {
                     **{
                         method: {
@@ -758,11 +924,11 @@ def _build(
                         )
                     },
                     "active-inverse": {
-                        "feasible": box_budget <= inverse_max_size,
+                        "feasible": active_box_upper_bound <= inverse_max_size,
                         "reason": (
                             "prospective cap permits inverse"
-                            if box_budget <= inverse_max_size
-                            else "prospective box budget exceeds inverse cap"
+                            if active_box_upper_bound <= inverse_max_size
+                            else "prospective active box bound exceeds inverse cap"
                         ),
                     },
                 },
@@ -823,12 +989,11 @@ def test_full_report_uses_declared_profiles_target_and_paired_totals(
     )
     assert len(scale_rows) == 4 * len(STAGE1_FORMAL_METHODS)
     assert {row["suite_profile"] for row in scale_rows} == {"scale_10m_300m"}
-    assert (
-        next(row for row in scale_rows if row["method"] == "nystrom-krr")[
-            "speedup_vs_ours"
-        ]
-        == ""
-    )
+    nystrom = next(row for row in scale_rows if row["method"] == "nystrom-krr")
+    assert float(nystrom["speedup_vs_ours"]) == pytest.approx(8.0 / 5.0)
+    assert nystrom["usability_eligible"] == "False"
+    assert nystrom["reference_equivalent"] == "False"
+    assert nystrom["speedup_claim_eligible"] == "False"
 
 
 def test_stage2_speedup_uses_median_of_matched_repeat_ratios(
@@ -979,6 +1144,21 @@ def test_scale_resource_limit_row_is_preserved_and_plot_remains_auditable(
     limited.update(
         {
             "status": "resource_limit",
+            "execution_eligible": "False",
+            "usability_eligible": "False",
+            "usability_evaluated_repeats": "0",
+            "usability_passed_repeats": "0",
+            "reference_equivalent": "False",
+            "reference_evaluated_repeats": "0",
+            "reference_equivalent_repeats": "0",
+            "quality_qualified_performance_eligible": "False",
+            "ours_speedup_complete_pairing": "False",
+            "ours_speedup_claim_eligible": "False",
+            "ours_total_speedup": "",
+            "ours_setup_speedup": "",
+            "ours_solving_speedup": "",
+            "comparison_rmse_ratio_to_ours": "",
+            "comparison_rmse_delta_from_ours": "",
             "accuracy_eligible": "False",
             "performance_claim_eligible": "False",
             "accuracy_evaluated_repeats": "0",
@@ -1127,6 +1307,7 @@ def test_explicit_feasibility_matrix_can_document_missing_inverse(
     suite, target, stage1, stage2 = _fixture(tmp_path)
     suite_payload = json.loads(suite.read_text(encoding="utf-8"))
     suite_payload["base"]["inverse_max_size"] = 1024
+    suite_payload["stage2_fixed_ab"]["inverse_max_size"] = 1024
     _write_json(suite, suite_payload)
     summary_rows = [
         row
@@ -1147,6 +1328,7 @@ def test_explicit_feasibility_matrix_can_document_missing_inverse(
     config_path = stage2.parent / "experiment_config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
     config["methods"] = executed_methods
+    config["inverse_max_size"] = 1024
     _write_json(config_path, config)
     manifest_path = stage2.parent / "system_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1172,6 +1354,46 @@ def test_explicit_feasibility_matrix_can_document_missing_inverse(
     claim = _claims(result)["stage2_formal_method_matrix_complete"]
     assert claim["status"] == "supported"
     assert claim["details"]["feasibility"]["active-inverse"]["feasible"] is False
+
+
+def test_stage2_runtime_inverse_cap_must_match_prospective_feasibility(
+    tmp_path: Path,
+) -> None:
+    suite, target, stage1, stage2 = _fixture(tmp_path)
+    config_path = stage2.parent / "experiment_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["inverse_max_size"] = 1024
+    _write_json(config_path, config)
+
+    with pytest.raises(ReportSchemaError, match="inverse_max_size"):
+        _build(tmp_path, stage1=stage1, stage2=stage2, suite=suite, target=target)
+
+
+def test_stage2_runtime_default_cap_must_preserve_frozen_default_route(
+    tmp_path: Path,
+) -> None:
+    suite, target, stage1, stage2 = _fixture(tmp_path)
+    config_path = stage2.parent / "experiment_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["default_inverse_max_size"] = 16384
+    _write_json(config_path, config)
+
+    with pytest.raises(ReportSchemaError, match="default_inverse_max_size"):
+        _build(tmp_path, stage1=stage1, stage2=stage2, suite=suite, target=target)
+
+
+def test_stage2_default_method_kind_must_match_declared_inverse_route(
+    tmp_path: Path,
+) -> None:
+    suite, target, stage1, stage2 = _fixture(tmp_path)
+    rows = list(csv.DictReader(stage2.open(newline="", encoding="utf-8")))
+    for row in rows:
+        if row["method"] == "default":
+            row["method_kind"] = "active-inverse"
+    _write_csv(stage2, rows)
+
+    with pytest.raises(ReportSchemaError, match="declared Stage-2 routing"):
+        _build(tmp_path, stage1=stage1, stage2=stage2, suite=suite, target=target)
 
 
 def test_stage2_measured_run_component_mismatch_is_rejected(tmp_path: Path) -> None:

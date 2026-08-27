@@ -33,6 +33,10 @@ from .end_to_end import (
     EndToEndConfig,
     summarize_pipeline_rows,
 )
+from .end_to_end_suite import (
+    BUDGET_ADAPTIVE_PARAMETER_POLICY,
+    BUDGET_ADAPTIVE_PARAMETER_SOURCE,
+)
 
 
 STAGE1_PROTOCOL = "end_to_end_krr"
@@ -106,12 +110,33 @@ STAGE1_REQUIRED = {
     "nufft_backend",
     "precompute_chunk_size",
     "box_budget",
+    "configured_active_rank",
+    "configured_full_eig_rank",
+    "configured_active_topk",
+    "configured_expected_active_box_size",
+    "parameter_selection_policy",
+    "parameter_source",
     "setup_seconds_median",
     "solving_phase_seconds_median",
     "setup_seconds_at_median_total",
     "solving_phase_seconds_at_median_total",
     "train_total_seconds_median",
     "test_rmse_median",
+    "execution_eligible",
+    "usability_eligible",
+    "usability_evaluated_repeats",
+    "usability_passed_repeats",
+    "reference_equivalent",
+    "reference_evaluated_repeats",
+    "reference_equivalent_repeats",
+    "quality_qualified_performance_eligible",
+    "ours_speedup_complete_pairing",
+    "ours_speedup_claim_eligible",
+    "ours_total_speedup",
+    "ours_setup_speedup",
+    "ours_solving_speedup",
+    "comparison_rmse_ratio_to_ours",
+    "comparison_rmse_delta_from_ours",
     "accuracy_eligible",
     "performance_claim_eligible",
     "accuracy_max_rmse",
@@ -188,6 +213,8 @@ STAGE1_TABLE_COLUMNS = (
     "declared_case_id",
     "source_file",
     "run_dir",
+    "protocol_family",
+    "timing_scope",
     "suite_profile",
     "robustness_axes",
     "dataset_stem",
@@ -207,9 +234,20 @@ STAGE1_TABLE_COLUMNS = (
     "nufft_backend",
     "precompute_chunk_size",
     "box_budget",
+    "configured_active_rank",
+    "configured_full_eig_rank",
+    "configured_active_topk",
+    "configured_expected_active_box_size",
+    "parameter_selection_policy",
+    "parameter_source",
     "method",
     "formal_method",
     "status",
+    "execution_eligible",
+    "usability_eligible",
+    "usability_evidence_complete",
+    "reference_equivalent",
+    "quality_qualified_performance_eligible",
     "accuracy_eligible",
     "performance_claim_eligible",
     "accuracy_evidence_complete",
@@ -219,19 +257,31 @@ STAGE1_TABLE_COLUMNS = (
     "expected_measured_repeats",
     "accuracy_evaluated_repeats",
     "accuracy_passed_repeats",
+    "usability_evaluated_repeats",
+    "usability_passed_repeats",
+    "reference_evaluated_repeats",
+    "reference_equivalent_repeats",
     "iterations_median",
     "resource_required_bytes",
     "resource_effective_cap_bytes",
     "resource_declared_cap_bytes",
     "resource_available_device_bytes",
     "speedup_claim_eligible",
+    "speedup_complete_pairing",
     "test_rmse",
     "test_r2",
+    "rmse_ratio_to_reference",
+    "rmse_relative_delta_to_reference",
+    "rmse_ratio_to_ours",
+    "rmse_delta_from_ours",
+    "pareto_nondominated",
     "iterations_median",
     "setup_seconds",
     "solving_phase_seconds",
     "train_total_seconds",
     "speedup_vs_ours",
+    "setup_speedup_vs_ours",
+    "solving_speedup_vs_ours",
 )
 
 STAGE2_TABLE_COLUMNS = (
@@ -699,6 +749,21 @@ def _verify_stage1_case_evidence(
                 )
         if (
             _as_int(observed.get("box_budget")) != int(cfg.box_budget)
+            or _as_int(observed.get("configured_active_rank")) != int(cfg.rank)
+            or _as_int(observed.get("configured_full_eig_rank"))
+            != int(cfg.full_eig_rank or cfg.rank)
+            or _as_int(observed.get("configured_active_topk"))
+            != (None if cfg.active_topk is None else int(cfg.active_topk))
+            or _as_int(observed.get("configured_expected_active_box_size"))
+            != (
+                None
+                if cfg.expected_active_box_size is None
+                else int(cfg.expected_active_box_size)
+            )
+            or str(observed.get("parameter_selection_policy", "")).strip()
+            != str(cfg.parameter_selection_policy)
+            or str(observed.get("parameter_source", "")).strip()
+            != str(cfg.parameter_source)
             or not _optional_numbers_match(
                 observed.get("accuracy_max_rmse"), cfg.accuracy_max_rmse
             )
@@ -721,6 +786,11 @@ def _verify_stage1_case_evidence(
         "accuracy_relative_tolerance",
         "accuracy_max_rmse",
         "accuracy_min_r2",
+        "ours_total_speedup",
+        "ours_setup_speedup",
+        "ours_solving_speedup",
+        "comparison_rmse_ratio_to_ours",
+        "comparison_rmse_delta_from_ours",
     )
     integer_fields = (
         "measured_repeats",
@@ -728,8 +798,21 @@ def _verify_stage1_case_evidence(
         "successful_repeats",
         "accuracy_evaluated_repeats",
         "accuracy_passed_repeats",
+        "usability_evaluated_repeats",
+        "usability_passed_repeats",
+        "reference_evaluated_repeats",
+        "reference_equivalent_repeats",
     )
-    boolean_fields = ("accuracy_eligible", "performance_claim_eligible")
+    boolean_fields = (
+        "execution_eligible",
+        "usability_eligible",
+        "reference_equivalent",
+        "quality_qualified_performance_eligible",
+        "ours_speedup_complete_pairing",
+        "ours_speedup_claim_eligible",
+        "accuracy_eligible",
+        "performance_claim_eligible",
+    )
     for method, expected in recomputed_by_method.items():
         observed = summary_by_method.get(method)
         if observed is None or str(observed.get("status", "")) != str(
@@ -806,6 +889,12 @@ def load_stage1_summaries(
             metadata_fields = (
                 *TARGET_REGIME_FIELDS,
                 "box_budget",
+                "configured_active_rank",
+                "configured_full_eig_rank",
+                "configured_active_topk",
+                "configured_expected_active_box_size",
+                "parameter_selection_policy",
+                "parameter_source",
                 "robustness_axes",
             )
             inconsistent = [
@@ -853,6 +942,10 @@ def load_stage1_summaries(
                 and str(template.get("nufft_backend", "")).strip()
                 and (_as_int(template.get("precompute_chunk_size")) or 0) > 0
                 and (_as_int(template.get("box_budget")) or 0) > 0
+                and (_as_int(template.get("configured_active_rank")) or 0) > 0
+                and (_as_int(template.get("configured_full_eig_rank")) or 0) > 0
+                and str(template.get("parameter_selection_policy", "")).strip()
+                and str(template.get("parameter_source", "")).strip()
             ):
                 raise ReportSchemaError(
                     f"{path}: invalid numeric Stage 1 case metadata for {declared_case_id}"
@@ -893,38 +986,41 @@ def load_stage1_summaries(
                 (row for row in case_rows if str(row["method"]) == ours_method), None
             )
 
-            def accuracy_evidence(row: Mapping[str, Any]) -> bool:
+            def usability_evidence(row: Mapping[str, Any]) -> bool:
                 max_rmse = _as_float(row.get("accuracy_max_rmse"))
                 min_r2 = _as_float(row.get("accuracy_min_r2"))
                 expected = _as_int(row.get("expected_measured_repeats"))
-                evaluated = _as_int(row.get("accuracy_evaluated_repeats"))
-                passed = _as_int(row.get("accuracy_passed_repeats"))
-                has_absolute_gate = math.isfinite(max_rmse) or math.isfinite(min_r2)
+                evaluated = _as_int(row.get("usability_evaluated_repeats"))
+                passed = _as_int(row.get("usability_passed_repeats"))
+                has_declared_range = math.isfinite(max_rmse) or math.isfinite(min_r2)
                 return bool(
-                    has_absolute_gate
+                    has_declared_range
                     and expected is not None
                     and expected > 0
                     and evaluated == expected
-                    and passed == expected
+                    and passed is not None
+                    and 0 <= passed <= expected
                 )
 
-            ours_total = (
-                _as_float(ours.get("train_total_seconds_median")) if ours else math.nan
-            )
-            ours_accuracy = bool(
+            ours_usable = bool(
                 ours
-                and _as_bool(ours.get("accuracy_eligible"))
-                and accuracy_evidence(ours)
+                and _as_bool(ours.get("usability_eligible"))
+                and usability_evidence(ours)
             )
-            ours_performance = bool(
-                ours and _as_bool(ours.get("performance_claim_eligible"))
+            ours_quality_qualified = bool(
+                ours
+                and _as_bool(ours.get("quality_qualified_performance_eligible"))
             )
             for row in case_rows:
-                evidence_complete = accuracy_evidence(row)
-                accuracy = bool(
-                    _as_bool(row.get("accuracy_eligible")) and evidence_complete
+                evidence_complete = usability_evidence(row)
+                usability = bool(
+                    _as_bool(row.get("usability_eligible")) and evidence_complete
                 )
-                performance = _as_bool(row.get("performance_claim_eligible"))
+                execution = _as_bool(row.get("execution_eligible"))
+                reference_equivalent = _as_bool(row.get("reference_equivalent"))
+                quality_qualified = _as_bool(
+                    row.get("quality_qualified_performance_eligible")
+                )
                 total = _as_float(row.get("train_total_seconds_median"))
                 paired_setup = _as_float(row.get("setup_seconds_at_median_total"))
                 paired_solve = _as_float(
@@ -939,13 +1035,17 @@ def load_stage1_summaries(
                         f"{path}: {declared_case_id}/{row['method']} paired setup+solve "
                         "does not equal train_total_seconds_median"
                     )
+                speedup_complete = bool(
+                    _as_bool(row.get("ours_speedup_complete_pairing"))
+                    and _finite_positive(row.get("ours_total_speedup"))
+                )
                 speedup_eligible = bool(
-                    accuracy
-                    and performance
-                    and ours_accuracy
-                    and ours_performance
-                    and _finite_positive(total)
-                    and _finite_positive(ours_total)
+                    speedup_complete
+                    and _as_bool(row.get("ours_speedup_claim_eligible"))
+                    and usability
+                    and quality_qualified
+                    and ours_usable
+                    and ours_quality_qualified
                 )
                 normalized.append(
                     {
@@ -953,6 +1053,10 @@ def load_stage1_summaries(
                         "declared_case_id": declared_case_id,
                         "source_file": str(path),
                         "run_dir": str(row.get("run_dir", "")),
+                        "protocol_family": str(
+                            row.get("protocol_family", "")
+                        ).strip(),
+                        "timing_scope": str(row.get("timing_scope", "")).strip(),
                         "suite_profile": suite_profile,
                         "robustness_axes": axes,
                         "dataset": dataset_family,
@@ -974,11 +1078,36 @@ def load_stage1_summaries(
                             row.get("precompute_chunk_size")
                         ),
                         "box_budget": _as_int(row.get("box_budget")),
+                        "configured_active_rank": _as_int(
+                            row.get("configured_active_rank")
+                        ),
+                        "configured_full_eig_rank": _as_int(
+                            row.get("configured_full_eig_rank")
+                        ),
+                        "configured_active_topk": _as_int(
+                            row.get("configured_active_topk")
+                        ),
+                        "configured_expected_active_box_size": _as_int(
+                            row.get("configured_expected_active_box_size")
+                        ),
+                        "parameter_selection_policy": str(
+                            row.get("parameter_selection_policy", "")
+                        ).strip(),
+                        "parameter_source": str(
+                            row.get("parameter_source", "")
+                        ).strip(),
                         "method": str(row["method"]),
                         "formal_method": str(row["method"]) in STAGE1_FORMAL_METHODS,
                         "status": str(row.get("status", "")),
-                        "accuracy_eligible": accuracy,
-                        "performance_claim_eligible": performance,
+                        "execution_eligible": execution,
+                        "usability_eligible": usability,
+                        "usability_evidence_complete": evidence_complete,
+                        "reference_equivalent": reference_equivalent,
+                        "quality_qualified_performance_eligible": quality_qualified,
+                        # Backward-compatible aliases now carry the broad
+                        # usability semantics rather than 1% equivalence.
+                        "accuracy_eligible": usability,
+                        "performance_claim_eligible": quality_qualified,
                         "accuracy_evidence_complete": evidence_complete,
                         "accuracy_max_rmse": _as_float(row.get("accuracy_max_rmse")),
                         "accuracy_min_r2": _as_float(row.get("accuracy_min_r2")),
@@ -994,6 +1123,18 @@ def load_stage1_summaries(
                         "accuracy_passed_repeats": _as_int(
                             row.get("accuracy_passed_repeats")
                         ),
+                        "usability_evaluated_repeats": _as_int(
+                            row.get("usability_evaluated_repeats")
+                        ),
+                        "usability_passed_repeats": _as_int(
+                            row.get("usability_passed_repeats")
+                        ),
+                        "reference_evaluated_repeats": _as_int(
+                            row.get("reference_evaluated_repeats")
+                        ),
+                        "reference_equivalent_repeats": _as_int(
+                            row.get("reference_equivalent_repeats")
+                        ),
                         "iterations_median": _as_float(row.get("iterations_median")),
                         "resource_required_bytes": _as_int(
                             row.get("resource_required_bytes")
@@ -1008,18 +1149,67 @@ def load_stage1_summaries(
                             row.get("resource_available_device_bytes")
                         ),
                         "speedup_claim_eligible": speedup_eligible,
+                        "speedup_complete_pairing": speedup_complete,
                         "test_rmse": _as_float(row.get("test_rmse_median")),
                         "test_r2": _as_float(row.get("test_r2_median")),
+                        "rmse_ratio_to_reference": _as_float(
+                            row.get("rmse_ratio_to_reference_median")
+                        ),
+                        "rmse_relative_delta_to_reference": _as_float(
+                            row.get("rmse_relative_delta_to_reference_median")
+                        ),
+                        "rmse_ratio_to_ours": _as_float(
+                            row.get("comparison_rmse_ratio_to_ours")
+                        ),
+                        "rmse_delta_from_ours": _as_float(
+                            row.get("comparison_rmse_delta_from_ours")
+                        ),
                         # Paired components from the repeat attaining median total.
                         "setup_seconds": paired_setup,
                         "solving_phase_seconds": paired_solve,
                         "train_total_seconds": total,
-                        # Comparator total / our total; above one favors ours.
+                        # Paired-repeat median comparator total / ours total.
+                        # This raw trade-off metric is retained even when either
+                        # method lies outside the broad usability range.
                         "speedup_vs_ours": (
-                            total / ours_total if speedup_eligible else math.nan
+                            _as_float(row.get("ours_total_speedup"))
+                            if speedup_complete
+                            else math.nan
                         ),
+                        "setup_speedup_vs_ours": _as_float(
+                            row.get("ours_setup_speedup")
+                        ),
+                        "solving_speedup_vs_ours": _as_float(
+                            row.get("ours_solving_speedup")
+                        ),
+                        "pareto_nondominated": False,
                     }
                 )
+    by_case: dict[str, list[dict[str, Any]]] = {}
+    for row in normalized:
+        by_case.setdefault(str(row["case_id"]), []).append(row)
+    for case_rows in by_case.values():
+        finite_rows = [
+            row
+            for row in case_rows
+            if _finite_positive(row.get("train_total_seconds"))
+            and _finite_positive(row.get("test_rmse"))
+        ]
+        for row in finite_rows:
+            time_value = _as_float(row["train_total_seconds"])
+            rmse_value = _as_float(row["test_rmse"])
+            row["pareto_nondominated"] = not any(
+                (
+                    _as_float(other["train_total_seconds"]) <= time_value
+                    and _as_float(other["test_rmse"]) <= rmse_value
+                    and (
+                        _as_float(other["train_total_seconds"]) < time_value
+                        or _as_float(other["test_rmse"]) < rmse_value
+                    )
+                )
+                for other in finite_rows
+                if other is not row
+            )
     return normalized
 
 
@@ -1033,11 +1223,24 @@ def _load_json_if_present(path: Path) -> dict[str, Any]:
 
 
 TARGET_REGIME_FIELDS = tuple(STAGE2_SYSTEM_CONFIG_FIELDS)
+TARGET_METHOD_CONFIG_FIELDS = (
+    "rank",
+    "full_eig_rank",
+    "active_topk",
+    "expected_active_box_size",
+    "box_budget",
+    "parameter_selection_policy",
+    "parameter_source",
+)
 
 
 def load_selected_target(path: str | Path) -> dict[str, Any]:
     target = _load_required_json_object(path, "selected_target_regime")
-    missing = [field for field in TARGET_REGIME_FIELDS if target.get(field) is None]
+    missing = [
+        field
+        for field in (*TARGET_REGIME_FIELDS, *TARGET_METHOD_CONFIG_FIELDS)
+        if target.get(field) is None
+    ]
     if missing:
         raise ReportSchemaError(
             f"selected_target_regime is missing fields: {', '.join(missing)}"
@@ -1063,6 +1266,13 @@ def load_selected_target(path: str | Path) -> dict[str, Any]:
         and _finite_positive(target["lengthscale"])
         and _finite_positive(target["fourier_eps"])
         and _finite_positive(target["nufft_tol"])
+        and (_as_int(target["rank"]) or 0) > 0
+        and (_as_int(target["full_eig_rank"]) or 0) > 0
+        and (_as_int(target["active_topk"]) or 0) > 0
+        and (_as_int(target["expected_active_box_size"]) or 0) > 0
+        and (_as_int(target["box_budget"]) or 0) > 0
+        and str(target["parameter_selection_policy"]).strip()
+        and str(target["parameter_source"]).strip()
     ):
         raise ReportSchemaError("selected_target_regime contains invalid values")
     return target
@@ -1086,6 +1296,21 @@ def load_stage1_suite(path: str | Path) -> dict[str, Any]:
     base = suite.get("base")
     if not isinstance(base, dict) or (_as_int(base.get("box_budget")) or 0) <= 0:
         raise ReportSchemaError("Stage 1 suite base.box_budget must be positive")
+    stage2_policy = suite.get("stage2_fixed_ab", {})
+    if not isinstance(stage2_policy, dict):
+        raise ReportSchemaError("stage2_fixed_ab must be an object when declared")
+    if stage2_policy and (
+        (_as_int(stage2_policy.get("inverse_max_size")) or 0) <= 0
+        or (
+            "default_inverse_max_size" in stage2_policy
+            and (
+                _as_int(stage2_policy.get("default_inverse_max_size")) or 0
+            ) <= 0
+        )
+    ):
+        raise ReportSchemaError(
+            "stage2_fixed_ab inverse caps must be positive when declared"
+        )
     for field in (
         "lambda_values",
         "lengthscale_values",
@@ -1135,7 +1360,7 @@ def load_stage2_feasibility(
     if not isinstance(methods, dict):
         raise ReportSchemaError("Stage 2 feasibility matrix requires a methods object")
     if str(payload.get("decision_basis", "")).strip() != (
-        "prospective configured box-budget cap before timing"
+        "prospective declared active-box upper bound before timing"
     ):
         raise ReportSchemaError(
             "Stage 2 feasibility matrix has an invalid or post-hoc decision basis"
@@ -1151,6 +1376,21 @@ def load_stage2_feasibility(
         raise ReportSchemaError(
             "Stage 2 feasibility matrix does not match the frozen target: "
             f"{target_mismatches}"
+        )
+    method_target_mismatches = [
+        field
+        for field in TARGET_METHOD_CONFIG_FIELDS
+        if (
+            str(payload.get(field, "")).strip()
+            != str(selected_target.get(field, "")).strip()
+            if field in {"parameter_selection_policy", "parameter_source"}
+            else _as_int(payload.get(field)) != _as_int(selected_target.get(field))
+        )
+    ]
+    if method_target_mismatches:
+        raise ReportSchemaError(
+            "Stage 2 feasibility matrix does not match the frozen method "
+            f"configuration: {method_target_mismatches}"
         )
     declared_matches: list[dict[str, Any]] = []
     for case in suite["profiles"]["scale_10m_300m"].get("cases", []):
@@ -1170,14 +1410,33 @@ def load_stage2_feasibility(
         )
     declared = declared_matches[0]
     box_budget = _as_int(payload.get("box_budget"))
+    active_box_upper_bound = _as_int(payload.get("active_box_upper_bound"))
     inverse_max_size = _as_int(payload.get("inverse_max_size"))
+    default_inverse_max_size = _as_int(
+        payload.get("default_inverse_max_size")
+    )
+    declared_active_box_upper_bound = _as_int(
+        declared.get("expected_active_box_size")
+    ) or _as_int(declared.get("box_budget"))
+    declared_stage2_inverse_max_size = _as_int(
+        suite.get("stage2_fixed_ab", {}).get("inverse_max_size")
+    ) or _as_int(declared.get("inverse_max_size"))
+    declared_default_inverse_max_size = _as_int(
+        suite.get("stage2_fixed_ab", {}).get("default_inverse_max_size")
+    ) or _as_int(declared.get("inverse_max_size"))
     if (
         box_budget != _as_int(declared.get("box_budget"))
-        or inverse_max_size != _as_int(declared.get("inverse_max_size"))
+        or active_box_upper_bound != declared_active_box_upper_bound
+        or inverse_max_size != declared_stage2_inverse_max_size
+        or default_inverse_max_size != declared_default_inverse_max_size
         or box_budget is None
+        or active_box_upper_bound is None
         or inverse_max_size is None
+        or default_inverse_max_size is None
         or box_budget <= 0
+        or active_box_upper_bound <= 0
         or inverse_max_size <= 0
+        or default_inverse_max_size <= 0
     ):
         raise ReportSchemaError(
             "Stage 2 feasibility caps do not match the suite-declared frozen target"
@@ -1214,12 +1473,32 @@ def load_stage2_feasibility(
             raise ReportSchemaError(
                 f"Stage 2 mandatory method {mandatory!r} cannot be declared infeasible"
             )
-    expected_inverse_feasible = box_budget <= inverse_max_size
+    expected_inverse_feasible = active_box_upper_bound <= inverse_max_size
     if normalized["active-inverse"]["feasible"] != expected_inverse_feasible:
         raise ReportSchemaError(
             "active-inverse feasibility must equal the prospective rule "
-            "box_budget <= inverse_max_size"
+            "active_box_upper_bound <= inverse_max_size"
         )
+    expected_default_kind = (
+        "active-inverse"
+        if active_box_upper_bound <= default_inverse_max_size
+        else "active-eig"
+    )
+    if str(payload.get("default_resolved_kind", "")).strip() != expected_default_kind:
+        raise ReportSchemaError(
+            "default_resolved_kind must match the frozen active-box bound and "
+            "default_inverse_max_size"
+        )
+    # Carry the audited Stage-2-only cap into the method matrix so the actual
+    # experiment_config can be checked later without conflating this override
+    # with the smaller Stage-1 default-routing cap in selected_target.
+    normalized["active-inverse"]["declared_inverse_max_size"] = inverse_max_size
+    normalized["default"][
+        "declared_default_inverse_max_size"
+    ] = default_inverse_max_size
+    normalized["active-inverse"][
+        "declared_active_box_upper_bound"
+    ] = active_box_upper_bound
     return normalized
 
 
@@ -1388,9 +1667,43 @@ def load_stage2_summaries(
         formal_warmup_repeats = _as_int(experiment_config.get("warmup_repeats"))
         configured_tol = _as_float(experiment_config.get("tol"))
         configured_maxiter = _as_int(experiment_config.get("maxiter"))
+        configured_inverse_max_size = _as_int(
+            experiment_config.get("inverse_max_size")
+        )
+        configured_default_inverse_max_size = _as_int(
+            experiment_config.get("default_inverse_max_size")
+        )
+        declared_inverse_max_size = _as_int(
+            feasibility.get("active-inverse", {}).get(
+                "declared_inverse_max_size"
+            )
+        )
+        declared_default_inverse_max_size = _as_int(
+            feasibility.get("default", {}).get(
+                "declared_default_inverse_max_size"
+            )
+        )
         configured_methods = [
             str(method) for method in experiment_config.get("methods", [])
         ]
+        method_config_mismatches = [
+            field
+            for field in TARGET_METHOD_CONFIG_FIELDS
+            if field not in {"box_budget"}
+            and str(experiment_config.get(field, "")).strip()
+            != str(selected_target.get(field, "")).strip()
+        ]
+        if _as_int(experiment_config.get("box_budget")) != _as_int(
+            selected_target.get("box_budget")
+        ):
+            method_config_mismatches.append("box_budget")
+        if configured_inverse_max_size != declared_inverse_max_size:
+            method_config_mismatches.append("inverse_max_size")
+        if (
+            configured_default_inverse_max_size
+            != declared_default_inverse_max_size
+        ):
+            method_config_mismatches.append("default_inverse_max_size")
         if (
             formal_measured_repeats is None
             or formal_measured_repeats < 5
@@ -1409,11 +1722,14 @@ def load_stage2_summaries(
             or [str(method) for method in completion.get("methods", [])] != labels
             or _as_int(completion.get("summary_row_count")) != len(labels)
             or _as_int(completion.get("run_row_count")) != len(run_rows)
+            or method_config_mismatches
         ):
             raise ReportSchemaError(
                 f"{completion_path}: Stage 2 config/completion must agree on at least "
                 "one warmup, five measured repeats, methods, tol/maxiter, the zero "
-                "initial vector protocol, and row counts"
+                "initial vector protocol, row counts, and the frozen Stage-1 method "
+                "parameters plus the declared Stage-2 inverse cap; "
+                f"method_config_mismatches={method_config_mismatches}"
             )
         for run in run_rows:
             run_method = str(run.get("method", "")).strip()
@@ -1607,6 +1923,24 @@ def load_stage2_summaries(
         for row in rows:
             method = str(row["method"])
             method_kind = str(row.get("method_kind") or method)
+            expected_method_kind = {
+                "cg": "cg",
+                "jacobi": "jacobi",
+                "active-inverse": "active-inverse",
+                "active-eig": "active-eig",
+                "full-eig": "full-eig",
+                "default": (
+                    "active-inverse"
+                    if _as_int(selected_target.get("expected_active_box_size"))
+                    <= configured_default_inverse_max_size
+                    else "active-eig"
+                ),
+            }.get(method)
+            if expected_method_kind is not None and method_kind != expected_method_kind:
+                raise ReportSchemaError(
+                    f"{path}: {method} method_kind={method_kind!r} does not match "
+                    f"the declared Stage-2 routing {expected_method_kind!r}"
+                )
             result_role = str(row.get("result_role", ""))
             reporting_class = _stage2_method_class(method, method_kind, result_role)
             definition = str(row.get("solver_total_definition", "")).strip()
@@ -1990,13 +2324,16 @@ def build_stage1_robustness(
             and ours.get("speedup_claim_eligible")
             and _finite_positive(ours.get("train_total_seconds"))
         )
-        best_comparator = min(
-            (_as_float(row["train_total_seconds"]) for row in comparators),
+        paired_speedup_vs_fastest = min(
+            (
+                _as_float(row["speedup_vs_ours"])
+                for row in comparators
+                if _finite_positive(row.get("speedup_vs_ours"))
+            ),
             default=math.nan,
         )
-        ours_total = _as_float(ours.get("train_total_seconds")) if ours else math.nan
-        comparable = bool(ours_ok and _finite_positive(best_comparator))
-        speedup = best_comparator / ours_total if comparable else math.nan
+        comparable = bool(ours_ok and _finite_positive(paired_speedup_vs_fastest))
+        speedup = paired_speedup_vs_fastest if comparable else math.nan
         template = ours or case_rows[0]
         case_evidence.append(
             {
@@ -2019,11 +2356,28 @@ def build_stage1_robustness(
                 "nufft_backend": template.get("nufft_backend"),
                 "precompute_chunk_size": template.get("precompute_chunk_size"),
                 "box_budget": template.get("box_budget"),
+                "configured_active_rank": template.get("configured_active_rank"),
+                "configured_full_eig_rank": template.get(
+                    "configured_full_eig_rank"
+                ),
+                "configured_active_topk": template.get("configured_active_topk"),
+                "configured_expected_active_box_size": template.get(
+                    "configured_expected_active_box_size"
+                ),
+                "parameter_selection_policy": template.get(
+                    "parameter_selection_policy"
+                ),
+                "parameter_source": template.get("parameter_source"),
                 "accuracy_max_rmse": template.get("accuracy_max_rmse"),
                 "accuracy_min_r2": template.get("accuracy_min_r2"),
+                "ours_usability_and_timing_eligible": ours_ok,
                 "ours_accuracy_and_timing_eligible": ours_ok,
                 "eligible_comparator_count": len(comparators),
                 "speedup_vs_best_eligible_comparator": speedup,
+                "speedup_source": (
+                    "minimum paired-repeat median comparator/ours total among "
+                    "broad-usability-qualified comparators"
+                ),
                 "ours_faster": bool(comparable and speedup > 1.0),
                 "comparable": comparable,
             }
@@ -2031,7 +2385,7 @@ def build_stage1_robustness(
     robust_spec = suite["profiles"]["robustness_at_selected_target"]
     reference = {
         **{field: selected_target[field] for field in TARGET_REGIME_FIELDS},
-        "box_budget": _as_int(suite["base"]["box_budget"]),
+        "box_budget": _as_int(selected_target.get("box_budget")),
         "accuracy_max_rmse": _as_float(selected_target.get("accuracy_max_rmse")),
         "accuracy_min_r2": _as_float(selected_target.get("accuracy_min_r2")),
     }
@@ -2144,6 +2498,41 @@ def build_stage1_robustness(
                             design_errors.append(
                                 f"{threshold} does not match the declared dataset gate"
                             )
+                expected_method_config = {
+                    "configured_active_rank": _as_int(selected_target.get("rank")),
+                    "configured_full_eig_rank": _as_int(
+                        selected_target.get("full_eig_rank")
+                    ),
+                    "configured_active_topk": (
+                        None
+                        if dimension == "box_budget"
+                        else _as_int(selected_target.get("active_topk"))
+                    ),
+                    # The scale-case value is a provenance assertion for the
+                    # original system. Robustness systems must recompute |B|.
+                    "configured_expected_active_box_size": None,
+                    "parameter_selection_policy": (
+                        BUDGET_ADAPTIVE_PARAMETER_POLICY
+                        if dimension == "box_budget"
+                        else str(selected_target.get("parameter_selection_policy", ""))
+                    ),
+                    "parameter_source": (
+                        BUDGET_ADAPTIVE_PARAMETER_SOURCE
+                        if dimension == "box_budget"
+                        else str(selected_target.get("parameter_source", ""))
+                    ),
+                }
+                for config_field, expected_config in expected_method_config.items():
+                    observed_config = candidate.get(config_field)
+                    if config_field.startswith("configured_"):
+                        config_matches = _as_int(observed_config) == expected_config
+                    else:
+                        config_matches = str(observed_config) == str(expected_config)
+                    if not config_matches:
+                        design_errors.append(
+                            f"{config_field} changed: {observed_config!r} != "
+                            f"{expected_config!r}"
+                        )
             design_eligible = not design_errors
             comparable = bool(candidate and candidate["comparable"] and design_eligible)
             speedup = (
@@ -2255,7 +2644,8 @@ def build_stage1_robustness(
             "stage1_end_to_end_krr",
             "The robustness campaign is a complete predeclared OAT study at the frozen target.",
             "All four axes exactly match their suite-declared values and change only the "
-            "named axis while N, kernel settings, and other target fields stay fixed.",
+            "named axis while N, kernel settings, and frozen method parameters stay fixed; "
+            "the box-budget axis uses its separately declared adaptive score policy.",
             evaluated=4,
             supporting=design_support,
             contradicting=design_bad,
@@ -2308,8 +2698,8 @@ def audit_claims(
             faster_missing += 1
             continue
         accuracy_eval += 1
-        if bool(ours.get("accuracy_eligible")) and bool(
-            ours.get("performance_claim_eligible")
+        if bool(ours.get("usability_eligible")) and bool(
+            ours.get("quality_qualified_performance_eligible")
         ):
             accuracy_support += 1
             n_train = ours.get("n_train")
@@ -2329,14 +2719,21 @@ def audit_claims(
             faster_missing += 1
             continue
         faster_eval += 1
-        ours_total = _as_float(ours["train_total_seconds"])
-        best = min(
-            _as_float(row["train_total_seconds"]) for row in eligible_comparators
+        paired_speedup_vs_fastest = min(
+            (
+                _as_float(row["speedup_vs_ours"])
+                for row in eligible_comparators
+                if _finite_positive(row.get("speedup_vs_ours"))
+            ),
+            default=math.nan,
         )
-        if ours_total < best:
+        if math.isfinite(paired_speedup_vs_fastest) and paired_speedup_vs_fastest > 1.0:
             faster_support += 1
-        else:
+        elif math.isfinite(paired_speedup_vs_fastest):
             faster_bad += 1
+        else:
+            faster_missing += 1
+            faster_eval -= 1
 
     claims.append(
         _claim(
@@ -2353,12 +2750,12 @@ def audit_claims(
     )
     claims.append(
         _claim(
-            "stage1_proposed_accuracy_preserved",
+            "stage1_proposed_within_usable_quality_range",
             "stage1_end_to_end_krr",
-            "The proposed full KRR pipeline satisfies the frozen accuracy gate.",
-            "At least one prospective absolute RMSE/R2 gate is present and every expected "
-            "measured repeat is evaluated and passes; reported accuracy/performance eligibility "
-            "must also hold in every scale case.",
+            "The proposed full KRR pipeline remains inside the declared broad usable-quality range.",
+            "At least one prospective absolute RMSE/R2 bound is present and every expected "
+            "measured repeat is evaluated and remains within it. The descriptive 1% "
+            "reference-equivalence label is not required.",
             evaluated=accuracy_eval,
             supporting=accuracy_support,
             contradicting=accuracy_bad,
@@ -2370,8 +2767,8 @@ def audit_claims(
             "stage1_proposed_fastest_train_total",
             "stage1_end_to_end_krr",
             "The proposed full KRR pipeline has the lowest method-owned algorithmic training total.",
-            "In every comparable case, proposed train_total_seconds is lower than the "
-            "best accuracy-eligible formal KRR comparator.",
+            "In every comparable case, the paired-repeat median comparator/ours total "
+            "is above one for the fastest broad-usability-qualified formal comparator.",
             evaluated=faster_eval,
             supporting=faster_support,
             contradicting=faster_bad,
@@ -2384,8 +2781,8 @@ def audit_claims(
         _claim(
             "stage1_scale_10m_to_300m",
             "stage1_end_to_end_krr",
-            "Accuracy-qualified proposed-pipeline results cover 10M through 300M training rows.",
-            "Eligible proposed runs include each of 10M, 30M, 100M, and 300M; "
+            "Usability-qualified proposed-pipeline results cover 10M through 300M training rows.",
+            "Broad-usability-qualified proposed runs include each of 10M, 30M, 100M, and 300M; "
             "no extrapolated or pilot rows count.",
             evaluated=1 if covered_n else 0,
             supporting=1 if scale_supported else 0,
@@ -2600,6 +2997,22 @@ def _validate_stage1_scale_design(
             },
             "box_budget": _as_int(template.get("box_budget"))
             == _as_int(expected.get("box_budget")),
+            "rank": _as_int(template.get("configured_active_rank"))
+            == _as_int(expected.get("rank")),
+            "full_eig_rank": _as_int(template.get("configured_full_eig_rank"))
+            == _as_int(expected.get("full_eig_rank") or expected.get("rank")),
+            "active_topk": _as_int(template.get("configured_active_topk"))
+            == _as_int(expected.get("active_topk")),
+            "expected_active_box_size": _as_int(
+                template.get("configured_expected_active_box_size")
+            )
+            == _as_int(expected.get("expected_active_box_size")),
+            "parameter_selection_policy": str(
+                template.get("parameter_selection_policy", "")
+            ).strip()
+            == str(expected.get("parameter_selection_policy", "")).strip(),
+            "parameter_source": str(template.get("parameter_source", "")).strip()
+            == str(expected.get("parameter_source", "")).strip(),
             "accuracy_max_rmse": _optional_numbers_match(
                 template.get("accuracy_max_rmse"),
                 expected.get("accuracy_max_rmse"),
@@ -2664,6 +3077,19 @@ def _validate_stage1_scale_design(
         if not _optional_numbers_match(
             selected_target.get(field), recomputed_target.get(field)
         ):
+            mismatched_target_fields.append(field)
+    for field in (
+        "rank",
+        "full_eig_rank",
+        "active_topk",
+        "expected_active_box_size",
+        "box_budget",
+        "parameter_selection_policy",
+        "parameter_source",
+    ):
+        if str(selected_target.get(field, "")).strip() != str(
+            recomputed_target.get(field, "")
+        ).strip():
             mismatched_target_fields.append(field)
     if (
         mismatched_target_fields
@@ -2732,8 +3158,8 @@ def _make_plots(
         fig, axis = plt.subplots(figsize=(8.5, 5.2))
         for method in sorted({str(row["method"]) for row in valid}):
             subset = [row for row in valid if row["method"] == method]
-            eligible = [row for row in subset if bool(row["accuracy_eligible"])]
-            ineligible = [row for row in subset if not bool(row["accuracy_eligible"])]
+            eligible = [row for row in subset if bool(row["usability_eligible"])]
+            ineligible = [row for row in subset if not bool(row["usability_eligible"])]
             if eligible:
                 axis.scatter(
                     [row["train_total_seconds"] for row in eligible],
@@ -2749,11 +3175,25 @@ def _make_plots(
                     color="0.45",
                     s=48,
                 )
+        pareto = [row for row in valid if bool(row.get("pareto_nondominated"))]
+        if pareto:
+            axis.scatter(
+                [row["train_total_seconds"] for row in pareto],
+                [row["test_rmse"] for row in pareto],
+                marker="o",
+                facecolors="none",
+                edgecolors="black",
+                linewidths=1.2,
+                s=90,
+                label="Pareto frontier",
+            )
         axis.set_xscale("log")
         axis.set_yscale("log")
         axis.set_xlabel("Method-owned algorithmic training total (s)")
         axis.set_ylabel("Test RMSE")
-        axis.set_title("Stage 1: accuracy vs method-owned algorithmic training total")
+        axis.set_title(
+            "Stage 1: time-quality trade-off (x = outside broad usable range)"
+        )
         axis.grid(True, which="both", alpha=0.25)
         if resource_limits:
             axis.scatter([], [], marker="v", color="crimson", label="resource limit")
@@ -2891,8 +3331,8 @@ def _make_plots(
         axis.set_xticks(
             np.arange(len(labels)), labels, rotation=55, ha="right", fontsize=7
         )
-        axis.set_ylabel("Proposed speedup vs best eligible comparator")
-        axis.set_title("Stage 1: robustness evidence (accuracy-gated)")
+        axis.set_ylabel("Proposed paired speedup vs fastest usable comparator")
+        axis.set_title("Stage 1: robustness evidence (broad usability range)")
         fig.tight_layout()
         fig.savefig(robustness_path, dpi=180)
         plt.close(fig)
@@ -2900,7 +3340,7 @@ def _make_plots(
         _empty_plot(
             robustness_path,
             "Stage 1 robustness",
-            "No accuracy-gated robustness comparison",
+            "No broad-usability-qualified robustness comparison",
         )
     artifacts.append(robustness_path.name)
 
@@ -2914,7 +3354,14 @@ def _make_plots(
         and _finite_positive(row.get("solver_total_seconds"))
     ]
     if fixed:
-        labels = [f"{row['case_id'][:8]}\n{row['method']}" for row in fixed]
+        labels = [
+            (
+                f"{row['case_id'][:8]}\n{row['method']} [{row['method_kind']}]"
+                if row["method"] == "default"
+                else f"{row['case_id'][:8]}\n{row['method']}"
+            )
+            for row in fixed
+        ]
         totals = [row["solver_total_seconds"] for row in fixed]
         fig, axis = plt.subplots(figsize=(max(8, len(labels) * 0.7), 5.0))
         axis.bar(np.arange(len(labels)), totals)
@@ -2993,6 +3440,8 @@ def build_two_stage_report(config: TwoStageReportConfig) -> dict[str, Any]:
             "setup_seconds",
             "solving_phase_seconds",
             "train_total_seconds",
+            "usability_eligible",
+            "reference_equivalent",
             "accuracy_eligible",
         ),
     )

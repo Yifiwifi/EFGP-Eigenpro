@@ -711,12 +711,22 @@ def test_stage1_formal_report_uses_only_true_end_to_end_krr_rows(
         "ours-binned-default",
     ]
     rows = []
+    reference_rmse = 0.2 + methods.index("efgp-standard-full-eig") * 1e-5
     for family, stem in (
         ("Synthetic", "synthetic_true_func_2d_n300000000"),
         ("Winnebago", "USGS_LPC_IL_Winnebago_2018_ntrain300000000"),
     ):
         for n_train in (10_000_000, 30_000_000):
             for method_index, method in enumerate(methods):
+                test_rmse = (
+                    0.35
+                    if method == "nystrom-krr"
+                    else 0.2 + method_index * 1e-5
+                )
+                usability_eligible = method != "nystrom-krr"
+                setup_seconds = 2.0 + method_index
+                solving_seconds = 4.0 + method_index
+                train_total_seconds = setup_seconds + solving_seconds
                 rows.append(
                     {
                         "protocol_family": "end_to_end_krr",
@@ -727,15 +737,25 @@ def test_stage1_formal_report_uses_only_true_end_to_end_krr_rows(
                         "n_train": n_train,
                         "method": method,
                         "status": "ok",
-                        "accuracy_eligible": True,
-                        "performance_claim_eligible": True,
-                        "speedup_claim_eligible": True,
-                        "test_rmse": 0.2 + method_index * 1e-5,
+                        "execution_eligible": True,
+                        "usability_eligible": usability_eligible,
+                        "reference_equivalent": usability_eligible,
+                        "quality_qualified_performance_eligible": usability_eligible,
+                        "speedup_claim_eligible": usability_eligible,
+                        "speedup_complete_pairing": True,
+                        "pareto_nondominated": method
+                        in {"nystrom-krr", "rpcholesky-krr"},
+                        "test_rmse": test_rmse,
                         "test_r2": 0.99,
-                        "setup_seconds": 2.0 + method_index,
-                        "solving_phase_seconds": 4.0 + method_index,
-                        "train_total_seconds": 6.0 + 2 * method_index,
-                        "speedup_vs_ours": 1.25,
+                        "rmse_relative_delta_to_reference": (
+                            test_rmse / reference_rmse - 1.0
+                        ),
+                        "setup_seconds": setup_seconds,
+                        "solving_phase_seconds": solving_seconds,
+                        "train_total_seconds": train_total_seconds,
+                        "setup_speedup_vs_ours": setup_seconds / 7.0,
+                        "solving_speedup_vs_ours": solving_seconds / 9.0,
+                        "speedup_vs_ours": train_total_seconds / 16.0,
                     }
                 )
     import matplotlib.pyplot as plt
@@ -758,11 +778,43 @@ def test_stage1_formal_report_uses_only_true_end_to_end_krr_rows(
     }
     exec(compile(source, "stage1-report-cell", "exec"), namespace)
     assert (tmp_path / "stage1_krr_train_total_10m_300m.png").is_file()
-    assert (tmp_path / "stage1_krr_accuracy_gate.png").is_file()
+    assert (tmp_path / "stage1_krr_accuracy_tradeoff.png").is_file()
     assert (tmp_path / "stage1_krr_setup_solving_breakdown.png").is_file()
     audit = pd.read_csv(tmp_path / "stage1_krr_accuracy_timing_audit.csv")
+    assert len(audit) == 2 * 2 * len(methods)
     assert set(audit["method"]) == set(methods)
     assert set(audit["protocol_family"]) == {"end_to_end_krr"}
+    assert {
+        "execution_eligible",
+        "usability_eligible",
+        "reference_equivalent",
+        "quality_qualified_performance_eligible",
+        "speedup_claim_eligible",
+        "speedup_complete_pairing",
+        "pareto_nondominated",
+        "setup_speedup_vs_ours",
+        "solving_speedup_vs_ours",
+        "speedup_vs_ours",
+    }.issubset(audit.columns)
+
+    # A successful method may trade accuracy for speed.  It must remain in the
+    # formal time-quality evidence even when it falls outside the broad usable
+    # range and the descriptive reference-equivalence band.
+    low_quality = audit.loc[audit["method"].eq("nystrom-krr")]
+    assert len(low_quality) == 4
+    assert low_quality["execution_eligible"].eq(True).all()
+    assert low_quality["usability_eligible"].eq(False).all()
+    assert low_quality["reference_equivalent"].eq(False).all()
+    assert low_quality["speedup_claim_eligible"].eq(False).all()
+    assert low_quality["speedup_complete_pairing"].eq(True).all()
+    assert low_quality["pareto_nondominated"].eq(True).all()
+    assert low_quality[
+        [
+            "setup_speedup_vs_ours",
+            "solving_speedup_vs_ours",
+            "speedup_vs_ours",
+        ]
+    ].notna().all().all()
 
 
 def test_stage2_formal_report_uses_solver_total_and_rejects_krr_labels(
@@ -841,6 +893,12 @@ def test_stage2_formal_report_uses_solver_total_and_rejects_krr_labels(
             canonical_rows.append(
                 {
                     "method": method,
+                    "method_kind": (
+                        "active-eig" if method == "default" else method
+                    ),
+                    "result_role": (
+                        "deployable_default" if method == "default" else "baseline"
+                    ),
                     "system_id": "one-hashed-system",
                     "selection_seconds": selection,
                     "preconditioner_build_seconds": build,

@@ -11,9 +11,13 @@ model setup and solve. The primary total is
 `train_total_seconds = setup_seconds + solving_phase_seconds`; prediction is
 reported separately. This is the method-owned algorithmic training total, not
 process wall clock: common dataset I/O, backend creation, and host-to-device
-staging are disclosed exclusions. A speedup is emitted only when every measured
-repeat passes both the paired full-eig-relative accuracy gate and the
-prospectively declared dataset-specific absolute RMSE/R2 gate.
+staging are disclosed exclusions. For score-selected EFGP methods, the solving
+phase includes score selection, preconditioner construction, and CG/PCG solve.
+Every successful matched-repeat pair retains
+its raw setup, solving, and training-total speedups, including methods that trade
+accuracy for time. Dataset-specific absolute RMSE/R2 bounds define only a broad
+usable-quality range. The 1% full-eig-relative label is descriptive and never
+removes a timing or time-quality result.
 
 `end_to_end_suite.json` declares the 10M, 30M, 100M, and 300M scale matrix on
 Synthetic and Winnebago data. Exact RPCholesky keeps its published rank-by-N
@@ -23,13 +27,28 @@ uses a frozen CG-iteration window and declared dataset tie priority to select
 the Stage-2 target. An RPCholesky `resource_limit` is a predeclared large-scale
 scalability outcome: it receives no timing/accuracy speedup, but it does not
 prevent selecting a fixed-Fourier solver target when all Nyström/EFGP rows and
-the proposed/full-eig accuracy gates succeed. Any other failed method still
+the proposed/full-eig rows remain inside the declared broad usable-quality
+range. Any other failed method still
 blocks selection. Only after `selected_target_regime.json` is written does it
 materialize the declared lambda, lengthscale, box-budget, and dataset checks,
 using the exact per-N Winnebago artifact. The command fails closed if no target
 satisfies that rule. It also refuses to select from a partial scale matrix:
 every declared case must exist, and its raw repeat file is revalidated before
 target selection or any downstream run begins.
+
+The formal rerun does not rescan full-eig or proposed parameters on current
+timings. It freezes the archived `paper_table1_selected.csv` winners: separate
+full-eig rank `q`, proposed active top-k, and proposed eigenspace rank `q` for
+each dataset/N case. Only the configuration is transferred; all setup and solve
+times are measured again under the 1-warm-up + 5-measured-repeat protocol. The
+Synthetic source used noise 0.3 while the current nested master uses noise
+0.02, so those rows are explicitly labelled historical transfers rather than
+current-data optima. Lambda, lengthscale, and dataset robustness freeze the
+selected target configuration. The box-budget axis is separately labelled
+budget-adaptive because a frozen enclosing box cannot fit every smaller cap.
+If a lengthscale change produces fewer Fourier modes than the frozen top-k, the
+runner deterministically clips top-k to all available modes and records
+`frozen_score_topk_clamped_to_grid`; it never launches a replacement scan.
 
 ```bash
 python -m efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end_suite \
@@ -69,7 +88,9 @@ identical compatibility alias. The
 common Fourier setup is reported once and excluded from the primary
 fixed-system speedup. Every score-selected method (`default`,
 `active-inverse`, and `active-eig`) reruns and pays for its own score-box
-selection in every warm-up and measured invocation. Each repeated selection
+selection exactly once in every warm-up and measured invocation. The resolved
+active set is passed directly into the preconditioner builder, so construction
+does not repeat the score sort or enclosing-box calculation. Each repeated selection
 must reproduce the prospectively frozen box hash, rule, and effective rank.
 The runner performs one warm-up by default, shuffles the method order
 independently in every round, synchronizes the whole CUDA device at all timing
@@ -81,11 +102,17 @@ timed unit.
 
 The formal selected-target campaign writes `stage2_feasibility.json` before
 timing. CG, Jacobi, default, active-eig, and full-eig are mandatory.
-`active-inverse` is executed only when the frozen Stage-1 `box_budget` is no
-larger than the prospectively declared `inverse_max_size`; otherwise it is
-recorded as infeasible with a reason and is not allowed to abort the whole
-fixed-system case. The artifact is bound to all 15 system-building fields, not
-just dataset, N, and kernel parameters.
+`active-inverse` is executed only when the frozen Stage-1 active-box upper bound
+is no larger than the prospectively declared `inverse_max_size`; otherwise it
+is recorded as infeasible with a reason and is not allowed to abort the whole
+fixed-system case. The artifact is bound to all 15 system-building fields and
+the frozen method configuration, not just dataset, N, and kernel parameters.
+The formal suite declares a Stage-2 explicit-inverse cap of 16,384 while
+retaining a separate deployment/default threshold of 1,024. Thus Stage 2's
+primary `default` remains the same frozen active-eig route used by the Stage-1
+proposed pipeline; relaxing the explicit inverse feasibility cap cannot change
+that primary algorithm. On the expected 30M target, the archived active box has
+size 10,609, so the explicit inverse comparison is prospectively feasible.
 
 The canonical reporter does not trust summary eligibility flags. It recomputes
 Stage-1 accuracy and timing eligibility from each case's `pipeline_runs.csv`,

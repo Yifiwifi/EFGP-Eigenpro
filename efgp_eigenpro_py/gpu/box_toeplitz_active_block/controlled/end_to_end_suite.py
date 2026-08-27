@@ -4,10 +4,10 @@ The scale profile runs first.  A target regime is then selected by a declared,
 data-independent rule: all six pipeline rows must be present, core executable
 baselines must succeed (a prospectively declared RPCholesky hardware
 ``resource_limit`` is retained as a scalability result), the proposed and
-standard full-eig pipelines must pass every-repeat relative and absolute
-accuracy gates, and the standard EFGP-CG iteration count should lie in the
-predeclared interval.  Only after the selection is written to disk are lambda,
-lengthscale, box-budget, and dataset robustness cases materialized.
+standard full-eig pipelines must lie inside the prospectively declared broad
+absolute usable-quality range, and the standard EFGP-CG iteration count should
+lie in the predeclared interval.  Only after the selection is written to disk
+are lambda, lengthscale, box-budget, and dataset robustness cases materialized.
 """
 
 from __future__ import annotations
@@ -31,6 +31,24 @@ from .end_to_end import (
 
 
 DEFAULT_SUITE_PATH = Path(__file__).with_name("end_to_end_suite.json")
+
+# Method parameters do not define the fixed A,b system, but the Stage-1 winner
+# must carry them prospectively into robustness and Stage 2.  Summary fields use
+# explicit names so a per-method ``rank`` diagnostic cannot overwrite them.
+FROZEN_METHOD_CONFIG_FROM_SUMMARY = {
+    "rank": "configured_active_rank",
+    "full_eig_rank": "configured_full_eig_rank",
+    "active_topk": "configured_active_topk",
+    "expected_active_box_size": "configured_expected_active_box_size",
+    "box_budget": "box_budget",
+    "parameter_selection_policy": "parameter_selection_policy",
+    "parameter_source": "parameter_source",
+}
+BUDGET_ADAPTIVE_PARAMETER_POLICY = "budget_adaptive_score_rule"
+BUDGET_ADAPTIVE_PARAMETER_SOURCE = (
+    "robustness box-budget axis; score_tau selection under the declared cap, "
+    "separate from frozen historical-transfer rows"
+)
 
 
 class TargetSelectionError(RuntimeError):
@@ -118,6 +136,13 @@ def _truthy(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
 
+def _usability_eligible(row: dict[str, Any]) -> bool:
+    """Read the separated usability flag, with legacy artifact compatibility."""
+    if "usability_eligible" in row:
+        return _truthy(row.get("usability_eligible"))
+    return _truthy(row.get("accuracy_eligible"))
+
+
 def select_target_regime(
     summaries: Iterable[dict[str, Any]],
     *,
@@ -164,11 +189,11 @@ def select_target_regime(
                 and str(by_method[method].get("status")) == "resource_limit"
             )
         ]
-        accuracy_failures = [
+        usability_failures = [
             method
             for method in ("efgp-standard-full-eig", "ours-binned-default")
             if method not in by_method
-            or not _truthy(by_method[method].get("accuracy_eligible"))
+            or not _usability_eligible(by_method[method])
         ]
         cg_row = by_method.get("efgp-standard-cg", {})
         cg_iterations = _finite(cg_row.get("iterations_median"))
@@ -185,13 +210,18 @@ def select_target_regime(
             "failed_methods": failed,
             "resource_limited_methods": resource_limited,
             "allowed_resource_limit_methods": sorted(allowed_resource_limits),
-            "accuracy_failures": accuracy_failures,
+            "usability_failures": usability_failures,
+            # Compatibility alias for consumers of frozen target artifacts.
+            "accuracy_failures": usability_failures,
+            "accuracy_failures_legacy_alias_for": "usability_failures",
             "in_iteration_window": in_iteration_window,
             "declared_dataset_family": (
                 rows[0].get("declared_dataset_family") or rows[0].get("dataset_family")
             ),
         }
-        if not missing and not failed and not accuracy_failures and in_iteration_window:
+        for config_key, summary_key in FROZEN_METHOD_CONFIG_FROM_SUMMARY.items():
+            candidate[config_key] = rows[0].get(summary_key)
+        if not missing and not failed and not usability_failures and in_iteration_window:
             eligible.append(candidate)
         else:
             rejected.append(candidate)
@@ -219,8 +249,10 @@ def select_target_regime(
             "selection_rule": (
                 "largest N with all six declared pipeline rows present; successful "
                 "EFGP/Nystrom rows (a declared RPCholesky hardware resource-limit row "
-                "is retained as a valid scalability outcome); full-eig/ours accuracy "
-                "eligibility; and EFGP-CG iterations in the "
+                "is retained as a valid scalability outcome); full-eig/ours inside "
+                "the declared broad absolute usable-quality range (the "
+                "reference-equivalence label is descriptive only); and EFGP-CG "
+                "iterations in the "
                 f"predeclared [{int(cg_iteration_min)},{int(cg_iteration_max)}] interval"
             ),
             "eligible_candidate_count": len(eligible),
@@ -249,7 +281,13 @@ def materialize_robustness_plan(
     ):
         if target.get(key) is not None:
             base[key] = target[key]
+    for config_key in FROZEN_METHOD_CONFIG_FROM_SUMMARY:
+        if target.get(config_key) is not None:
+            base[config_key] = target[config_key]
     base["dataset_stem"] = target["dataset_stem"]
+    # Historical |B| is a scale-case provenance check.  A fixed top-k can form
+    # a different enclosing box when lambda, lengthscale, or dataset changes.
+    base["expected_active_box_size"] = None
 
     target_family = target.get("declared_dataset_family") or target.get(
         "dataset_family"
@@ -275,7 +313,13 @@ def materialize_robustness_plan(
         variations.append(
             (
                 f"box_budget_{int(value)}",
-                {"box_budget": int(value)},
+                {
+                    "box_budget": int(value),
+                    "active_topk": None,
+                    "expected_active_box_size": None,
+                    "parameter_selection_policy": BUDGET_ADAPTIVE_PARAMETER_POLICY,
+                    "parameter_source": BUDGET_ADAPTIVE_PARAMETER_SOURCE,
+                },
                 str(target_family) if target_family else None,
             )
         )
@@ -322,6 +366,12 @@ def materialize_robustness_plan(
                 for key in (
                     *STAGE2_SYSTEM_CONFIG_FIELDS,
                     "box_budget",
+                    "rank",
+                    "full_eig_rank",
+                    "active_topk",
+                    "expected_active_box_size",
+                    "parameter_selection_policy",
+                    "parameter_source",
                     "accuracy_max_rmse",
                     "accuracy_min_r2",
                 )
@@ -412,6 +462,14 @@ def _load_completed_case(cfg: EndToEndConfig) -> dict[str, Any] | None:
         "expected_measured_repeats",
         "accuracy_evaluated_repeats",
         "accuracy_passed_repeats",
+        "usability_evaluated_repeats",
+        "usability_passed_repeats",
+        "usability_eligible",
+        "execution_eligible",
+        "quality_qualified_performance_eligible",
+        "reference_evaluated_repeats",
+        "reference_equivalent_repeats",
+        "reference_equivalent",
         "setup_seconds_at_median_total",
         "solving_phase_seconds_at_median_total",
     }

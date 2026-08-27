@@ -50,15 +50,18 @@ and 572.2 GiB at 30M, 100M, and 300M samples. A prospectively declared
 `resource_limit` row is therefore retained as a genuine scalability outcome;
 it is never replaced by a smaller pilot and never receives a speedup. The
 target-selection rule may ignore only this declared RPCholesky resource limit,
-while still requiring all six method rows and successful, accuracy-eligible
-proposed/full-eig rows.
+while still requiring all six method rows and successful proposed/full-eig rows
+inside the declared broad absolute usable-quality range. The 1% reference
+equivalence label is descriptive and does not discard time-quality results.
 
 ## Stage 2: one identical Fourier A,b
 
 The canonical saved bundle is `colab_result/paper_one_click_49076d35b4e8`.
-Its manifests verify one fixed Fourier system per case, but its old runner did
-not add the separately measured score-selection time to active/default
-`build_plus_solve_seconds`. Those values are archival. New runs use
+Its manifests verify one fixed Fourier system per case, and its archived
+`build_plus_solve_seconds` already includes score selection inside
+`build_seconds`. Those values remain archival because they lack the corrected
+canonical naming and authoritative raw-repeat revalidation. New runs expose
+the timing definition directly as
 
 `solver_total_seconds = selection + preconditioner construction + solve`.
 
@@ -67,9 +70,8 @@ preconditioners, not data-space KRR. New configurations reject those names;
 the explicit exploratory names are `fourier-nystrom-precond` and
 `fourier-rpcholesky-precond`.
 
-Even before the small selection-time correction, the latest saved scale rows
-do not support the claim that the proposed default beats every formal solver
-baseline in total time. The ratio below is archived default
+The latest saved scale rows do not support the claim that the proposed default
+beats every formal solver baseline in total time. The ratio below is archived default
 build-plus-solve divided by full-grid EigenPro build-plus-solve; values above
 one mean the default is slower.
 
@@ -82,7 +84,11 @@ The saved data support acceleration over CG/Jacobi in selected cases and a
 memory advantage over the full-grid rank-256 correction, but not universal
 total-time superiority. The corrected formal Stage 2 campaign must include CG,
 Jacobi, default, active-eig, and full-eig. It includes active-inverse only when
-the prospective `box_budget <= inverse_max_size` rule declares it feasible.
+the prospective active-box upper bound is no larger than `inverse_max_size`.
+The rerun suite uses a separate Stage-2 inverse cap of 16,384, making the
+expected 30M target box of size 10,609 feasible for the explicit inverse row.
+The primary `default` retains its independent 1,024 threshold and therefore
+remains the frozen Stage-1 active-eig method.
 Full-inverse is not part of that formal matrix;
 `fixed_system_inverse_control_n10m` supplies it only as a separate legacy
 small-grid control.
@@ -91,8 +97,9 @@ small-grid control.
 
 The reporting module `two_stage_reporting.py` fails closed:
 
-- Stage 1 speedups require every measured repeat to pass both the paired
-  full-eig-relative accuracy gate and the declared absolute RMSE/R2 gates;
+- Stage 1 retains raw paired setup, solving, and training-total speedups for
+  every successful matched-repeat pair. Broad absolute RMSE/R2 bounds mark
+  usability, while full-eig-relative equivalence is descriptive only;
 - partial or failed scale campaigns stop before target selection; the selected
   Stage 1 target is recomputed from complete raw-repeat-verified scale evidence,
   and Stage 2 must match all 15 system-building configuration fields (including
@@ -114,7 +121,7 @@ The reporting module `two_stage_reporting.py` fails closed:
   tolerance, iteration limit, and zero initial vector;
 - the formal Stage 2 matrix requires CG, Jacobi, default, active-eig, and
   full-eig; active-inverse is also required whenever the prospectively
-  declared box-budget cap is within the declared inverse-size cap, and is
+  declared active-box upper bound is within the declared inverse-size cap, and is
   otherwise recorded as explicitly infeasible before timing; missing feasible
   methods or unknown rows block the headline;
 - shared Fourier setup is reported separately;

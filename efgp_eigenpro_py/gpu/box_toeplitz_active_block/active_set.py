@@ -131,6 +131,53 @@ def build_box_active_set(
     )
 
 
+def validate_precomputed_active_set(
+    active: BoxActiveSet,
+    *,
+    gamma: float,
+    weights: np.ndarray,
+    reg_lambda: float,
+    mtot: int,
+    dim: int,
+    active_mode: str,
+    active_topk: int | None,
+    active_tau: float | None,
+    box_budget: int | None,
+) -> None:
+    """Fail closed if a reused active set came from different selection inputs."""
+    weights = np.asarray(weights, dtype=np.float64).reshape(-1)
+    expected_rho = compute_rho(float(gamma), weights, float(reg_lambda))
+    expected_center = _flatten_center_index(int(mtot), int(dim))
+    valid = bool(
+        np.isclose(float(active.gamma), float(gamma), rtol=1e-12, atol=1e-14)
+        and np.asarray(active.rho).shape == expected_rho.shape
+        and np.allclose(
+            np.asarray(active.rho, dtype=np.float64),
+            expected_rho,
+            rtol=1e-12,
+            atol=1e-14,
+        )
+        and np.array_equal(
+            np.asarray(active.center_multi, dtype=np.int64).reshape(-1),
+            expected_center,
+        )
+        and str(active.active_mode).lower() == str(active_mode).lower()
+        and active.active_topk == active_topk
+        and active.active_tau == active_tau
+        and np.all(np.asarray(active.box_idx, dtype=np.int64) >= 0)
+        and np.all(np.asarray(active.box_idx, dtype=np.int64) < weights.size)
+        and (
+            box_budget is None
+            or int(active.box_idx.size) <= int(box_budget)
+        )
+    )
+    if not valid:
+        raise ValueError(
+            "precomputed_active_set does not match the current system and "
+            "preconditioner configuration"
+        )
+
+
 def format_box_tag(active: BoxActiveSet) -> str:
     if active.active_mode.lower() == "topk":
         return f"topk_{int(active.active_topk or 0)}"

@@ -84,6 +84,7 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
     assert '"scientific_eligible": scientific_eligible' in source
     assert 'status = str(completion_payload["formal_result_status"])' in source
     assert '"complete_with_resource_limits"' in source
+    assert '"complete_with_usability_ineligible_methods"' in source
     assert "stage1_scale_artifacts_complete" in source
     assert "stage1_scale_scientifically_eligible" in source
     assert 'target_profile_name = "fixed_ab_selected_target"' in source
@@ -104,7 +105,12 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
     assert "controlled_plot = selected_controlled.copy()" in source
     assert '"stage1_krr_train_total_10m_300m.png"' in source
     assert '"stage1_krr_setup_solving_breakdown.png"' in source
-    assert '"stage1_krr_accuracy_gate.png"' in source
+    assert '"stage1_krr_accuracy_tradeoff.png"' in source
+    assert '"usability_eligible"' in source
+    assert '"reference_equivalent"' in source
+    assert '"pareto_nondominated"' in source
+    assert "descriptive quality trade-off, not a speed gate" in source
+    assert "all paired speedups (x = outside broad usable range)" in source
     assert '"stage1_krr_robustness.png"' in source
     assert '"stage2_fixed_ab_solver_total.png"' in source
     assert '"stage2_formal_solver_totals.csv"' in source
@@ -116,10 +122,14 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
     assert (
         'STAGE2_FEASIBILITY_PATH = DRIVE_RUN_ROOT / "stage2_feasibility.json"' in source
     )
-    assert '"prospective configured box-budget cap before timing"' in source
+    assert '"prospective declared active-box upper bound before timing"' in source
     assert "STAGE2_SYSTEM_CONFIG_FIELDS = (" in source
+    assert "STAGE2_METHOD_CONFIG_FIELDS = (" in source
+    assert '"rank", "full_eig_rank", "active_topk"' in source
+    assert '"parameter_selection_policy", "parameter_source"' in source
     assert '"precision", "nufft_backend", "precompute_chunk_size"' in source
-    assert "inverse_feasible = box_budget <= inverse_max_size" in source
+    assert "inverse_feasible = active_box_upper_bound <= inverse_max_size" in source
+    assert '"active_box_upper_bound": active_box_upper_bound' in source
     assert '"methods": list(STAGE2_FEASIBLE_METHODS)' in source
     assert '"stage2_feasibility_decision": STAGE2_FEASIBILITY' in source
     assert "STAGE2_FORBIDDEN_METHODS" in source
@@ -136,12 +146,21 @@ def test_committed_notebook_matches_generator() -> None:
 
 
 @pytest.mark.parametrize(
-    ("box_budget", "inverse_max_size", "active_inverse_feasible"),
-    [(8192, 1024, False), (512, 1024, True)],
+    (
+        "box_budget",
+        "active_box_upper_bound",
+        "inverse_max_size",
+        "active_inverse_feasible",
+    ),
+    [
+        (80_000, 10_609, 8_192, False),
+        (80_000, 10_609, 16_384, True),
+    ],
 )
 def test_one_click_orchestrator_runs_only_fixed_ab_at_frozen_target(
     tmp_path: Path,
     box_budget: int,
+    active_box_upper_bound: int,
     inverse_max_size: int,
     active_inverse_feasible: bool,
 ) -> None:
@@ -220,13 +239,35 @@ def test_one_click_orchestrator_runs_only_fixed_ab_at_frozen_target(
             "precision": "fp64",
             "nufft_backend": "cufinufft",
             "precompute_chunk_size": 1_000_000,
+            "rank": 320,
+            "full_eig_rank": 256,
+            "active_topk": 8_192,
+            "expected_active_box_size": active_box_upper_bound,
+            "box_budget": box_budget,
+            "inverse_max_size": inverse_max_size,
+            "parameter_selection_policy": (
+                "historical_selected_transfer_no_current_scan"
+            ),
+            "parameter_source": "test frozen historical selection",
         },
         "stage1_config": {
             "base": {
                 "dataset_stem": "synthetic_true_func_2d_n300000000",
                 "n_train": 10_000_000,
+                "rank": 320,
+                "full_eig_rank": 256,
+                "active_topk": 8_192,
+                "expected_active_box_size": active_box_upper_bound,
                 "box_budget": box_budget,
+                "inverse_max_size": 1_024,
+                "parameter_selection_policy": (
+                    "historical_selected_transfer_no_current_scan"
+                ),
+                "parameter_source": "test frozen historical selection",
+            },
+            "stage2_fixed_ab": {
                 "inverse_max_size": inverse_max_size,
+                "default_inverse_max_size": 1_024,
             },
             "profiles": {
                 "scale_10m_300m": {
@@ -303,6 +344,20 @@ def test_one_click_orchestrator_runs_only_fixed_ab_at_frozen_target(
     assert target_profile["overrides"]["methods"] == expected_methods
     assert target_profile["overrides"]["box_budget"] == box_budget
     assert target_profile["overrides"]["inverse_max_size"] == inverse_max_size
+    assert target_profile["overrides"]["default_inverse_max_size"] == 1_024
+    method_config_fields = (
+        "rank",
+        "full_eig_rank",
+        "active_topk",
+        "expected_active_box_size",
+        "box_budget",
+        "parameter_selection_policy",
+        "parameter_source",
+    )
+    for field in method_config_fields:
+        assert target_profile["overrides"][field] == namespace["END_TO_END_TARGET"][
+            field
+        ]
     system_fields = (
         "dataset_stem",
         "n_train",
@@ -344,13 +399,16 @@ def test_one_click_orchestrator_runs_only_fixed_ab_at_frozen_target(
     feasibility_path = tmp_path / "run" / "stage2_feasibility.json"
     feasibility = json.loads(feasibility_path.read_text(encoding="utf-8"))
     assert feasibility["protocol_family"] == "controlled_fixed_system"
-    assert feasibility["decision_basis"] == (
-        "prospective configured box-budget cap before timing"
-    )
     assert feasibility["dataset_stem"] == namespace["END_TO_END_TARGET"]["dataset_stem"]
     assert feasibility["n_train"] == 30_000_000
     assert feasibility["box_budget"] == box_budget
+    assert feasibility["active_box_upper_bound"] == active_box_upper_bound
     assert feasibility["inverse_max_size"] == inverse_max_size
+    assert feasibility["default_inverse_max_size"] == 1_024
+    assert feasibility["default_resolved_kind"] == "active-eig"
+    assert feasibility["decision_basis"] == (
+        "prospective declared active-box upper bound before timing"
+    )
     assert (
         feasibility["methods"]["active-inverse"]["feasible"] is active_inverse_feasible
     )

@@ -54,7 +54,7 @@ def build_notebook() -> dict:
             | `archived_complete_pipeline` | 原 `group_a/group_b/group_c`，direct CG 与 binned-C1 candidates，含 setup/solve/prediction | 原论文探索性规模图与候选筛选 |
             | `prediction_audit` | 读取 timed system 与保存的 canonical timed \(\beta\)，仅计算 test RMSE | 同一计时解的预测等价性；其中 prediction 时间不进入 speedup claim |
 
-            使用方式：选择 Colab 的 **A100 GPU + High-RAM** runtime，然后点击 **运行时 → 全部运行**。默认的 `RUN_ALL_FORMAL_EXPERIMENTS=True` 先运行 Stage 1 的 10M/30M/100M/300M 完整 KRR 比较与 accuracy gate，再按预注册规则选出 target；只有 target 成功冻结后才生成 \(\lambda\)、\(\ell\)、box budget、dataset robustness，并进入 Stage 2 的 fixed-\(A,b\) solver comparison。资源不足或没有合格 target 时 fail closed，不会事后挑选替代点。
+            使用方式：选择 Colab 的 **A100 GPU + High-RAM** runtime，然后点击 **运行时 → 全部运行**。默认的 `RUN_ALL_FORMAL_EXPERIMENTS=True` 先运行 Stage 1 的 10M/30M/100M/300M 完整 KRR time–quality 比较，再按预注册的宽松 usability 范围选出 target；只有 target 成功冻结后才生成 \(\lambda\)、\(\ell\)、box budget、dataset robustness，并进入 Stage 2 的 fixed-\(A,b\) solver comparison。资源不足或没有合格 target 时 fail closed，不会事后挑选替代点。
 
             `nystrom-krr` 与 `rpcholesky-krr` 只出现在 Stage 1；Fourier-space randomized preconditioner adaptations 不得以 Nyström/RPCholesky KRR 的名字进入正式图。参考 notebook 的 legacy 路线默认关闭。
             """
@@ -154,6 +154,7 @@ def build_notebook() -> dict:
             if RUN_MANITOWOC_SCALE:
                 required_bundles.append("manitowoc_10m")
             if any([
+                RUN_PLUMBING_SMOKE,
                 RUN_CG_SCREEN_10M, RUN_Q256_CENTER_10M, RUN_BOX_BUDGET_ABLATION,
                 RUN_WINNEBAGO_OAT_10M,
                 RUN_Q128_BRIDGE, RUN_SE_FULL_INVERSE_CONTROL,
@@ -816,11 +817,13 @@ def build_notebook() -> dict:
             本阶段比较的是**完整 KRR pipeline**，不是同一 Fourier 系统上的 preconditioner：`nystrom-krr`、`rpcholesky-krr`、`efgp-standard-cg`、`efgp-standard-jacobi`、`efgp-standard-full-eig`、`ours-binned-default` 各自承担自己的 setup 与 solve。正式计时字段固定为：
 
             - `setup_seconds`：数据空间 landmarks / RPCholesky factor 或 EFGP Fourier/precompute setup；
-            - `solving_phase_seconds`：solver build + iterative solve；
+            - `solving_phase_seconds`：score selection（若使用）+ preconditioner build + iterative solve；
             - `train_total_seconds = setup_seconds + solving_phase_seconds`；
-            - prediction 单列，只用于 accuracy gate，不并入训练加速。
+            - prediction 单列，用于报告 RMSE/R² 和 usability，不并入训练加速。
 
-            首先运行 `end_to_end_suite.json::scale_10m_300m`。target 选择规则在看结果前冻结：六方法行必须全部存在，Nyström/EFGP 必须成功；RPCholesky 的预声明显存 `resource_limit` 可以作为真实 scalability outcome 保留，但不能获得 speedup，也不阻断后续 solver target。ours/full-eig 必须通过每个 repeat 的相对与绝对 accuracy gate，standard EFGP-CG median iterations 位于 3000–6000，随后取其中最大的 N；同 N 按 suite 中预先声明的 `dataset_priority` 决定。没有合格 case 时 fail closed，Stage 1 robustness 与 Stage 2 均不启动。
+            `ours-binned-default` 与 `efgp-standard-full-eig` 不在本次正式计时中重新扫参。每个 dataset/N 直接冻结原实验 `paper_table1_selected.csv` 的 proposed top-k/rank 与 full-eig rank，只转移配置并在当前 1 次预热 + 5 次 measured 协议下重新测量全部时间。Synthetic 的旧来源与当前 master 噪声不同，因此明确标为 historical transfer，而不是当前数据上的最优点。
+
+            首先运行 `end_to_end_suite.json::scale_10m_300m`。target 选择规则在看结果前冻结：六方法行必须全部存在，Nyström/EFGP 必须成功；RPCholesky 的预声明显存 `resource_limit` 可以作为真实 scalability outcome 保留，但不能获得 speedup，也不阻断后续 solver target。ours/full-eig 必须落在每个 repeat 的宽松绝对 RMSE/R² usability 范围；1% relative equivalence 只作描述。standard EFGP-CG median iterations 位于 3000–6000，随后取其中最大的 N；同 N 按 suite 中预先声明的 `dataset_priority` 决定。没有合格 case 时 fail closed，Stage 1 robustness 与 Stage 2 均不启动。
             """
         )
     )
@@ -922,6 +925,20 @@ def build_notebook() -> dict:
                     "expected_measured_repeats",
                     "accuracy_evaluated_repeats",
                     "accuracy_passed_repeats",
+                    "execution_eligible",
+                    "usability_evaluated_repeats",
+                    "usability_passed_repeats",
+                    "usability_eligible",
+                    "reference_evaluated_repeats",
+                    "reference_equivalent_repeats",
+                    "reference_equivalent",
+                    "quality_qualified_performance_eligible",
+                    "configured_active_rank",
+                    "configured_full_eig_rank",
+                    "configured_active_topk",
+                    "configured_expected_active_box_size",
+                    "parameter_selection_policy",
+                    "parameter_source",
                     "setup_seconds_at_median_total",
                     "solving_phase_seconds_at_median_total",
                 }
@@ -947,7 +964,7 @@ def build_notebook() -> dict:
                     and completion.get("formal_result_status") in {
                         "claim_eligible_complete",
                         "complete_with_resource_limits",
-                        "complete_with_accuracy_ineligible_methods",
+                        "complete_with_usability_ineligible_methods",
                     }
                     and "proposed_performance_claim_eligible" in completion
                 )
@@ -1061,7 +1078,7 @@ def build_notebook() -> dict:
                             and status in {
                                 "claim_eligible_complete",
                                 "complete_with_resource_limits",
-                                "complete_with_accuracy_ineligible_methods",
+                                "complete_with_usability_ineligible_methods",
                             }
                         )
                         if resource_limit_methods:
@@ -1141,6 +1158,16 @@ def build_notebook() -> dict:
                     frame["lengthscale"] = float(cfg.lengthscale)
                     frame["fourier_eps"] = float(cfg.fourier_eps)
                     frame["box_budget"] = int(cfg.box_budget)
+                    frame["configured_active_rank"] = int(cfg.rank)
+                    frame["configured_full_eig_rank"] = int(cfg.full_eig_rank or cfg.rank)
+                    frame["configured_active_topk"] = cfg.active_topk
+                    frame["configured_expected_active_box_size"] = (
+                        cfg.expected_active_box_size
+                    )
+                    frame["parameter_selection_policy"] = str(
+                        cfg.parameter_selection_policy
+                    )
+                    frame["parameter_source"] = str(cfg.parameter_source)
                     frame["run_dir"] = str(run_dir)
                     frames.append(frame)
                 return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
@@ -1292,9 +1319,9 @@ def build_notebook() -> dict:
     cells.append(
         _markdown(
             r"""
-            ## Stage 1 报告：accuracy gate、setup / solving、train total、robustness
+            ## Stage 1 报告：可用精度范围、time–quality trade-off、setup / solving
 
-            下格只读取 `stage1_end_to_end_krr`，并对 method/protocol 做 allow-list 校验。正式 train-total 图仅绘制通过 accuracy gate 的完整 KRR 行；失败或 resource-limit 行仍保留在 CSV 中，不用 pilot/subsample 结果替代。Stage 2 的 fixed-system 数据不会进入这些图。
+            下格只读取 `stage1_end_to_end_krr`，并对 method/protocol 做 allow-list 校验。所有成功的完整 KRR 行都保留时间与精度；宽松的 dataset-specific RMSE/R² 范围只标记 usability，1% reference equivalence 仅作描述，绝不删除 speedup。失败或 resource-limit 行仍保留在 CSV 中。Stage 2 的 fixed-system 数据不会进入这些图。
             """
         )
     )
@@ -1327,11 +1354,8 @@ def build_notebook() -> dict:
                     "speedup_vs_ours",
                 ):
                     scale[column] = pd.to_numeric(scale[column], errors="coerce")
-                claim_mask = (
-                    scale["status"].astype(str).eq("ok")
-                    & scale["speedup_claim_eligible"].astype(str).str.lower().eq("true")
-                )
-                claim_scale = scale.loc[claim_mask].copy()
+                complete_mask = scale["status"].astype(str).eq("ok")
+                complete_scale = scale.loc[complete_mask].copy()
 
                 families = list(dict.fromkeys(scale["dataset_family"].dropna().astype(str)))
                 fig, axes = plt.subplots(
@@ -1339,7 +1363,7 @@ def build_notebook() -> dict:
                     squeeze=False,
                 )
                 for axis, family in zip(axes.ravel(), families):
-                    family_rows = claim_scale.loc[claim_scale["dataset_family"].eq(family)]
+                    family_rows = complete_scale.loc[complete_scale["dataset_family"].eq(family)]
                     for method in STAGE1_METHOD_ORDER:
                         rows = family_rows.loc[family_rows["method"].eq(method)].sort_values("N")
                         if rows.empty:
@@ -1350,7 +1374,7 @@ def build_notebook() -> dict:
                         )
                     axis.set_xscale("log")
                     axis.set_yscale("log")
-                    axis.set_title(f"{family}: accuracy-eligible complete KRR")
+                    axis.set_title(f"{family}: all successful complete KRR pipelines")
                     axis.set_xlabel("training samples N")
                     axis.set_ylabel("train total (setup + solving), seconds")
                     axis.grid(True, which="both", alpha=0.25)
@@ -1386,16 +1410,6 @@ def build_notebook() -> dict:
                 scale = scale.merge(
                     ours_components, on="case_id", how="left", validate="many_to_one"
                 )
-                scale["setup_speedup_vs_ours"] = (
-                    scale["setup_seconds"] / scale["ours_setup_seconds"]
-                )
-                scale["solving_speedup_vs_ours"] = (
-                    scale["solving_phase_seconds"]
-                    / scale["ours_solving_phase_seconds"]
-                )
-                scale["total_speedup_vs_ours_recomputed"] = (
-                    scale["train_total_seconds"] / scale["ours_train_total_seconds"]
-                )
                 fig, ax = plt.subplots(figsize=(9, 5))
                 for (family, method), rows in scale.groupby(["dataset_family", "method"], dropna=False):
                     rows = rows.sort_values("N")
@@ -1405,25 +1419,26 @@ def build_notebook() -> dict:
                     )
                 ax.axhline(
                     1.0 + float(stage1_config["base"]["accuracy_relative_tolerance"]),
-                    color="black", linestyle="--", label="accuracy gate",
+                    color="black", linestyle="--",
+                    label="1% reference-equivalence guide (descriptive)",
                 )
                 ax.set_xscale("log")
                 ax.set_xlabel("training samples N")
                 ax.set_ylabel("test RMSE / standard EFGP full-eig RMSE")
-                ax.set_title("Stage 1 accuracy gate (prediction time excluded from train total)")
+                ax.set_title("Stage 1 RMSE ratio: descriptive quality trade-off, not a speed gate")
                 ax.grid(True, which="both", alpha=0.25)
                 ax.legend(fontsize=7, ncol=2)
                 fig.tight_layout()
-                accuracy_plot = DRIVE_RUN_ROOT / "stage1_krr_accuracy_gate.png"
+                accuracy_plot = DRIVE_RUN_ROOT / "stage1_krr_accuracy_tradeoff.png"
                 fig.savefig(accuracy_plot, dpi=180, bbox_inches="tight")
                 STAGE1_GENERATED_PLOT_PATHS.append(accuracy_plot)
                 plt.show()
                 plt.close(fig)
 
                 if END_TO_END_TARGET is not None:
-                    target_rows = claim_scale.loc[
-                        claim_scale["dataset_stem"].astype(str).eq(str(END_TO_END_TARGET["dataset_stem"]))
-                        & claim_scale["N"].eq(int(END_TO_END_TARGET["n_train"]))
+                    target_rows = complete_scale.loc[
+                        complete_scale["dataset_stem"].astype(str).eq(str(END_TO_END_TARGET["dataset_stem"]))
+                        & complete_scale["N"].eq(int(END_TO_END_TARGET["n_train"]))
                     ].copy()
                     target_rows["method_order"] = target_rows["method"].map(
                         {method: index for index, method in enumerate(STAGE1_METHOD_ORDER)}
@@ -1449,12 +1464,13 @@ def build_notebook() -> dict:
 
                 stage1_accuracy_audit = scale[[
                     "protocol_family", "suite_profile", "case_id", "dataset_family", "dataset_stem", "N",
-                    "method", "status", "accuracy_eligible", "performance_claim_eligible",
-                    "speedup_claim_eligible", "test_rmse", "test_r2",
+                    "method", "status", "execution_eligible", "usability_eligible",
+                    "reference_equivalent", "quality_qualified_performance_eligible",
+                    "speedup_claim_eligible", "speedup_complete_pairing", "pareto_nondominated",
+                    "test_rmse", "test_r2", "rmse_relative_delta_to_reference",
                     "recomputed_reference_rmse", "rmse_ratio_to_full_eig",
                     "setup_seconds", "solving_phase_seconds", "train_total_seconds",
-                    "setup_speedup_vs_ours", "solving_speedup_vs_ours",
-                    "total_speedup_vs_ours_recomputed", "speedup_vs_ours",
+                    "setup_speedup_vs_ours", "solving_speedup_vs_ours", "speedup_vs_ours",
                 ]].copy()
                 stage1_accuracy_audit.to_csv(
                     DRIVE_RUN_ROOT / "stage1_krr_accuracy_timing_audit.csv", index=False
@@ -1478,7 +1494,8 @@ def build_notebook() -> dict:
                         continue
                     rows = robustness.loc[robustness["method"].eq(method)].copy()
                     rows = rows.loc[
-                        rows["speedup_claim_eligible"].astype(str).str.lower().eq("true")
+                        rows["speedup_complete_pairing"].astype(str).str.lower().eq("true")
+                        & rows["speedup_vs_ours"].notna()
                     ]
                     rows["case_order"] = rows["case_id"].astype(str).map(
                         {case_id: index for index, case_id in enumerate(case_order)}
@@ -1488,10 +1505,20 @@ def build_notebook() -> dict:
                         rows["case_order"], rows["speedup_vs_ours"],
                         marker="o", label=method,
                     )
+                    outside = rows.loc[
+                        ~rows["speedup_claim_eligible"].astype(str).str.lower().eq("true")
+                    ]
+                    if not outside.empty:
+                        ax.scatter(
+                            outside["case_order"], outside["speedup_vs_ours"],
+                            marker="x", color="black", s=45, zorder=4,
+                        )
                 ax.axhline(1.0, color="black", linestyle="--")
                 ax.set_xticks(np.arange(len(case_order)), case_order, rotation=45, ha="right")
                 ax.set_ylabel("baseline train total / ours train total")
-                ax.set_title("Stage 1 robustness: accuracy-gated complete-KRR speedup")
+                ax.set_title(
+                    "Stage 1 robustness: all paired speedups (x = outside broad usable range)"
+                )
                 ax.grid(True, axis="y", alpha=0.25)
                 ax.legend(fontsize=8, ncol=2)
                 fig.tight_layout()
@@ -1511,7 +1538,7 @@ def build_notebook() -> dict:
 
             只有 Stage 1 target 成功冻结后，本阶段才在同一 invocation 中构造一个不可变 Fourier 系统；所有方法共享 weights/Gf/RHS/λ 哈希，每次从零初值开始，1 次预热后做 5 次随机顺序配对。正式 headline 是 `solver_total_seconds = score selection + preconditioner construction + CG/PCG solve`。
 
-            正式 mandatory 方法为 CG、Jacobi、proposed default、active-eig 与 full-eig。`active-inverse` 只在 Stage 2 计时开始前，根据冻结 target 的预声明 `box_budget <= inverse_max_size` 规则判为可行时才执行；决定与 benchmark 的 15 个 system-defining 字段一并写入 `stage2_feasibility.json`，不得依据 timing outcome 回填。`fourier-nystrom-precond` / `fourier-rpcholesky-precond` 是可选 exploratory Fourier adaptations，默认不运行，也绝不能标成 Stage 1 的 Nyström/RPCholesky KRR。旧 `paper_10m`、OAT、fixed-system scale profiles 仍可在 `RUN_ALL_FORMAL_EXPERIMENTS=False` 时手动启用。
+            正式 mandatory 方法为 CG、Jacobi、proposed default、active-eig 与 full-eig。`active-inverse` 只在 Stage 2 计时开始前，根据冻结 target 的预声明 active-box upper bound 是否不超过显式 inverse cap 判为可行时才执行；决定与 benchmark 的 15 个 system-defining 字段和冻结方法配置一并写入 `stage2_feasibility.json`，不得依据 timing outcome 回填。`default` 是部署路由标签，并继续使用 Stage 1 冻结的较小 `default_inverse_max_size`，因此不会因为放宽显式 inverse 的可行性 cap 而改变算法；图表同时显示实际 `method_kind`。若显式 active route 与 default 的 kind 相同，它只是独立重复的 route-control，不是另一种算法。`fourier-nystrom-precond` / `fourier-rpcholesky-precond` 是可选 exploratory Fourier adaptations，默认不运行，也绝不能标成 Stage 1 的 Nyström/RPCholesky KRR。旧 `paper_10m`、OAT、fixed-system scale profiles 仍可在 `RUN_ALL_FORMAL_EXPERIMENTS=False` 时手动启用。
             """
         )
     )
@@ -1538,15 +1565,28 @@ def build_notebook() -> dict:
                 "reg_lambda", "fourier_eps", "nufft_tol", "l2_scaled",
                 "precision", "nufft_backend", "precompute_chunk_size",
             )
+            STAGE2_METHOD_CONFIG_FIELDS = (
+                "rank", "full_eig_rank", "active_topk",
+                "expected_active_box_size", "box_budget", "inverse_max_size",
+                "default_inverse_max_size",
+                "parameter_selection_policy", "parameter_source",
+            )
 
             def build_prospective_stage2_feasibility(
                 frozen_target, *, box_budget, inverse_max_size,
+                default_inverse_max_size, active_box_upper_bound,
             ):
                 box_budget = int(box_budget)
                 inverse_max_size = int(inverse_max_size)
-                if box_budget <= 0 or inverse_max_size <= 0:
+                default_inverse_max_size = int(default_inverse_max_size)
+                active_box_upper_bound = int(active_box_upper_bound)
+                if (
+                    box_budget <= 0
+                    or inverse_max_size <= 0
+                    or default_inverse_max_size <= 0
+                ):
                     raise RuntimeError(
-                        "Stage-2 declared box_budget/inverse_max_size must be positive."
+                        "Stage-2 declared box/inverse caps must be positive."
                     )
                 candidates = list(STAGE2_METHODS)
                 mandatory = list(STAGE2_MANDATORY_METHODS)
@@ -1555,7 +1595,7 @@ def build_notebook() -> dict:
                         "Frozen Stage-2 candidates must be the five mandatory methods "
                         "plus conditional active-inverse."
                     )
-                inverse_feasible = box_budget <= inverse_max_size
+                inverse_feasible = active_box_upper_bound <= inverse_max_size
                 methods = {
                     method: {
                         "feasible": True,
@@ -1566,17 +1606,21 @@ def build_notebook() -> dict:
                 methods["active-inverse"] = {
                     "feasible": bool(inverse_feasible),
                     "reason": (
-                        "declared box_budget is within inverse_max_size; every "
-                        "score-selected box allowed by the frozen cap fits exact inverse"
+                        "declared active-box upper bound is within inverse_max_size"
                         if inverse_feasible else
-                        "declared box_budget exceeds inverse_max_size, so exact inverse "
-                        "feasibility is not guaranteed before timing; method omitted"
+                        "declared active-box upper bound exceeds inverse_max_size; "
+                        "exact inverse is prospectively omitted"
                     ),
                 }
                 missing = [
                     field for field in STAGE2_SYSTEM_CONFIG_FIELDS
                     if frozen_target.get(field) is None
                 ]
+                missing.extend(
+                    field for field in STAGE2_METHOD_CONFIG_FIELDS
+                    if field not in {"inverse_max_size", "default_inverse_max_size"}
+                    and frozen_target.get(field) is None
+                )
                 if missing:
                     raise RuntimeError(
                         "Frozen target is missing Stage-2 feasibility fields: "
@@ -1586,14 +1630,29 @@ def build_notebook() -> dict:
                     "schema_version": 1,
                     "protocol_family": "controlled_fixed_system",
                     "decision_basis": (
-                        "prospective configured box-budget cap before timing"
+                        "prospective declared active-box upper bound before timing"
                     ),
                     **{
                         field: frozen_target[field]
                         for field in STAGE2_SYSTEM_CONFIG_FIELDS
                     },
+                    **{
+                        field: frozen_target[field]
+                        for field in STAGE2_METHOD_CONFIG_FIELDS
+                        if field not in {
+                            "box_budget", "inverse_max_size",
+                            "default_inverse_max_size",
+                        }
+                    },
                     "box_budget": box_budget,
+                    "active_box_upper_bound": active_box_upper_bound,
                     "inverse_max_size": inverse_max_size,
+                    "default_inverse_max_size": default_inverse_max_size,
+                    "default_resolved_kind": (
+                        "active-inverse"
+                        if active_box_upper_bound <= default_inverse_max_size
+                        else "active-eig"
+                    ),
                     "methods": methods,
                 }
 
@@ -1640,13 +1699,31 @@ def build_notebook() -> dict:
                     declared_target_config = dict(frozen_stage1_suite["base"])
                     declared_target_config.update(matching_declared_cases[0])
                     target_box_budget = int(declared_target_config["box_budget"])
+                    stage2_policy = frozen_stage1_suite.get("stage2_fixed_ab", {})
+                    if not isinstance(stage2_policy, dict):
+                        raise RuntimeError("stage2_fixed_ab policy must be an object.")
                     target_inverse_max_size = int(
-                        declared_target_config["inverse_max_size"]
+                        stage2_policy.get(
+                            "inverse_max_size",
+                            declared_target_config["inverse_max_size"],
+                        )
+                    )
+                    target_default_inverse_max_size = int(
+                        stage2_policy.get(
+                            "default_inverse_max_size",
+                            declared_target_config["inverse_max_size"],
+                        )
+                    )
+                    target_active_box_upper_bound = int(
+                        declared_target_config.get("expected_active_box_size")
+                        or declared_target_config["box_budget"]
                     )
                     STAGE2_FEASIBILITY = build_prospective_stage2_feasibility(
                         frozen_target,
                         box_budget=target_box_budget,
                         inverse_max_size=target_inverse_max_size,
+                        default_inverse_max_size=target_default_inverse_max_size,
+                        active_box_upper_bound=target_active_box_upper_bound,
                     )
                     STAGE2_FEASIBILITY_PATH.write_text(
                         json.dumps(STAGE2_FEASIBILITY, indent=2), encoding="utf-8"
@@ -1697,6 +1774,24 @@ def build_notebook() -> dict:
                             },
                             "box_budget": target_box_budget,
                             "inverse_max_size": target_inverse_max_size,
+                            "default_inverse_max_size": (
+                                target_default_inverse_max_size
+                            ),
+                            "rank": int(declared_target_config["rank"]),
+                            "full_eig_rank": int(
+                                declared_target_config.get("full_eig_rank")
+                                or declared_target_config["rank"]
+                            ),
+                            "active_topk": declared_target_config.get("active_topk"),
+                            "expected_active_box_size": declared_target_config.get(
+                                "expected_active_box_size"
+                            ),
+                            "parameter_selection_policy": declared_target_config.get(
+                                "parameter_selection_policy", ""
+                            ),
+                            "parameter_source": declared_target_config.get(
+                                "parameter_source", ""
+                            ),
                         },
                         "cases": [{
                             "id": f"fixed_ab_target_n{target_n}",
@@ -2518,6 +2613,8 @@ def build_notebook() -> dict:
                     stage2_solver_summary["solve_seconds_median"], errors="coerce"
                 )
                 canonical_speedup_fields = {
+                    "method_kind",
+                    "result_role",
                     "measured_repeats",
                     "solver_total_speedup_over_cg_median",
                     "paired_comparisons",
@@ -2576,12 +2673,32 @@ def build_notebook() -> dict:
                 stage2_solver_summary["method_order"] = stage2_solver_summary["method"].map(order)
                 plot_rows = stage2_solver_summary.loc[
                     stage2_solver_summary["performance_claim_eligible"].astype(str).str.lower().eq("true")
-                ].sort_values("method_order")
+                ].sort_values("method_order").copy()
+                plot_rows["method_display"] = plot_rows.apply(
+                    lambda row: (
+                        f"{row['method']} [{row['method_kind']}]"
+                        if str(row["method"]) == "default"
+                        else (
+                            f"{row['method']} [explicit route-control]"
+                            if str(row["method"]) in {"active-inverse", "active-eig"}
+                            and bool(
+                                (
+                                    stage2_solver_summary["method"].astype(str).eq("default")
+                                    & stage2_solver_summary["method_kind"].astype(str).eq(
+                                        str(row["method_kind"])
+                                    )
+                                ).any()
+                            )
+                            else str(row["method"])
+                        )
+                    ),
+                    axis=1,
+                )
                 fig, (ax_total, ax_speedup) = plt.subplots(1, 2, figsize=(13, 5))
                 x = np.arange(len(plot_rows))
                 canonical_total = plot_rows["solver_total_seconds_median"].to_numpy(dtype=float)
                 ax_total.bar(x, canonical_total)
-                ax_total.set_xticks(x, plot_rows["method"], rotation=30, ha="right")
+                ax_total.set_xticks(x, plot_rows["method_display"], rotation=30, ha="right")
                 ax_total.set_ylabel("solver total, seconds")
                 ax_total.set_title(
                     "Stage 2: canonical median solver total on identical hashed A,b"
@@ -2593,7 +2710,7 @@ def build_notebook() -> dict:
                 )
                 ax_speedup.bar(x, speedup)
                 ax_speedup.axhline(1.0, color="black", linestyle="--")
-                ax_speedup.set_xticks(x, plot_rows["method"], rotation=30, ha="right")
+                ax_speedup.set_xticks(x, plot_rows["method_display"], rotation=30, ha="right")
                 ax_speedup.set_ylabel("median matched CG_i / method_i total")
                 ax_speedup.set_title("Paired total speedup (>1 is faster than CG)")
                 ax_speedup.grid(True, axis="y", alpha=0.25)
@@ -2604,7 +2721,8 @@ def build_notebook() -> dict:
                 plt.show()
                 plt.close(fig)
                 display(stage2_solver_summary[[
-                    "method", "system_id", "selection_seconds_median",
+                    "method", "method_kind", "result_role", "system_id",
+                    "selection_seconds_median",
                     "preconditioner_build_seconds_median", "solve_seconds_median",
                     "solver_total_seconds_median", "solver_total_speedup_over_cg_median",
                     "paired_comparisons", "performance_claim_eligible",
@@ -2619,7 +2737,7 @@ def build_notebook() -> dict:
             r"""
             # Stage 2 prediction-equivalence audit（复用 timed system/solution；单独、非计时）
 
-            Audit 必须读取 Stage 2 timing case 保存的 exact system 与 canonical timed \(\beta\)，不得重建系统或重解。它只按 GPU chunk 计算预测，prediction 时间明确排除在 solver-total claim 外；每个 case 最多使用测试集的前 2.5M 行。Stage 1 已经在各完整 KRR pipeline 内独立完成 test accuracy gate，因此两种 accuracy 证据不混用。
+            Audit 必须读取 Stage 2 timing case 保存的 exact system 与 canonical timed \(\beta\)，不得重建系统或重解。它只按 GPU chunk 计算预测，prediction 时间明确排除在 solver-total claim 外；每个 case 最多使用测试集的前 2.5M 行。Stage 1 已经在各完整 KRR pipeline 内独立报告 test RMSE/R²、宽松 usability 与描述性的 reference equivalence，因此两种 accuracy 证据不混用。
             """
         )
     )
@@ -3946,7 +4064,7 @@ def build_notebook() -> dict:
                         and str(row.get("status")) in {
                             "claim_eligible_complete",
                             "complete_with_resource_limits",
-                            "complete_with_accuracy_ineligible_methods",
+                            "complete_with_usability_ineligible_methods",
                         }
                     )
                 return str(row.get("status")) == "PASS"
@@ -4234,7 +4352,7 @@ def build_notebook() -> dict:
             if RUN_STAGE1_END_TO_END_KRR and not stage1_scale_summary.empty:
                 expected_plot_paths.extend([
                     DRIVE_RUN_ROOT / "stage1_krr_train_total_10m_300m.png",
-                    DRIVE_RUN_ROOT / "stage1_krr_accuracy_gate.png",
+                    DRIVE_RUN_ROOT / "stage1_krr_accuracy_tradeoff.png",
                 ])
             if END_TO_END_TARGET is not None:
                 expected_plot_paths.append(
@@ -4457,12 +4575,12 @@ def build_notebook() -> dict:
             r"""
             ## 运行后检查清单
 
-            1. Stage 1 的 `pipeline_summary.csv` 只能含六个 true end-to-end KRR 方法；每行分别保留 setup、solving phase、train total、prediction accuracy 与 accuracy gate。
+            1. Stage 1 的 `pipeline_summary.csv` 只能含六个 true end-to-end KRR 方法；每行分别保留 setup、solving phase、train total、prediction RMSE/R²、宽松 usability 与描述性的 reference equivalence。
             2. 10M/30M/100M/300M 的失败/resource-limit 行原样保留，不以 pilot 或子采样算法冒充大规模结果。
             3. `selected_target_regime.json` 必须来自冻结规则；没有合格 target 时检查 `target_regime_rejections.json`，不得事后换点。
             4. \(\lambda\)、\(\ell\)、box budget、dataset robustness 只在 target 冻结后 materialize，且仍运行完整六 pipeline。
             5. Stage 2 每个 case 的 `system_manifest.json` 必须有 `system_unchanged=true` 和完整 weights/Gf/RHS/λ 哈希；方法仅为 solver/preconditioner family。
-            6. `stage2_feasibility.json` 必须在 Stage 2 timing 前生成；mandatory 五方法恒为 feasible，`active-inverse` 仅在冻结的 `box_budget <= inverse_max_size` 时运行。
+            6. `stage2_feasibility.json` 必须在 Stage 2 timing 前生成；mandatory 五方法恒为 feasible，`active-inverse` 仅在冻结 active-box upper bound 不超过 `inverse_max_size` 时运行。
             7. Stage 2 headline 必须读取 `solver_total_seconds`（selection + preconditioner build + solve），不能用 iteration-only 或排除 build 的 solve-only 数字代替。
             8. `nystrom-krr` / `rpcholesky-krr` 只属于 Stage 1；Fourier adaptations 即使手动运行，也必须使用 `fourier-*-precond` 标签并排除在正式两阶段图外。
             9. Prediction audit 同时有 JSON、CSV 和 completion manifest，严格复用 timed system/solutions，audit solve count=0。

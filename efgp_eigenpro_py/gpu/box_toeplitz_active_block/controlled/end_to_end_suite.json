@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "protocol_family": "end_to_end_krr",
-  "description": "Stage 1 compares complete KRR pipelines. Each method owns landmark/eigenspace/model setup and solving; prediction is reported separately.",
+  "description": "Stage 1 compares complete KRR pipelines. Each method owns landmark/eigenspace/model setup and solving; prediction is reported separately. Successful time-quality results are retained regardless of the descriptive 1% reference-equivalence label.",
   "base": {
     "dataset_stem": "synthetic_true_func_2d_n300000000",
     "n_train": 10000000,
@@ -29,12 +29,17 @@
       "ours-binned-default"
     ],
     "rank": 256,
+    "full_eig_rank": 256,
+    "active_topk": 4096,
+    "expected_active_box_size": 5329,
+    "parameter_selection_policy": "historical_selected_transfer_no_current_scan",
+    "parameter_source": "paper_table1_selected.csv sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA; configuration only, old timings excluded",
     "nystrom_rank": 256,
     "rpcholesky_rank": 256,
     "eig_tol": 0.001,
     "eig_maxiter": 1280,
     "score_tau": 1.0,
-    "box_budget": 8192,
+    "box_budget": 35721,
     "inverse_max_size": 1024,
     "nystrom_seed": 17,
     "rpcholesky_seed": 23,
@@ -63,7 +68,12 @@
       "synthetic_true_func_2d_n300000000"
     ],
     "allowed_resource_limit_methods": ["rpcholesky-krr"],
-    "rule": "Select the largest N with all six declared pipeline rows present, successful Nystrom/EFGP rows, full-eig/ours every-repeat relative and absolute accuracy eligibility, and standard EFGP-CG median iterations in [3000,6000]. An RPCholesky resource_limit row is a prospectively allowed scalability outcome and does not block solver-target selection; it never receives a speedup. Equal-N ties use the declared Winnebago-then-Synthetic priority. If no case qualifies, fail closed rather than substitute a post-hoc target."
+    "rule": "Select the largest N with all six declared pipeline rows present, successful Nystrom/EFGP rows, full-eig/ours inside the every-repeat broad absolute RMSE/R2 usability range, and standard EFGP-CG median iterations in [3000,6000]. The 1% full-eig reference-equivalence label is descriptive only and never suppresses raw speedups. An RPCholesky resource_limit row is a prospectively allowed scalability outcome and does not block solver-target selection; it never receives a speedup. Equal-N ties use the declared Winnebago-then-Synthetic priority. If no case qualifies, fail closed rather than substitute a post-hoc target."
+  },
+  "stage2_fixed_ab": {
+    "inverse_max_size": 16384,
+    "default_inverse_max_size": 1024,
+    "inverse_policy": "Stage-2 explicit active-inverse may use the 16384 cap, while default keeps the frozen 1024 deployment threshold and therefore remains the Stage-1 active-eig route."
   },
   "profiles": {
     "scale_10m_300m": {
@@ -74,6 +84,11 @@
           "dataset_family": "Synthetic",
           "dataset_stem": "synthetic_true_func_2d_n300000000",
           "n_train": 10000000,
+          "rank": 256,
+          "full_eig_rank": 256,
+          "active_topk": 4096,
+          "expected_active_box_size": 5329,
+          "parameter_source": "historical transfer: archived synthetic noise=0.3 group_a winner -> current noise=0.02 nested master; configuration only; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
           "accuracy_max_rmse": 0.02
         },
         {
@@ -81,6 +96,11 @@
           "dataset_family": "Synthetic",
           "dataset_stem": "synthetic_true_func_2d_n300000000",
           "n_train": 30000000,
+          "rank": 320,
+          "full_eig_rank": 256,
+          "active_topk": 8192,
+          "expected_active_box_size": 10609,
+          "parameter_source": "historical transfer: archived synthetic noise=0.3 group_a winner -> current noise=0.02 nested master; configuration only; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
           "accuracy_max_rmse": 0.02
         },
         {
@@ -88,6 +108,11 @@
           "dataset_family": "Synthetic",
           "dataset_stem": "synthetic_true_func_2d_n300000000",
           "n_train": 100000000,
+          "rank": 320,
+          "full_eig_rank": 320,
+          "active_topk": 35721,
+          "expected_active_box_size": 35721,
+          "parameter_source": "historical transfer: archived synthetic noise=0.3 group_c winner -> current noise=0.02 nested master; configuration only; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
           "accuracy_max_rmse": 0.02
         },
         {
@@ -95,6 +120,11 @@
           "dataset_family": "Synthetic",
           "dataset_stem": "synthetic_true_func_2d_n300000000",
           "n_train": 300000000,
+          "rank": 320,
+          "full_eig_rank": 384,
+          "active_topk": 35721,
+          "expected_active_box_size": 35721,
+          "parameter_source": "historical transfer: archived synthetic noise=0.3 group_c winner -> current noise=0.02 nested master; configuration only; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
           "accuracy_max_rmse": 0.02
         },
         {
@@ -102,6 +132,11 @@
           "dataset_family": "Winnebago",
           "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
           "n_train": 10000000,
+          "rank": 320,
+          "full_eig_rank": 128,
+          "active_topk": 8192,
+          "expected_active_box_size": 10609,
+          "parameter_source": "historical selected group_a configuration on the matching Winnebago dataset route; configuration only; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
           "accuracy_max_rmse": 0.15
         },
         {
@@ -109,6 +144,11 @@
           "dataset_family": "Winnebago",
           "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain30000000",
           "n_train": 30000000,
+          "rank": 256,
+          "full_eig_rank": 128,
+          "active_topk": 4096,
+          "expected_active_box_size": 5329,
+          "parameter_source": "historical selected group_a configuration on the matching Winnebago dataset route; configuration only; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
           "accuracy_max_rmse": 0.15
         },
         {
@@ -116,6 +156,11 @@
           "dataset_family": "Winnebago",
           "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain100000000",
           "n_train": 100000000,
+          "rank": 320,
+          "full_eig_rank": 256,
+          "active_topk": 35721,
+          "expected_active_box_size": 35721,
+          "parameter_source": "historical selected group_c configuration on the matching Winnebago dataset route; configuration only; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
           "accuracy_max_rmse": 0.15
         },
         {
@@ -123,12 +168,17 @@
           "dataset_family": "Winnebago",
           "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain300000000",
           "n_train": 300000000,
+          "rank": 384,
+          "full_eig_rank": 320,
+          "active_topk": 35721,
+          "expected_active_box_size": 35721,
+          "parameter_source": "historical selected group_c configuration on the matching Winnebago dataset route; configuration only; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
           "accuracy_max_rmse": 0.15
         }
       ]
     },
     "robustness_at_selected_target": {
-      "description": "Prospectively materialized only after the target case is selected from the scale profile.",
+      "description": "Prospectively materialized only after target selection. Lambda, lengthscale, and dataset axes freeze the selected historical-transfer configuration; the box-budget axis is separately labelled budget-adaptive score selection.",
       "lambda_values": [0.01, 0.1, 1.0],
       "lengthscale_values": [0.05, 0.1, 0.2],
       "box_budget_values": [4096, 8192, 16384],
