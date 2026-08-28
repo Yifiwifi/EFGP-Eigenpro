@@ -823,6 +823,8 @@ def build_notebook() -> dict:
 
             `ours-binned-default` 与 `efgp-standard-full-eig` 不在本次正式计时中重新扫参。每个 dataset/N 直接冻结原实验 `paper_table1_selected.csv` 的 proposed top-k/rank 与 full-eig rank，只转移配置并在当前 1 次预热 + 5 次 measured 协议下重新测量全部时间。Synthetic 的旧来源与当前 master 噪声不同，因此明确标为 historical transfer，而不是当前数据上的最优点。
 
+            robustness 中冻结的 proposed top-k 是上界。若改变 lengthscale/dataset 后同一 score prefix 的中心闭包超过仍然冻结的 box budget，只有 robustness 配置会显式授权按同一确定性 score 顺序缩短到可容纳的最大 prefix；这不是扫参，不读取时间、迭代数、标签或精度。`configured_active_topk`、`effective_active_topk`、`effective_active_box_size`、`active_selection_rule` 与 `capacity_adapted` 都进入 canonical 表，必须披露实际运行配置。
+
             首先运行 `end_to_end_suite.json::scale_10m_300m`。target 选择规则在看结果前冻结：六方法行必须全部存在，Nyström/EFGP 必须成功；RPCholesky 的预声明显存 `resource_limit` 可以作为真实 scalability outcome 保留，但不能获得 speedup，也不阻断后续 solver target。ours/full-eig 必须落在每个 repeat 的宽松绝对 RMSE/R² usability 范围；1% relative equivalence 只作描述。standard EFGP-CG median iterations 位于 3000–6000，随后取其中最大的 N；同 N 按 suite 中预先声明的 `dataset_priority` 决定。没有合格 case 时 fail closed，Stage 1 robustness 与 Stage 2 均不启动。
             """
         )
@@ -1567,7 +1569,9 @@ def build_notebook() -> dict:
             )
             STAGE2_METHOD_CONFIG_FIELDS = (
                 "rank", "full_eig_rank", "active_topk",
-                "expected_active_box_size", "box_budget", "inverse_max_size",
+                "expected_active_box_size",
+                "allow_frozen_topk_capacity_adaptation",
+                "box_budget", "inverse_max_size",
                 "default_inverse_max_size",
                 "parameter_selection_policy", "parameter_source",
             )
@@ -1785,6 +1789,11 @@ def build_notebook() -> dict:
                             "active_topk": declared_target_config.get("active_topk"),
                             "expected_active_box_size": declared_target_config.get(
                                 "expected_active_box_size"
+                            ),
+                            "allow_frozen_topk_capacity_adaptation": bool(
+                                declared_target_config.get(
+                                    "allow_frozen_topk_capacity_adaptation", False
+                                )
                             ),
                             "parameter_selection_policy": declared_target_config.get(
                                 "parameter_selection_policy", ""

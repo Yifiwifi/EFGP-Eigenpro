@@ -6,6 +6,9 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from efgp_eigenpro_py.discretization import basis_weights, choose_grid_params
+from efgp_eigenpro_py.gpu.box_toeplitz_active_block import active_set as active_set_module
+from efgp_eigenpro_py.gpu.box_toeplitz_active_block.active_set import score_rank_order
 from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled import (
     benchmark as benchmark_module,
 )
@@ -22,6 +25,7 @@ from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.benchmark import 
     system_component_fingerprints,
     system_fingerprint,
 )
+from efgp_eigenpro_py.kernels import make_matern
 
 
 def _fake_system() -> PreparedSystem:
@@ -47,6 +51,35 @@ def _fake_system() -> PreparedSystem:
         setup_seconds=1.0,
         system_id=fingerprint,
         manifest={"M": mtot, "mtot": mtot, "dim": 1},
+    )
+
+
+def _expanded_lengthscale_system() -> PreparedSystem:
+    kernel = make_matern(lengthscale=0.05, nu=1.5, dim=2, variance=1.0)
+    grid = choose_grid_params(kernel, 1e-5, L=1.0, l2scaled=True)
+    weights = np.ascontiguousarray(
+        basis_weights(kernel, grid.xis, grid.h).reshape(-1)
+    )
+    assert grid.mtot == 291
+    assert weights.size == 84_681
+
+    # _active_from_cfg only reads the lag-grid center to obtain gamma.
+    xtxcol = np.zeros((2 * grid.mtot - 1,) * 2, dtype=np.float64)
+    xtxcol[(grid.mtot - 1,) * 2] = 1.0
+    data_ctx = SimpleNamespace(
+        xtxcol_gpu=xtxcol,
+        weights_np_flat=weights,
+        weights_gpu_flat=weights,
+        meta={"mtot": grid.mtot, "dim": 2},
+    )
+    return PreparedSystem(
+        backend=SimpleNamespace(xp=np, fft=np.fft),
+        data_ctx=data_ctx,
+        rhs_gpu=np.zeros(weights.size, dtype=np.complex128),
+        reg_lambda=0.1,
+        setup_seconds=0.0,
+        system_id="expanded-lengthscale-fixture",
+        manifest={"M": weights.size, "mtot": grid.mtot, "dim": 2},
     )
 
 
@@ -166,6 +199,138 @@ def test_frozen_topk_clamps_to_a_smaller_robustness_grid_without_rescanning() ->
 
     assert rule.config.active_topk == system.manifest["M"]
     assert rule.selection_rule == "frozen_score_topk_clamped_to_grid"
+
+
+def test_frozen_topk_clamps_to_box_budget_on_an_expanded_robustness_grid() -> None:
+    system = _fake_system()
+    cfg = ControlledConfig(
+        methods=("cg", "default"),
+        # The two highest scores occupy the center and one neighbour.  Their
+        # centered enclosing box has size three, which exceeds this fixed cap.
+        active_topk=2,
+        expected_active_box_size=None,
+        allow_frozen_topk_capacity_adaptation=True,
+        box_budget=2,
+        inverse_max_size=1,
+        rank=2,
+        measured_repeats=5,
+        parameter_selection_policy="historical_selected_transfer_no_current_scan",
+    )
+
+    rule = resolve_score_box_rule(system, cfg)
+
+    assert rule.raw_tau_box_size == 3
+    assert rule.config.active_topk == 1
+    assert rule.active.box_idx.size == 1
+    assert rule.selection_rule == "frozen_score_topk_clamped_to_box_budget"
+
+
+def test_frozen_topk_combines_grid_and_box_budget_capacity_clamps() -> None:
+    system = _fake_system()
+    cfg = ControlledConfig(
+        methods=("cg", "default"),
+        active_topk=20,
+        expected_active_box_size=None,
+        allow_frozen_topk_capacity_adaptation=True,
+        box_budget=2,
+        inverse_max_size=1,
+        rank=2,
+        measured_repeats=5,
+    )
+
+    rule = resolve_score_box_rule(system, cfg)
+
+    assert rule.config.active_topk == 1
+    assert rule.selection_rule == (
+        "frozen_score_topk_clamped_to_grid_and_box_budget"
+    )
+
+
+def test_capacity_clamp_computes_one_deterministic_score_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    system = _fake_system()
+    calls = 0
+    original = active_set_module.score_rank_order
+
+    def counted(rho: np.ndarray) -> np.ndarray:
+        nonlocal calls
+        calls += 1
+        return original(rho)
+
+    monkeypatch.setattr(active_set_module, "score_rank_order", counted)
+    rule = resolve_score_box_rule(
+        system,
+        ControlledConfig(
+            methods=("default",),
+            active_topk=2,
+            allow_frozen_topk_capacity_adaptation=True,
+            box_budget=2,
+            inverse_max_size=1,
+            rank=2,
+            measured_repeats=5,
+        ),
+    )
+
+    assert rule.config.active_topk == 1
+    assert calls == 1
+
+
+def test_score_order_uses_flat_index_as_the_tie_break() -> None:
+    np.testing.assert_array_equal(
+        score_rank_order(np.array([1.0, 2.0, 2.0, 1.0])),
+        np.array([1, 2, 0, 3]),
+    )
+
+
+def test_real_lengthscale_0p05_frozen_topk_is_capped_without_rescanning() -> None:
+    system = _expanded_lengthscale_system()
+    cfg = ControlledConfig(
+        methods=("default",),
+        rank=320,
+        active_topk=35_721,
+        expected_active_box_size=None,
+        allow_frozen_topk_capacity_adaptation=True,
+        box_budget=35_721,
+        inverse_max_size=1_024,
+        measured_repeats=5,
+        parameter_selection_policy="historical_selected_transfer_no_current_scan",
+    )
+
+    specs, rule = resolve_method_specs(system, cfg)
+
+    assert rule.raw_tau_box_size == 45_369
+    assert rule.config.active_topk == 28_333
+    assert rule.active.active_idx.size == 28_333
+    assert rule.active.box_idx.size == 35_721
+    np.testing.assert_array_equal(rule.active.radii, [94, 94])
+    assert rule.selection_rule == "frozen_score_topk_clamped_to_box_budget"
+    default = next(spec for spec in specs if spec.label == "default")
+    assert default.btab_config is not None
+    assert default.btab_config.active_topk == 28_333
+    assert "clamped_to_box_budget" in default.selection_rule
+
+    order = score_rank_order(rule.active.rho)
+    next_prefix_multi = np.stack(
+        np.unravel_index(order[:28_334], (291, 291)), axis=1
+    )
+    next_radii = np.max(np.abs(next_prefix_multi - np.array([145, 145])), axis=0)
+    assert int(np.prod(2 * next_radii + 1)) == 36_099
+
+
+def test_frozen_topk_box_budget_does_not_relax_scale_provenance() -> None:
+    system = _fake_system()
+    cfg = ControlledConfig(
+        methods=("cg", "default"),
+        active_topk=2,
+        expected_active_box_size=3,
+        box_budget=2,
+        rank=2,
+        measured_repeats=5,
+    )
+
+    with pytest.raises(ValueError, match="capacity adaptation is not authorized"):
+        resolve_score_box_rule(system, cfg)
 
 
 def test_explicit_active_methods_are_charged_shared_score_selection() -> None:

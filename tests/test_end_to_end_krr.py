@@ -63,7 +63,11 @@ def test_efgp_pipeline_total_charges_score_selection(monkeypatch: pytest.MonkeyP
         system_id = "fixed-system"
 
     fake_system = FakeSystem()
-    fake_spec = type("Spec", (), {"label": "default"})()
+    fake_spec = type(
+        "Spec",
+        (),
+        {"label": "default", "active_set": None, "btab_config": None},
+    )()
     method_row = {
         "status": "ok",
         "selection_seconds": 2.0,
@@ -71,6 +75,10 @@ def test_efgp_pipeline_total_charges_score_selection(monkeypatch: pytest.MonkeyP
         # The fixed-A,b runner's compatibility field already includes selection.
         "build_seconds": 5.0,
         "solve_seconds": 5.0,
+        "selection_rule": "frozen_score_topk_clamped_to_box_budget",
+        "active_topk": 28,
+        "box_size": 49,
+        "rank": 16,
     }
 
     monkeypatch.setattr(
@@ -109,6 +117,11 @@ def test_efgp_pipeline_total_charges_score_selection(monkeypatch: pytest.MonkeyP
     assert row["solver_build_seconds"] == 3.0
     assert row["solving_phase_seconds"] == 10.0
     assert row["train_total_seconds"] == 17.0
+    assert row["active_selection_rule"] == method_row["selection_rule"]
+    assert row["effective_active_topk"] == 28
+    assert row["effective_active_box_size"] == 49
+    assert row["effective_active_rank"] == 16
+    assert row["capacity_adapted"] is True
 
 
 def test_mixed_pipeline_config_rejects_mismatched_regularization_scaling() -> None:
@@ -381,6 +394,97 @@ def test_usability_requires_every_repeat_and_absolute_quality() -> None:
     assert summary["ours-binned-default"]["ours_speedup_claim_eligible"] is False
 
 
+def _rows_with_effective_active_set_diagnostics() -> tuple[EndToEndConfig, list[dict]]:
+    cfg = EndToEndConfig(
+        methods=("efgp-standard-full-eig", "ours-binned-default"),
+        measured_repeats=2,
+        allow_frozen_topk_capacity_adaptation=True,
+    )
+    common = {
+        "protocol_family": PROTOCOL_FAMILY,
+        "dataset_stem": "toy",
+        "n_train": 100,
+        "n_test": 20,
+        "dim": 2,
+        "kernel_family": "matern",
+        "lengthscale": 0.05,
+        "nu": 1.5,
+        "reg_lambda": 0.1,
+        "box_budget": 49,
+        "configured_active_topk": 40,
+        "configured_allow_frozen_topk_capacity_adaptation": True,
+        "is_warmup": False,
+        "status": "converged",
+        "setup_seconds": 1.0,
+        "solver_build_seconds": 0.25,
+        "iterative_solve_seconds": 0.75,
+        "solving_phase_seconds": 1.0,
+        "train_total_seconds": 2.0,
+        "prediction_seconds": 0.1,
+        "test_rmse": 0.9,
+        "test_mae": 0.1,
+        "test_r2": 0.8,
+    }
+    rows = []
+    for repeat_idx in range(2):
+        rows.extend(
+            [
+                {
+                    **common,
+                    "method": "efgp-standard-full-eig",
+                    "repeat_idx": repeat_idx,
+                    "active_selection_rule": "full_eig",
+                    "effective_active_topk": 64,
+                    "effective_active_box_size": 64,
+                    "effective_active_rank": 64,
+                    "capacity_adapted": False,
+                },
+                {
+                    **common,
+                    "method": "ours-binned-default",
+                    "repeat_idx": repeat_idx,
+                    "active_selection_rule": (
+                        "frozen_score_topk_clamped_to_box_budget"
+                    ),
+                    "effective_active_topk": 28,
+                    "effective_active_box_size": 49,
+                    "effective_active_rank": 16,
+                    "capacity_adapted": True,
+                },
+            ]
+        )
+    return cfg, rows
+
+
+def test_summary_propagates_effective_active_set_diagnostics() -> None:
+    cfg, rows = _rows_with_effective_active_set_diagnostics()
+    summary = {row["method"]: row for row in summarize_pipeline_rows(rows, cfg)}
+    ours = summary["ours-binned-default"]
+    assert ours["configured_allow_frozen_topk_capacity_adaptation"] is True
+    assert ours["active_selection_rule"] == (
+        "frozen_score_topk_clamped_to_box_budget"
+    )
+    assert ours["effective_active_topk"] == 28
+    assert ours["effective_active_box_size"] == 49
+    assert ours["effective_active_rank"] == 16
+    assert ours["capacity_adapted"] is True
+
+
+def test_summary_fails_closed_when_effective_active_set_changes() -> None:
+    cfg, rows = _rows_with_effective_active_set_diagnostics()
+    changed = [dict(row) for row in rows]
+    next(
+        row
+        for row in changed
+        if row["method"] == "ours-binned-default" and row["repeat_idx"] == 1
+    )["effective_active_topk"] = 27
+    with pytest.raises(
+        RuntimeError,
+        match="ours-binned-default changed effective_active_topk",
+    ):
+        summarize_pipeline_rows(changed, cfg)
+
+
 def _target_rows(n_train: int, cg_iterations: int) -> list[dict[str, object]]:
     common: dict[str, object] = {
         "dataset_stem": "synthetic_true_func_2d_n300000000",
@@ -390,6 +494,7 @@ def _target_rows(n_train: int, cg_iterations: int) -> list[dict[str, object]]:
         "nu": 1.5,
         "reg_lambda": 0.1,
         "fourier_eps": 1e-5,
+        "configured_allow_frozen_topk_capacity_adaptation": False,
         "status": "ok",
         "usability_eligible": True,
         # The legacy reference-equivalence gate must not control target selection.
@@ -412,6 +517,7 @@ def test_target_selection_is_frozen_and_uses_largest_eligible_n() -> None:
     assert selected["n_train"] == 30_000_000
     assert selected["eligible_candidate_count"] == 2
     assert selected["rejected_candidate_count"] == 1
+    assert selected["allow_frozen_topk_capacity_adaptation"] is False
 
 
 def test_target_selection_uses_prospectively_declared_equal_n_priority() -> None:
@@ -494,6 +600,10 @@ def test_shipped_suite_covers_10m_to_300m_and_materializes_robustness(
         "Synthetic",
         "Winnebago",
     }
+    assert all(
+        item["config"].allow_frozen_topk_capacity_adaptation is False
+        for item in scale
+    )
     target = select_target_regime(_target_rows(10_000_000, 4000))
     robust = materialize_robustness_plan(
         suite,
@@ -518,6 +628,7 @@ def test_shipped_suite_covers_10m_to_300m_and_materializes_robustness(
     assert {cfg.box_budget for cfg in adaptive} == {4096, 8192, 16384}
     assert all(cfg.active_topk is None for cfg in adaptive)
     assert all(cfg.expected_active_box_size is None for cfg in configs)
+    assert all(cfg.allow_frozen_topk_capacity_adaptation is True for cfg in configs)
     assert all(
         cfg.parameter_selection_policy
         == "historical_selected_transfer_no_current_scan"
@@ -561,6 +672,7 @@ def test_shipped_suite_freezes_archived_full_eig_and_ours_winners(
     )
     assert all("0D6827265" in item["config"].parameter_source for item in scale)
     assert suite["base"]["inverse_max_size"] == 1024
+    assert suite["base"]["allow_frozen_topk_capacity_adaptation"] is False
     assert suite["stage2_fixed_ab"]["inverse_max_size"] == 16384
     assert suite["stage2_fixed_ab"]["default_inverse_max_size"] == 1024
 

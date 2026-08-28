@@ -114,6 +114,12 @@ STAGE1_REQUIRED = {
     "configured_full_eig_rank",
     "configured_active_topk",
     "configured_expected_active_box_size",
+    "configured_allow_frozen_topk_capacity_adaptation",
+    "active_selection_rule",
+    "effective_active_topk",
+    "effective_active_box_size",
+    "effective_active_rank",
+    "capacity_adapted",
     "parameter_selection_policy",
     "parameter_source",
     "setup_seconds_median",
@@ -166,6 +172,12 @@ STAGE1_RUN_REQUIRED = {
     "train_total_seconds",
     "test_rmse",
     "test_r2",
+    "configured_allow_frozen_topk_capacity_adaptation",
+    "active_selection_rule",
+    "effective_active_topk",
+    "effective_active_box_size",
+    "effective_active_rank",
+    "capacity_adapted",
 }
 STAGE2_REQUIRED = {
     "method",
@@ -238,6 +250,12 @@ STAGE1_TABLE_COLUMNS = (
     "configured_full_eig_rank",
     "configured_active_topk",
     "configured_expected_active_box_size",
+    "configured_allow_frozen_topk_capacity_adaptation",
+    "active_selection_rule",
+    "effective_active_topk",
+    "effective_active_box_size",
+    "effective_active_rank",
+    "capacity_adapted",
     "parameter_selection_policy",
     "parameter_source",
     "method",
@@ -760,6 +778,12 @@ def _verify_stage1_case_evidence(
                 if cfg.expected_active_box_size is None
                 else int(cfg.expected_active_box_size)
             )
+            or _as_bool(
+                observed.get(
+                    "configured_allow_frozen_topk_capacity_adaptation"
+                )
+            )
+            != bool(cfg.allow_frozen_topk_capacity_adaptation)
             or str(observed.get("parameter_selection_policy", "")).strip()
             != str(cfg.parameter_selection_policy)
             or str(observed.get("parameter_source", "")).strip()
@@ -802,6 +826,9 @@ def _verify_stage1_case_evidence(
         "usability_passed_repeats",
         "reference_evaluated_repeats",
         "reference_equivalent_repeats",
+        "effective_active_topk",
+        "effective_active_box_size",
+        "effective_active_rank",
     )
     boolean_fields = (
         "execution_eligible",
@@ -812,6 +839,7 @@ def _verify_stage1_case_evidence(
         "ours_speedup_claim_eligible",
         "accuracy_eligible",
         "performance_claim_eligible",
+        "capacity_adapted",
     )
     for method, expected in recomputed_by_method.items():
         observed = summary_by_method.get(method)
@@ -834,8 +862,12 @@ def _verify_stage1_case_evidence(
         mismatches.extend(
             field
             for field in boolean_fields
-            if _as_bool(observed.get(field)) != bool(expected.get(field))
+            if _as_bool(observed.get(field)) != _as_bool(expected.get(field))
         )
+        if str(observed.get("active_selection_rule", "")).strip() != str(
+            expected.get("active_selection_rule", "")
+        ).strip():
+            mismatches.append("active_selection_rule")
         if mismatches:
             raise ReportSchemaError(
                 f"{source_path}: {method} summary disagrees with repeat evidence: "
@@ -893,6 +925,7 @@ def load_stage1_summaries(
                 "configured_full_eig_rank",
                 "configured_active_topk",
                 "configured_expected_active_box_size",
+                "configured_allow_frozen_topk_capacity_adaptation",
                 "parameter_selection_policy",
                 "parameter_source",
                 "robustness_axes",
@@ -1047,6 +1080,84 @@ def load_stage1_summaries(
                     and ours_usable
                     and ours_quality_qualified
                 )
+                configured_topk = _as_int(row.get("configured_active_topk"))
+                effective_topk = _as_int(row.get("effective_active_topk"))
+                effective_box_size = _as_int(
+                    row.get("effective_active_box_size")
+                )
+                effective_rank = _as_int(row.get("effective_active_rank"))
+                active_selection_rule = str(
+                    row.get("active_selection_rule", "")
+                ).strip()
+                capacity_adapted = _as_bool(row.get("capacity_adapted"))
+                capacity_authorized = _as_bool(
+                    row.get(
+                        "configured_allow_frozen_topk_capacity_adaptation"
+                    )
+                )
+                if capacity_adapted and not (
+                    suite_profile == "robustness_at_selected_target"
+                    and capacity_authorized
+                    and configured_topk is not None
+                    and effective_topk is not None
+                    and 0 < effective_topk <= configured_topk
+                    and effective_box_size is not None
+                    and 0 < effective_box_size <= int(row["box_budget"])
+                    and "clamped_to_" in active_selection_rule
+                ):
+                    raise ReportSchemaError(
+                        f"{path}: {declared_case_id}/{row['method']} has an "
+                        "unauthorized or inconsistent capacity adaptation"
+                    )
+                method_name = str(row.get("method", ""))
+                if execution and method_name == STAGE1_OURS:
+                    actual_fields_valid = bool(
+                        active_selection_rule
+                        and effective_topk is not None
+                        and effective_topk >= 0
+                        and effective_box_size is not None
+                        and effective_box_size >= 0
+                        and effective_box_size <= int(row["box_budget"])
+                        and (
+                            (
+                                effective_topk == 0
+                                and effective_box_size == 0
+                                and "empty_fallback" in active_selection_rule
+                            )
+                            or (
+                                effective_topk > 0
+                                and effective_box_size > 0
+                                and "empty_fallback" not in active_selection_rule
+                            )
+                        )
+                        and (
+                            "eigenpro" not in active_selection_rule
+                            or (effective_rank is not None and effective_rank > 0)
+                        )
+                        and (
+                            configured_topk is None
+                            or capacity_adapted
+                            or effective_topk == configured_topk
+                        )
+                    )
+                    if not actual_fields_valid:
+                        raise ReportSchemaError(
+                            f"{path}: {declared_case_id}/{method_name} has missing "
+                            "or inconsistent effective active-set evidence"
+                        )
+                if execution and method_name == "efgp-standard-full-eig":
+                    if not (
+                        active_selection_rule == "full_grid"
+                        and effective_topk is not None
+                        and effective_topk > 0
+                        and effective_box_size == effective_topk
+                        and effective_rank is not None
+                        and effective_rank > 0
+                    ):
+                        raise ReportSchemaError(
+                            f"{path}: {declared_case_id}/{method_name} has missing "
+                            "or inconsistent full-grid effective evidence"
+                        )
                 normalized.append(
                     {
                         "case_id": case,
@@ -1090,6 +1201,14 @@ def load_stage1_summaries(
                         "configured_expected_active_box_size": _as_int(
                             row.get("configured_expected_active_box_size")
                         ),
+                        "configured_allow_frozen_topk_capacity_adaptation": (
+                            capacity_authorized
+                        ),
+                        "active_selection_rule": active_selection_rule,
+                        "effective_active_topk": effective_topk,
+                        "effective_active_box_size": effective_box_size,
+                        "effective_active_rank": effective_rank,
+                        "capacity_adapted": capacity_adapted,
                         "parameter_selection_policy": str(
                             row.get("parameter_selection_policy", "")
                         ).strip(),
@@ -1228,6 +1347,7 @@ TARGET_METHOD_CONFIG_FIELDS = (
     "full_eig_rank",
     "active_topk",
     "expected_active_box_size",
+    "allow_frozen_topk_capacity_adaptation",
     "box_budget",
     "parameter_selection_policy",
     "parameter_source",
@@ -2364,6 +2484,16 @@ def build_stage1_robustness(
                 "configured_expected_active_box_size": template.get(
                     "configured_expected_active_box_size"
                 ),
+                "configured_allow_frozen_topk_capacity_adaptation": template.get(
+                    "configured_allow_frozen_topk_capacity_adaptation"
+                ),
+                "active_selection_rule": template.get("active_selection_rule"),
+                "effective_active_topk": template.get("effective_active_topk"),
+                "effective_active_box_size": template.get(
+                    "effective_active_box_size"
+                ),
+                "effective_active_rank": template.get("effective_active_rank"),
+                "capacity_adapted": template.get("capacity_adapted"),
                 "parameter_selection_policy": template.get(
                     "parameter_selection_policy"
                 ),
@@ -2511,6 +2641,7 @@ def build_stage1_robustness(
                     # The scale-case value is a provenance assertion for the
                     # original system. Robustness systems must recompute |B|.
                     "configured_expected_active_box_size": None,
+                    "configured_allow_frozen_topk_capacity_adaptation": True,
                     "parameter_selection_policy": (
                         BUDGET_ADAPTIVE_PARAMETER_POLICY
                         if dimension == "box_budget"
@@ -2556,6 +2687,26 @@ def build_stage1_robustness(
                 "expected_case_count": 1,
                 "observed_case_count": len(subset),
                 "case_id": candidate.get("case_id") if candidate else "",
+                "configured_active_topk": (
+                    candidate.get("configured_active_topk") if candidate else None
+                ),
+                "effective_active_topk": (
+                    candidate.get("effective_active_topk") if candidate else None
+                ),
+                "effective_active_box_size": (
+                    candidate.get("effective_active_box_size")
+                    if candidate
+                    else None
+                ),
+                "effective_active_rank": (
+                    candidate.get("effective_active_rank") if candidate else None
+                ),
+                "active_selection_rule": (
+                    candidate.get("active_selection_rule") if candidate else ""
+                ),
+                "capacity_adapted": bool(
+                    candidate and candidate.get("capacity_adapted")
+                ),
                 "design_eligible": design_eligible,
                 "design_errors": "; ".join(design_errors),
                 "ours_eligible_cases": int(
@@ -3007,6 +3158,12 @@ def _validate_stage1_scale_design(
                 template.get("configured_expected_active_box_size")
             )
             == _as_int(expected.get("expected_active_box_size")),
+            "allow_frozen_topk_capacity_adaptation": _as_bool(
+                template.get(
+                    "configured_allow_frozen_topk_capacity_adaptation"
+                )
+            )
+            == bool(expected.get("allow_frozen_topk_capacity_adaptation", False)),
             "parameter_selection_policy": str(
                 template.get("parameter_selection_policy", "")
             ).strip()
@@ -3083,6 +3240,7 @@ def _validate_stage1_scale_design(
         "full_eig_rank",
         "active_topk",
         "expected_active_box_size",
+        "allow_frozen_topk_capacity_adaptation",
         "box_budget",
         "parameter_selection_policy",
         "parameter_source",

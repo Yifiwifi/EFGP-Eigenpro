@@ -32,7 +32,12 @@ from ...contexts import GPUDataContext, GPUOperatorContext, ensure_gpu_data_cont
 from ...deflation_core import make_jacobi_precond
 from ...iterative_solvers import cg_solve_gpu, pcg_solve_gpu
 from ...v1_ops import apply_A_block_v1, apply_A_v1, gpu_precompute_v1
-from ..active_set import BoxActiveSet, build_box_active_set
+from ..active_set import (
+    BoxActiveSet,
+    build_box_active_set,
+    build_memory_capped_topk_active_set,
+    score_rank_order,
+)
 from ..box_eigenpro import (
     apply_box_eigenpro_preconditioner,
     build_box_eigenpro_preconditioner,
@@ -143,6 +148,7 @@ class ControlledConfig:
     # ranks. ``None`` preserves the historical shared-rank behaviour.
     full_eig_rank: int | None = None
     expected_active_box_size: int | None = None
+    allow_frozen_topk_capacity_adaptation: bool = False
     parameter_selection_policy: str = "deployable_score_rule"
     parameter_source: str = ""
     nystrom_rank: int = 32
@@ -1321,6 +1327,33 @@ def _active_from_cfg(system: PreparedSystem, btab_cfg: BTABConfig) -> BoxActiveS
     )
 
 
+def _memory_capped_topk_from_system(
+    system: PreparedSystem,
+    *,
+    requested_topk: int,
+    box_budget: int,
+) -> tuple[BoxActiveSet, int]:
+    xp = system.backend.xp
+    ctx = system.data_ctx
+    if ctx.xtxcol_gpu is None:
+        ctx.xtxcol_gpu = xp.ascontiguousarray(system.backend.fft.ifftn(ctx.gf_gpu))
+    gamma = _gamma_from_xtxcol(
+        xp,
+        ctx.xtxcol_gpu,
+        int(ctx.meta["mtot"]),
+        int(ctx.meta["dim"]),
+    )
+    return build_memory_capped_topk_active_set(
+        gamma=float(gamma),
+        weights=np.asarray(ctx.weights_np_flat, dtype=np.float64),
+        reg_lambda=float(system.reg_lambda),
+        mtot=int(ctx.meta["mtot"]),
+        dim=int(ctx.meta["dim"]),
+        requested_topk=int(requested_topk),
+        box_budget=int(box_budget),
+    )
+
+
 def resolve_score_box_rule(
     system: PreparedSystem, cfg: ControlledConfig
 ) -> ResolvedBoxRule:
@@ -1329,13 +1362,30 @@ def resolve_score_box_rule(
     budget = min(int(cfg.box_budget), M)
     if cfg.active_topk is not None:
         requested_topk = int(cfg.active_topk)
-        # Robustness changes such as a longer lengthscale can legitimately
-        # shrink the Fourier grid.  Clipping a predeclared top-k to all
-        # available modes is deterministic capacity adaptation, not a rescan.
+        # Robustness changes can legitimately shrink or expand the Fourier
+        # grid.  Treat the predeclared top-k as an upper bound subject to the
+        # same predeclared box-memory cap.  Both adaptations are deterministic
+        # functions of the system weights and capacity; they never inspect
+        # timings, convergence, the rhs, labels, or prediction accuracy.
         effective_topk = min(requested_topk, M)
+        active, raw_box_size = _memory_capped_topk_from_system(
+            system,
+            requested_topk=effective_topk,
+            box_budget=budget,
+        )
+        selected_topk = int(active.active_topk or 0)
+        if (
+            selected_topk < effective_topk
+            and not bool(cfg.allow_frozen_topk_capacity_adaptation)
+        ):
+            raise ValueError(
+                "constructed box exceeds box_budget and frozen top-k capacity "
+                "adaptation is not authorized: "
+                f"unbounded |S_g|={raw_box_size} > {budget}"
+            )
         selected_cfg = BTABConfig(
             active_mode="topk",
-            active_topk=effective_topk,
+            active_topk=selected_topk,
             active_tau=None,
             box_budget=budget,
             solve_mode="exact",
@@ -1346,7 +1396,6 @@ def resolve_score_box_rule(
             eig_maxiter=cfg.eig_maxiter,
             diagnostic_mode="none",
         )
-        active = _active_from_cfg(system, selected_cfg)
         box_size = int(active.box_idx.size)
         if (
             cfg.expected_active_box_size is not None
@@ -1358,17 +1407,23 @@ def resolve_score_box_rule(
             )
         q = min(int(cfg.rank), max(box_size - 1, 0))
         selected_cfg = replace(selected_cfg, eig_q=int(q))
+        if selected_topk < effective_topk:
+            selection_rule = (
+                "frozen_score_topk_clamped_to_grid_and_box_budget"
+                if effective_topk < requested_topk
+                else "frozen_score_topk_clamped_to_box_budget"
+            )
+        elif effective_topk < requested_topk:
+            selection_rule = "frozen_score_topk_clamped_to_grid"
+        else:
+            selection_rule = "frozen_score_topk"
         return ResolvedBoxRule(
             config=selected_cfg,
             active=active,
-            raw_tau_box_size=box_size,
+            raw_tau_box_size=raw_box_size,
             requested_rank=int(cfg.rank),
             effective_rank=int(q),
-            selection_rule=(
-                "frozen_score_topk"
-                if effective_topk == requested_topk
-                else "frozen_score_topk_clamped_to_grid"
-            ),
+            selection_rule=selection_rule,
         )
 
     base = BTABConfig(
@@ -1391,7 +1446,7 @@ def resolve_score_box_rule(
         # Sort once, then find the largest score prefix whose centered
         # enclosing box respects the declared memory cap.  This uses no
         # timing, iterations, rhs, or labels.
-        order = np.argsort(np.asarray(raw.rho, dtype=np.float64))[::-1]
+        order = score_rank_order(raw.rho)
         shape = (int(system.manifest["mtot"]),) * int(system.manifest["dim"])
         multi = np.stack(np.unravel_index(order, shape), axis=1).astype(
             np.int64,
@@ -3000,6 +3055,24 @@ def run_controlled_experiment(
                 if cfg.expected_active_box_size is None
                 else int(cfg.expected_active_box_size)
             ),
+            "allow_frozen_topk_capacity_adaptation": bool(
+                cfg.allow_frozen_topk_capacity_adaptation
+            ),
+            "score_capacity_adapted": bool(
+                cfg.active_topk is not None
+                and rule.config.active_topk is not None
+                and int(rule.config.active_topk) < int(cfg.active_topk)
+            ),
+            "score_grid_capacity_adapted": bool(
+                cfg.active_topk is not None
+                and int(cfg.active_topk) > int(system.manifest["M"])
+            ),
+            "score_box_budget_capacity_adapted": bool(
+                cfg.active_topk is not None
+                and rule.config.active_topk is not None
+                and int(rule.config.active_topk)
+                < min(int(cfg.active_topk), int(system.manifest["M"]))
+            ),
             "parameter_selection_policy": str(cfg.parameter_selection_policy),
             "parameter_source": str(cfg.parameter_source),
             "default_inverse_max_size": int(
@@ -3257,6 +3330,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Optional provenance assertion for the enclosing frozen active box.",
+    )
+    parser.add_argument(
+        "--allow-frozen-topk-capacity-adaptation",
+        action="store_true",
+        help=(
+            "Allow a frozen top-k upper bound to be deterministically shortened "
+            "until its centered box fits box_budget. Intended for explicitly "
+            "declared robustness systems only."
+        ),
     )
     parser.add_argument(
         "--parameter-selection-policy",

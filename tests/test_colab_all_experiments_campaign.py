@@ -126,7 +126,12 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
     assert "STAGE2_SYSTEM_CONFIG_FIELDS = (" in source
     assert "STAGE2_METHOD_CONFIG_FIELDS = (" in source
     assert '"rank", "full_eig_rank", "active_topk"' in source
+    assert '"allow_frozen_topk_capacity_adaptation"' in source
     assert '"parameter_selection_policy", "parameter_source"' in source
+    assert "effective_active_topk" in source
+    assert "effective_active_box_size" in source
+    assert "active_selection_rule" in source
+    assert "capacity_adapted" in source
     assert '"precision", "nufft_backend", "precompute_chunk_size"' in source
     assert "inverse_feasible = active_box_upper_bound <= inverse_max_size" in source
     assert '"active_box_upper_bound": active_box_upper_bound' in source
@@ -243,6 +248,7 @@ def test_one_click_orchestrator_runs_only_fixed_ab_at_frozen_target(
             "full_eig_rank": 256,
             "active_topk": 8_192,
             "expected_active_box_size": active_box_upper_bound,
+            "allow_frozen_topk_capacity_adaptation": False,
             "box_budget": box_budget,
             "inverse_max_size": inverse_max_size,
             "parameter_selection_policy": (
@@ -258,6 +264,7 @@ def test_one_click_orchestrator_runs_only_fixed_ab_at_frozen_target(
                 "full_eig_rank": 256,
                 "active_topk": 8_192,
                 "expected_active_box_size": active_box_upper_bound,
+                "allow_frozen_topk_capacity_adaptation": False,
                 "box_budget": box_budget,
                 "inverse_max_size": 1_024,
                 "parameter_selection_policy": (
@@ -350,6 +357,7 @@ def test_one_click_orchestrator_runs_only_fixed_ab_at_frozen_target(
         "full_eig_rank",
         "active_topk",
         "expected_active_box_size",
+        "allow_frozen_topk_capacity_adaptation",
         "box_budget",
         "parameter_selection_policy",
         "parameter_source",
@@ -403,6 +411,7 @@ def test_one_click_orchestrator_runs_only_fixed_ab_at_frozen_target(
     assert feasibility["n_train"] == 30_000_000
     assert feasibility["box_budget"] == box_budget
     assert feasibility["active_box_upper_bound"] == active_box_upper_bound
+    assert feasibility["allow_frozen_topk_capacity_adaptation"] is False
     assert feasibility["inverse_max_size"] == inverse_max_size
     assert feasibility["default_inverse_max_size"] == 1_024
     assert feasibility["default_resolved_kind"] == "active-eig"

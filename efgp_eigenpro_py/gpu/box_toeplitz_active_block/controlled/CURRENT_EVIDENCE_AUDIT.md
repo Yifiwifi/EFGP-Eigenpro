@@ -106,7 +106,11 @@ The reporting module `two_stage_reporting.py` fails closed:
   subset, variance, precision, and NUFFT settings), not merely its dataset, N,
   kernel, nu, lambda, lengthscale, and Fourier tolerance;
 - robustness requires the complete predeclared one-at-a-time grid around that
-  exact selected target, with all non-varied controls held fixed;
+  exact selected target, with declared non-axis controls fixed. A robustness-
+  only explicit capacity rule may shorten the frozen top-k upper bound when its
+  centered box would exceed the still-fixed box budget; canonical evidence must
+  disclose the configured/effective top-k, effective box size, and rule, and
+  the adaptation cannot inspect timing, convergence, labels, or accuracy;
 - Stage 2 headline claims require a verified fixed system and canonical
   per-repeat `solver_total_seconds = selection + construction + solve`,
   recomputed from `matched_runs.csv`, rather than the old alias or a sum of

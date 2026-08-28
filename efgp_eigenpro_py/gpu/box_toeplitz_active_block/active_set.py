@@ -25,6 +25,13 @@ def compute_rho(gamma: float, weights: np.ndarray, reg_lambda: float) -> np.ndar
     return (float(gamma) * (np.abs(w) ** 2)) / max(float(reg_lambda), 1e-300)
 
 
+def score_rank_order(rho: np.ndarray) -> np.ndarray:
+    """Rank scores descending with flat Fourier index as a deterministic tie-break."""
+    scores = np.asarray(rho, dtype=np.float64).reshape(-1)
+    flat_index = np.arange(scores.size, dtype=np.int64)
+    return np.lexsort((flat_index, -scores)).astype(np.int64, copy=False)
+
+
 def select_active_indices(
     rho: np.ndarray,
     *,
@@ -38,7 +45,7 @@ def select_active_indices(
         if topk is None or int(topk) <= 0:
             raise ValueError("active_topk must be > 0 when active_mode='topk'.")
         k = min(int(topk), int(rho.size))
-        order = np.argsort(rho)[::-1]
+        order = score_rank_order(rho)
         return np.sort(order[:k].astype(np.int64, copy=False))
     if mode_key == "tau":
         if tau is None:
@@ -52,31 +59,26 @@ def _flatten_center_index(mtot: int, dim: int) -> np.ndarray:
     return np.full((int(dim),), hm, dtype=np.int64)
 
 
-def build_box_active_set(
+def _build_box_active_set_from_indices(
     *,
     gamma: float,
-    weights: np.ndarray,
-    reg_lambda: float,
+    rho: np.ndarray,
+    weights_size: int,
     mtot: int,
     dim: int,
+    active_idx: np.ndarray,
     active_mode: str,
     active_topk: int | None,
     active_tau: float | None,
-    box_budget: int | None = None,
+    box_budget: int | None,
 ) -> BoxActiveSet:
-    rho = compute_rho(gamma, weights, reg_lambda)
-    active_idx = select_active_indices(
-        rho,
-        mode=active_mode,
-        topk=active_topk,
-        tau=active_tau,
-    )
+    active_idx = np.asarray(active_idx, dtype=np.int64).reshape(-1)
     center_multi = _flatten_center_index(mtot, dim)
     if active_idx.size == 0:
-        all_idx = np.arange(int(weights.size), dtype=np.int64)
+        all_idx = np.arange(int(weights_size), dtype=np.int64)
         return BoxActiveSet(
             gamma=float(gamma),
-            rho=rho,
+            rho=np.asarray(rho, dtype=np.float64).reshape(-1),
             active_idx=active_idx,
             box_idx=np.empty((0,), dtype=np.int64),
             tail_idx=all_idx,
@@ -114,12 +116,12 @@ def build_box_active_set(
             "constructed box exceeds box_budget: "
             f"|S_g|={int(box_idx.size)} > {int(box_budget)}"
         )
-    tail_mask = np.ones((int(weights.size),), dtype=bool)
+    tail_mask = np.ones((int(weights_size),), dtype=bool)
     tail_mask[box_idx] = False
     tail_idx = np.flatnonzero(tail_mask).astype(np.int64, copy=False)
     return BoxActiveSet(
         gamma=float(gamma),
-        rho=rho,
+        rho=np.asarray(rho, dtype=np.float64).reshape(-1),
         active_idx=active_idx,
         box_idx=box_idx,
         tail_idx=tail_idx,
@@ -128,6 +130,99 @@ def build_box_active_set(
         active_mode=str(active_mode),
         active_topk=None if active_topk is None else int(active_topk),
         active_tau=None if active_tau is None else float(active_tau),
+    )
+
+
+def build_memory_capped_topk_active_set(
+    *,
+    gamma: float,
+    weights: np.ndarray,
+    reg_lambda: float,
+    mtot: int,
+    dim: int,
+    requested_topk: int,
+    box_budget: int,
+) -> tuple[BoxActiveSet, int]:
+    """Build the largest requested score prefix whose centered box fits the cap.
+
+    The score order is computed exactly once and the final active box is built
+    exactly once.  The returned integer is the unbounded requested prefix's box
+    size, which lets callers disclose whether deterministic capacity adaptation
+    occurred.
+    """
+    if int(requested_topk) <= 0:
+        raise ValueError("requested_topk must be positive.")
+    if int(box_budget) <= 0:
+        raise ValueError("box_budget must be positive.")
+    weights_flat = np.asarray(weights, dtype=np.float64).reshape(-1)
+    rho = compute_rho(gamma, weights_flat, reg_lambda)
+    order = score_rank_order(rho)
+    requested = min(int(requested_topk), int(order.size))
+    prefix_order = order[:requested]
+    shape = (int(mtot),) * int(dim)
+    prefix_multi = np.stack(
+        np.unravel_index(prefix_order, shape), axis=1
+    ).astype(np.int64, copy=False)
+    center = _flatten_center_index(int(mtot), int(dim))
+    cumulative_radii = np.maximum.accumulate(
+        np.abs(prefix_multi - center[None, :]), axis=0
+    )
+    box_sizes = np.prod(2 * cumulative_radii + 1, axis=1, dtype=np.int64)
+    raw_box_size = int(box_sizes[-1])
+    feasible = np.flatnonzero(box_sizes <= int(box_budget))
+    if feasible.size == 0:
+        raise ValueError(
+            "box_budget is too small even for the highest-score mode's centered box."
+        )
+    effective_topk = int(feasible[-1]) + 1
+    active_idx = np.sort(
+        prefix_order[:effective_topk].astype(np.int64, copy=False)
+    )
+    active = _build_box_active_set_from_indices(
+        gamma=float(gamma),
+        rho=rho,
+        weights_size=int(weights_flat.size),
+        mtot=int(mtot),
+        dim=int(dim),
+        active_idx=active_idx,
+        active_mode="topk",
+        active_topk=effective_topk,
+        active_tau=None,
+        box_budget=int(box_budget),
+    )
+    return active, raw_box_size
+
+
+def build_box_active_set(
+    *,
+    gamma: float,
+    weights: np.ndarray,
+    reg_lambda: float,
+    mtot: int,
+    dim: int,
+    active_mode: str,
+    active_topk: int | None,
+    active_tau: float | None,
+    box_budget: int | None = None,
+) -> BoxActiveSet:
+    rho = compute_rho(gamma, weights, reg_lambda)
+    active_idx = select_active_indices(
+        rho,
+        mode=active_mode,
+        topk=active_topk,
+        tau=active_tau,
+    )
+    return _build_box_active_set_from_indices(
+        gamma=float(gamma),
+        rho=rho,
+        weights_size=int(np.asarray(weights).size),
+        mtot=int(mtot),
+        dim=int(dim),
+        active_idx=active_idx,
+        active_mode=str(active_mode),
+        active_topk=None if active_topk is None else int(active_topk),
+        active_tau=None if active_tau is None else float(active_tau),
+        box_budget=box_budget,
     )
 
 

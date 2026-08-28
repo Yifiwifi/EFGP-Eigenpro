@@ -48,7 +48,18 @@ selected target configuration. The box-budget axis is separately labelled
 budget-adaptive because a frozen enclosing box cannot fit every smaller cap.
 If a lengthscale change produces fewer Fourier modes than the frozen top-k, the
 runner deterministically clips top-k to all available modes and records
-`frozen_score_topk_clamped_to_grid`; it never launches a replacement scan.
+`frozen_score_topk_clamped_to_grid`. If an expanded Fourier grid makes the
+frozen score prefix's centered enclosing box exceed the same fixed box budget,
+the robustness config explicitly authorizes the runner to take the largest
+prefix that fits and records
+`frozen_score_topk_clamped_to_box_budget`. Both are capacity adaptations using
+only the predeclared score order and cap; neither launches a replacement scan
+or reads timing, convergence, rhs, labels, or accuracy. If both limits apply,
+the recorded rule is
+`frozen_score_topk_clamped_to_grid_and_box_budget`. Scale cases do not carry
+this authorization and retain their strict historical box-size provenance
+check. Canonical Stage-1 output reports configured/effective top-k, effective
+box size, selection rule, and the capacity-adaptation flag.
 
 ```bash
 python -m efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end_suite \

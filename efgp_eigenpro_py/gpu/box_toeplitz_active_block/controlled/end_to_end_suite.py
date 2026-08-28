@@ -40,6 +40,9 @@ FROZEN_METHOD_CONFIG_FROM_SUMMARY = {
     "full_eig_rank": "configured_full_eig_rank",
     "active_topk": "configured_active_topk",
     "expected_active_box_size": "configured_expected_active_box_size",
+    "allow_frozen_topk_capacity_adaptation": (
+        "configured_allow_frozen_topk_capacity_adaptation"
+    ),
     "box_budget": "box_budget",
     "parameter_selection_policy": "parameter_selection_policy",
     "parameter_source": "parameter_source",
@@ -220,7 +223,12 @@ def select_target_regime(
             ),
         }
         for config_key, summary_key in FROZEN_METHOD_CONFIG_FROM_SUMMARY.items():
-            candidate[config_key] = rows[0].get(summary_key)
+            value = rows[0].get(summary_key)
+            candidate[config_key] = (
+                _truthy(value)
+                if config_key == "allow_frozen_topk_capacity_adaptation"
+                else value
+            )
         if not missing and not failed and not usability_failures and in_iteration_window:
             eligible.append(candidate)
         else:
@@ -288,6 +296,10 @@ def materialize_robustness_plan(
     # Historical |B| is a scale-case provenance check.  A fixed top-k can form
     # a different enclosing box when lambda, lengthscale, or dataset changes.
     base["expected_active_box_size"] = None
+    # This explicit authorization turns the frozen top-k into an upper bound
+    # under the still-frozen box budget. It is deterministic capacity handling,
+    # not a timing/accuracy-driven parameter search.
+    base["allow_frozen_topk_capacity_adaptation"] = True
 
     target_family = target.get("declared_dataset_family") or target.get(
         "dataset_family"

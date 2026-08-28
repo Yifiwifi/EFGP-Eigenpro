@@ -32,6 +32,7 @@
     "full_eig_rank": 256,
     "active_topk": 4096,
     "expected_active_box_size": 5329,
+    "allow_frozen_topk_capacity_adaptation": false,
     "parameter_selection_policy": "historical_selected_transfer_no_current_scan",
     "parameter_source": "paper_table1_selected.csv sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA; configuration only, old timings excluded",
     "nystrom_rank": 256,
@@ -178,7 +179,7 @@
       ]
     },
     "robustness_at_selected_target": {
-      "description": "Prospectively materialized only after target selection. Lambda, lengthscale, and dataset axes freeze the selected historical-transfer configuration; the box-budget axis is separately labelled budget-adaptive score selection.",
+      "description": "Prospectively materialized only after target selection. Lambda, lengthscale, and dataset axes freeze the selected historical-transfer top-k as an upper bound and explicitly allow deterministic shortening only when its centered box exceeds the same frozen box budget; every actual top-k, box size, and rule is recorded. The box-budget axis is separately labelled budget-adaptive score selection. Neither path uses timing or accuracy to choose parameters.",
       "lambda_values": [0.01, 0.1, 1.0],
       "lengthscale_values": [0.05, 0.1, 0.2],
       "box_budget_values": [4096, 8192, 16384],

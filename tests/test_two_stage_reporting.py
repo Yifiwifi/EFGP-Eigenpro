@@ -63,6 +63,7 @@ FROZEN_METHOD_CONFIG = {
     "full_eig_rank": 256,
     "active_topk": 4096,
     "expected_active_box_size": 5329,
+    "allow_frozen_topk_capacity_adaptation": False,
     "parameter_selection_policy": "historical_selected_transfer_no_current_scan",
     "parameter_source": "test fixture: frozen historical selected configuration",
 }
@@ -245,6 +246,42 @@ def _stage1_method_rows(
                 "configured_full_eig_rank": FROZEN_METHOD_CONFIG["full_eig_rank"],
                 "configured_active_topk": configured_active_topk,
                 "configured_expected_active_box_size": configured_expected_box_size,
+                "configured_allow_frozen_topk_capacity_adaptation": (
+                    is_robustness
+                ),
+                "active_selection_rule": (
+                    "score_ranked_memory_capped_box_inverse_if_fits"
+                    if method == "ours-binned-default" and is_box_budget_axis
+                    else "frozen_score_topk_inverse_if_fits"
+                    if method == "ours-binned-default"
+                    else "full_grid"
+                    if method == "efgp-standard-full-eig"
+                    else ""
+                ),
+                "effective_active_topk": (
+                    max(1, box_budget // 2)
+                    if method == "ours-binned-default" and is_box_budget_axis
+                    else configured_active_topk
+                    if method == "ours-binned-default"
+                    else 10_000
+                    if method == "efgp-standard-full-eig"
+                    else ""
+                ),
+                "effective_active_box_size": (
+                    box_budget
+                    if method == "ours-binned-default" and is_box_budget_axis
+                    else 5329
+                    if method == "ours-binned-default"
+                    else 10_000
+                    if method == "efgp-standard-full-eig"
+                    else ""
+                ),
+                "effective_active_rank": (
+                    FROZEN_METHOD_CONFIG["full_eig_rank"]
+                    if method == "efgp-standard-full-eig"
+                    else ""
+                ),
+                "capacity_adapted": False,
                 "parameter_selection_policy": parameter_policy,
                 "parameter_source": parameter_source,
                 "method": method,
@@ -704,6 +741,9 @@ def _materialize_stage1_evidence(root: Path, rows: list[dict[str, object]]) -> N
                 if first["configured_expected_active_box_size"] in (None, "")
                 else int(first["configured_expected_active_box_size"])
             ),
+            allow_frozen_topk_capacity_adaptation=bool(
+                first["configured_allow_frozen_topk_capacity_adaptation"]
+            ),
             box_budget=int(first["box_budget"]),
             parameter_selection_policy=str(first["parameter_selection_policy"]),
             parameter_source=str(first["parameter_source"]),
@@ -754,6 +794,22 @@ def _materialize_stage1_evidence(root: Path, rows: list[dict[str, object]]) -> N
                         "configured_expected_active_box_size": (
                             cfg.expected_active_box_size
                         ),
+                        "configured_allow_frozen_topk_capacity_adaptation": (
+                            cfg.allow_frozen_topk_capacity_adaptation
+                        ),
+                        "active_selection_rule": summary[
+                            "active_selection_rule"
+                        ],
+                        "effective_active_topk": summary[
+                            "effective_active_topk"
+                        ],
+                        "effective_active_box_size": summary[
+                            "effective_active_box_size"
+                        ],
+                        "effective_active_rank": summary[
+                            "effective_active_rank"
+                        ],
+                        "capacity_adapted": summary["capacity_adapted"],
                         "parameter_selection_policy": (
                             cfg.parameter_selection_policy
                         ),
@@ -826,6 +882,93 @@ def test_stage1_loader_preserves_protocol_and_timing_reporting_contract(
     assert all(
         row["timing_scope"] == EXPECTED_STAGE1_TIMING_SCOPE for row in projected
     )
+
+
+def _lengthscale_capacity_adaptation_rows() -> list[dict[str, object]]:
+    rows = _stage1_method_rows(
+        profile="robustness_at_selected_target",
+        case_id="lengthscale_0p05",
+        axes=["lengthscale_0p05"],
+        dataset_stem="synthetic_master",
+        dataset_family="Synthetic",
+        n_train=100_000_000,
+        lengthscale=0.05,
+        box_budget=35_721,
+    )
+    for row in rows:
+        row["configured_active_topk"] = 35_721
+        row["configured_allow_frozen_topk_capacity_adaptation"] = True
+        if row["method"] == "ours-binned-default":
+            row.update(
+                {
+                    "active_selection_rule": (
+                        "frozen_score_topk_clamped_to_box_budget_eigenpro_if_not"
+                    ),
+                    "effective_active_topk": 28_333,
+                    "effective_active_box_size": 35_721,
+                    "effective_active_rank": 256,
+                    "capacity_adapted": True,
+                }
+            )
+    return rows
+
+
+def test_stage1_loader_preserves_actual_capacity_adaptation(
+    tmp_path: Path,
+) -> None:
+    rows = _lengthscale_capacity_adaptation_rows()
+    _materialize_stage1_evidence(tmp_path, rows)
+    summary_path = _write_csv(tmp_path / "stage1" / "pipeline_summary.csv", rows)
+
+    normalized = load_stage1_summaries((summary_path,))
+    ours = next(row for row in normalized if row["method"] == "ours-binned-default")
+
+    assert ours["configured_active_topk"] == 35_721
+    assert ours["effective_active_topk"] == 28_333
+    assert ours["effective_active_box_size"] == 35_721
+    assert ours["effective_active_rank"] == 256
+    assert ours["capacity_adapted"] is True
+    assert "clamped_to_box_budget" in ours["active_selection_rule"]
+
+
+def test_stage1_loader_rejects_unapproved_capacity_adaptation(
+    tmp_path: Path,
+) -> None:
+    rows = _lengthscale_capacity_adaptation_rows()
+    for row in rows:
+        row["configured_allow_frozen_topk_capacity_adaptation"] = False
+    _materialize_stage1_evidence(tmp_path, rows)
+    summary_path = _write_csv(tmp_path / "stage1" / "pipeline_summary.csv", rows)
+
+    with pytest.raises(ReportSchemaError, match="unauthorized or inconsistent"):
+        load_stage1_summaries((summary_path,))
+
+
+def test_stage1_loader_rejects_missing_actual_ours_active_set(
+    tmp_path: Path,
+) -> None:
+    rows = _stage1_method_rows(
+        profile="scale_10m_300m",
+        case_id="synthetic_n10m",
+        axes=[],
+        dataset_stem="synthetic_master",
+        dataset_family="Synthetic",
+        n_train=10_000_000,
+    )
+    ours = next(row for row in rows if row["method"] == "ours-binned-default")
+    ours.update(
+        {
+            "active_selection_rule": "",
+            "effective_active_topk": "",
+            "effective_active_box_size": "",
+            "effective_active_rank": "",
+        }
+    )
+    _materialize_stage1_evidence(tmp_path, rows)
+    summary_path = _write_csv(tmp_path / "stage1" / "pipeline_summary.csv", rows)
+
+    with pytest.raises(ReportSchemaError, match="effective active-set evidence"):
+        load_stage1_summaries((summary_path,))
 
 
 def _sync_stage2_artifact_sha(stage2: Path, artifact_path: Path) -> None:

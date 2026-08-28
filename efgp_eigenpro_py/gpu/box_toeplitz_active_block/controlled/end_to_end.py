@@ -142,6 +142,7 @@ class EndToEndConfig:
     full_eig_rank: int | None = None
     active_topk: int | None = None
     expected_active_box_size: int | None = None
+    allow_frozen_topk_capacity_adaptation: bool = False
     parameter_selection_policy: str = "deployable_score_rule"
     parameter_source: str = ""
     nystrom_rank: int = 256
@@ -625,6 +626,11 @@ def _fixed_config(
         expected_active_box_size=(
             cfg.expected_active_box_size if uses_active_rule else None
         ),
+        allow_frozen_topk_capacity_adaptation=(
+            bool(cfg.allow_frozen_topk_capacity_adaptation)
+            if uses_active_rule
+            else False
+        ),
         parameter_selection_policy=cfg.parameter_selection_policy,
         parameter_source=cfg.parameter_source,
         eig_tol=cfg.eig_tol,
@@ -739,6 +745,13 @@ def _run_efgp_method(
     solve = float(method_row["solve_seconds"])
     setup = float(system.setup_seconds)
     solving = selection + preconditioner_build + solve
+    effective_active_topk = method_row.get("active_topk")
+    effective_active_box_size = method_row.get("box_size")
+    if spec.active_set is not None:
+        effective_active_topk = int(spec.active_set.active_idx.size)
+        effective_active_box_size = int(spec.active_set.box_idx.size)
+    elif spec.btab_config is not None and spec.btab_config.active_topk is not None:
+        effective_active_topk = int(spec.btab_config.active_topk)
     return {
         **method_row,
         **_metrics(dataset["y_test"], prediction),
@@ -755,6 +768,13 @@ def _run_efgp_method(
         "M": int(system.manifest["M"]),
         "mtot": int(system.manifest["mtot"]),
         "system_id": system.system_id,
+        "active_selection_rule": str(method_row.get("selection_rule", "")),
+        "effective_active_topk": effective_active_topk,
+        "effective_active_box_size": effective_active_box_size,
+        "effective_active_rank": method_row.get("rank"),
+        "capacity_adapted": "clamped_to_" in str(
+            method_row.get("selection_rule", "")
+        ),
     }
 
 
@@ -872,6 +892,9 @@ def _base_row(
             if cfg.expected_active_box_size is None
             else int(cfg.expected_active_box_size)
         ),
+        "configured_allow_frozen_topk_capacity_adaptation": bool(
+            cfg.allow_frozen_topk_capacity_adaptation
+        ),
         "parameter_selection_policy": str(cfg.parameter_selection_policy),
         "parameter_source": str(cfg.parameter_source),
         "accuracy_max_rmse": cfg.accuracy_max_rmse,
@@ -962,6 +985,11 @@ def summarize_pipeline_rows(
             and _finite(row, "test_r2") is not None
         )
 
+    def diagnostic_bool(value: Any) -> bool:
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
     def aggregate_status(method_rows: list[dict[str, Any]]) -> str:
         if not method_rows:
             return "missing"
@@ -981,6 +1009,21 @@ def summarize_pipeline_rows(
         method_rows = grouped.get(method, [])
         ok = [row for row in method_rows if successful(row)]
         first = method_rows[0] if method_rows else {}
+        diagnostic_source = ok[0] if ok else first
+        for diagnostic_field in (
+            "active_selection_rule",
+            "effective_active_topk",
+            "effective_active_box_size",
+            "effective_active_rank",
+            "capacity_adapted",
+        ):
+            diagnostic_values = [row.get(diagnostic_field) for row in ok]
+            if diagnostic_values and any(
+                value != diagnostic_values[0] for value in diagnostic_values[1:]
+            ):
+                raise RuntimeError(
+                    f"{method} changed {diagnostic_field} across measured repeats"
+                )
         summary: dict[str, Any] = {
             **{
                 key: first.get(key)
@@ -1011,6 +1054,7 @@ def summarize_pipeline_rows(
                     "configured_full_eig_rank",
                     "configured_active_topk",
                     "configured_expected_active_box_size",
+                    "configured_allow_frozen_topk_capacity_adaptation",
                     "parameter_selection_policy",
                     "parameter_source",
                     "accuracy_max_rmse",
@@ -1026,6 +1070,21 @@ def summarize_pipeline_rows(
             "expected_measured_repeats": int(cfg.measured_repeats),
             "successful_repeats": len(ok),
             "status": aggregate_status(method_rows),
+            "active_selection_rule": diagnostic_source.get(
+                "active_selection_rule"
+            ),
+            "effective_active_topk": diagnostic_source.get(
+                "effective_active_topk"
+            ),
+            "effective_active_box_size": diagnostic_source.get(
+                "effective_active_box_size"
+            ),
+            "effective_active_rank": diagnostic_source.get(
+                "effective_active_rank"
+            ),
+            "capacity_adapted": diagnostic_bool(
+                diagnostic_source.get("capacity_adapted")
+            ),
         }
         for config_key in (
             "dataset_stem",
@@ -1489,6 +1548,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--active-topk", type=int, default=None)
     parser.add_argument("--expected-active-box-size", type=int, default=None)
     parser.add_argument(
+        "--allow-frozen-topk-capacity-adaptation",
+        action="store_true",
+        help="Allow deterministic top-k shortening in declared robustness systems.",
+    )
+    parser.add_argument(
         "--parameter-selection-policy",
         default=defaults.parameter_selection_policy,
     )
@@ -1556,6 +1620,9 @@ def config_from_args(args: argparse.Namespace) -> EndToEndConfig:
             None
             if args.expected_active_box_size is None
             else int(args.expected_active_box_size)
+        ),
+        allow_frozen_topk_capacity_adaptation=bool(
+            args.allow_frozen_topk_capacity_adaptation
         ),
         parameter_selection_policy=str(args.parameter_selection_policy),
         parameter_source=str(args.parameter_source),
