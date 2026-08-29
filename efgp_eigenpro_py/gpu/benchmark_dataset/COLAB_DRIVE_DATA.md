@@ -1,10 +1,19 @@
 # Colab / Google Drive benchmark data bundle
 
-## One master per compatible scale sweep, not four copies
+## Prefix masters only for compatible development sweeps
 
-The controlled 10M, 30M, 100M, and 300M scale sweeps use exact row prefixes of
-one largest NPZ per compatible data definition.  Upload that **master once**.
-This rule must not be applied across different sampling or noise definitions.
+Compatible development sweeps may use exact row prefixes of one largest NPZ and
+upload that **master once**.  This rule must not be applied across different
+sampling or noise definitions, and it does not apply to the forward formal
+Stage-1 Synthetic route.
+
+Formal Stage-1 Synthetic uses four exact per-N files:
+`synthetic_true_func_2d_ntrain{10000000,30000000,100000000,300000000}`.  They
+follow the frozen original-task generation definition (noise standard deviation
+0.3, train/test seeds 20260421/1, five-million-row generation chunks, and an
+`N/4` noise-free test set).  They are independent exact artifacts rather than
+declared prefixes of the noise-0.02 development master.  The latter must never
+be substituted when an exact formal artifact is missing.
 
 The masters were written with `numpy.savez`, so every NPY member is
 `ZIP_STORED`.  `colab_drive_pack.py` can memory-map an array at its byte offset
@@ -12,8 +21,7 @@ inside the NPZ and return `[0:n]` without extracting the archive or allocating
 the other 300M rows.  The same rule is applied to the fixed test set: a 10M
 training prefix uses the corresponding first 2.5M test rows.
 
-The two complete 300M development/controlled masters already in the workspace
-are:
+The development/controlled masters already in the workspace are:
 
 | Drive dataset id | Upload exactly once | Size | Ready prefixes |
 |---|---|---:|---|
@@ -22,12 +30,26 @@ are:
 | `manitowoc-v1` | currently `USGS_EPT_WI_2County_1_B23_full_workunit_ground_elevation_n10000000.npz` | 150 MB | 10M; larger prefixes planned |
 
 Sizes above are decimal bytes.  The 300M synthetic master uses noise standard
-deviation 0.02 and is a development scale route; the archived paper synthetic
-system uses noise standard deviation 0.3 and remains a separate exact NPZ.
+deviation 0.02 and remains a development-only scale route.  It is not a formal
+Stage-1 input.  The exact noise-0.3 Synthetic status is:
+
+| Formal Stage-1 artifact | Current status |
+|---|---|
+| `_ntrain10000000` NPZ/JSON | import from the existing Google Drive exact-data collection |
+| `_ntrain30000000` NPZ/JSON | import from the existing Google Drive exact-data collection |
+| `_ntrain100000000` NPZ/JSON | import from the existing Google Drive exact-data collection |
+| `_ntrain300000000` NPZ/JSON | import from the existing Google Drive exact-data collection |
+
+The formal claim is that these files belong to the same frozen generated-data
+family, not that they are byte-for-byte copies of a particular historical NPZ.
+The imported copies receive catalog hashes for this run. Archived experiment
+artifacts contribute only frozen selected configurations to the new run, and
+their old timings are excluded.
+
 The 300M Winnebago master exposes raw row prefixes; it does not reproduce the
-spatial-stratified indexes in the archived paper artifacts.  Neither 300M
-master may therefore be presented as a reproduction of the original paper
-experiment.  The synthetic archive contains two additional
+spatial-stratified indexes in the archived paper artifacts.  Neither of the two
+300M development masters may therefore be presented as a reproduction of the
+original paper experiment.  The synthetic archive contains two additional
 300M training-prefix arrays (`y_train_true` and `train_noise`), which explains
 its larger size.  The data files, their JSON metadata, a catalog, and SHA-256
 checksums are the complete upload set; raw LAZ/EPT cache files are not needed
@@ -37,6 +59,9 @@ in Colab.
 
 Run from `D:\NU\ML`.  Hard links consume no additional data blocks, while
 presenting one clean directory that can be selected for Google Drive upload.
+The `synthetic-development-v1` command below stages the optional low-noise
+development master only; its presence does not satisfy formal Stage-1 input
+validation.
 
 ```powershell
 $stage = "D:\NU\ML\colab_drive_upload_ready"
@@ -62,9 +87,24 @@ python -m efgp_eigenpro_py.gpu.benchmark_dataset.colab_drive_pack prepare `
 
 ```
 
-Register each archived paper input as an exact artifact instead of assigning
-it master-prefix semantics.  For example, these are the distinct 10M
-synthetic-noise-0.3 and spatial-stratified Winnebago inputs:
+The four files already stored in Google Drive should be copied into the formal
+bundle and registered directly. The following generator is only a recovery
+path if an exact size is genuinely missing; it is not part of the default
+all-experiment run:
+
+```powershell
+python -m efgp_eigenpro_py.gpu.benchmark_dataset.preprocess_synthetic_true_func_2d_size_sweep `
+  --n-train-list 30000000,100000000,300000000 `
+  --noise 0.3 --seed-train 20260421 --seed-test 1 `
+  --chunk-rows 5000000 --size-token ntrain `
+  --output-dir efgp_eigenpro_py\gpu\benchmark_dataset\processed
+```
+
+Register each exact paper-definition input instead of assigning it
+master-prefix semantics.  Repeat the Synthetic NPZ and metadata operations for
+all four formal sizes; each file must appear in the bundle selected by Stage 1,
+in `drive_manifest.json`, and in `checksums.sha256`.  For example, these are the
+distinct 10M synthetic-noise-0.3 and spatial-stratified Winnebago inputs:
 
 ```powershell
 python -m efgp_eigenpro_py.gpu.benchmark_dataset.colab_drive_pack add-artifact `
@@ -97,15 +137,18 @@ python -m efgp_eigenpro_py.gpu.benchmark_dataset.colab_drive_pack add-artifact `
 ```
 
 Apply the same `add-artifact` operation to every other exact NPZ/JSON referenced
-by an archived experiment configuration.  A compressed exact NPZ is valid in
-this route; it is deliberately not exposed through the zero-copy prefix API.
-The prepared workspace catalog registers archived Synthetic only at 10M, and
-Winnebago exact pairs at 1M, 3M, 10M, 30M, and 100M plus the historical 300M
-file.  The Winnebago sidecars document that sampling differs across some N, so
-these are independent exact systems rather than one nested sweep.  Archived
-Synthetic noise-0.3 files are still missing at 1M/3M/30M/100M/300M; the Colab
-notebook refuses to run the corresponding legacy group until the required
-`_ntrainN` artifacts have been regenerated with the frozen protocol.
+by a formal or archived experiment configuration.  A compressed exact NPZ is
+valid in this route; it is deliberately not exposed through the zero-copy
+prefix API. Registering all four existing noise-0.3 Synthetic pairs in
+`archived_exact_available` is preferred. For compatibility with the original
+experiment, the formal notebook can also locate an unregistered pair in the
+standard MyDrive cache directories by exact basename, copy it locally, compute
+a fresh SHA-256, and bind that hash to the run. Add 1M and 3M only when the
+optional complete legacy groups are also requested.
+
+Winnebago exact pairs are registered at 1M, 3M, 10M, 30M, and 100M plus the
+historical 300M file.  Their sidecars document that sampling differs across
+some N, so these are independent exact systems rather than one nested sweep.
 
 After all registrations, verify every data artifact:
 
@@ -114,10 +157,16 @@ python -m efgp_eigenpro_py.gpu.benchmark_dataset.colab_drive_pack verify `
   --manifest $stage\drive_manifest.json
 ```
 
-The ready upload is 13,847,768,160 bytes (12.90 GiB), below a fresh 15GB Drive
-quota.  `checksums.sha256` covers every NPZ/JSON artifact listed in the catalog;
-the notebook separately records the SHA-256 of `drive_manifest.json` in each
-run manifest.
+After the catalog contains the four existing files, launch the formal campaign.
+Do not resume or append to a run directory whose Stage-1 Synthetic rows used
+the noise-0.02 development master.
+
+The previously prepared development/legacy upload is 13,847,768,160 bytes
+(12.90 GiB), but that size alone is not evidence that the forward formal bundle
+contains all four exact Synthetic pairs. After importing and registering them,
+recompute the catalog size and checksums. `checksums.sha256` must cover every NPZ/JSON artifact listed in the
+catalog; the notebook separately records the SHA-256 of `drive_manifest.json`
+in each run manifest.
 
 `prepare` computes a streaming SHA-256, so the first pass over each multi-GB
 file takes some time but does not load it into RAM.  It is safe to rerun: an
@@ -145,14 +194,16 @@ colab_drive_upload_ready/
       USGS_EPT_..._n10000000.npz
       USGS_EPT_..._n10000000.json
     synthetic-paper-noise03/
-      synthetic_true_func_2d_ntrain10000000.npz
-      synthetic_true_func_2d_ntrain10000000.json
+      synthetic_true_func_2d_ntrain{10000000,30000000,100000000,300000000}.npz
+      synthetic_true_func_2d_ntrain{10000000,30000000,100000000,300000000}.json
     winnebago-paper-spatial/
       USGS_LPC_..._ntrain{1000000,3000000,10000000,30000000,100000000}.{npz,json}
 ```
 
 Google Drive does not retain hard-link identity, but there is only one linked
 entry for each master in this staging tree, so each master is uploaded once.
+Each formal Synthetic `_ntrainN` pair is an exact artifact and is uploaded
+separately; it is not deduplicated into the development master.
 
 ### Manifest schema used by the Colab notebook
 

@@ -135,7 +135,8 @@ class ControlledConfig:
     )
     score_tau: float = 1.0
     box_budget: int = 1024
-    inverse_max_size: int = 1024
+    # A100 deployment default: use the exact active-box inverse through |B|=6000.
+    inverse_max_size: int = 6000
     # Optional deployment threshold for ``default``.  Keeping it distinct from
     # ``inverse_max_size`` lets a campaign retain a frozen active-eig default
     # while also timing an explicit larger active-inverse sensitivity route.

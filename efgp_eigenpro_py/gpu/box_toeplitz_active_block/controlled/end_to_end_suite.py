@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from .end_to_end import (
+    DATASET_PROVENANCE_CONFIG_FIELDS,
     END_TO_END_METHODS,
     STAGE2_SYSTEM_CONFIG_FIELDS,
     TIMING_SCOPE,
@@ -165,6 +166,7 @@ def select_target_regime(
     grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
     keys = (
         *STAGE2_SYSTEM_CONFIG_FIELDS,
+        *DATASET_PROVENANCE_CONFIG_FIELDS,
         "accuracy_max_rmse",
         "accuracy_min_r2",
     )
@@ -284,6 +286,7 @@ def materialize_robustness_plan(
     base.update(template.get("overrides", {}))
     for key in (
         *STAGE2_SYSTEM_CONFIG_FIELDS,
+        *DATASET_PROVENANCE_CONFIG_FIELDS,
         "accuracy_max_rmse",
         "accuracy_min_r2",
     ):
@@ -356,7 +359,11 @@ def materialize_robustness_plan(
             "dataset_stem": dataset_stem,
             "n_train": target_n,
         }
-        for key in ("accuracy_max_rmse", "accuracy_min_r2"):
+        for key in (
+            *DATASET_PROVENANCE_CONFIG_FIELDS,
+            "accuracy_max_rmse",
+            "accuracy_min_r2",
+        ):
             if key in dataset:
                 dataset_override[key] = dataset[key]
         variations.append(
@@ -377,6 +384,7 @@ def materialize_robustness_plan(
                 key: merged.get(key)
                 for key in (
                     *STAGE2_SYSTEM_CONFIG_FIELDS,
+                    *DATASET_PROVENANCE_CONFIG_FIELDS,
                     "box_budget",
                     "rank",
                     "full_eig_rank",

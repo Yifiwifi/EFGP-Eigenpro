@@ -3,10 +3,15 @@
   "protocol_family": "end_to_end_krr",
   "description": "Stage 1 compares complete KRR pipelines. Each method owns landmark/eigenspace/model setup and solving; prediction is reported separately. Successful time-quality results are retained regardless of the descriptive 1% reference-equivalence label.",
   "base": {
-    "dataset_stem": "synthetic_true_func_2d_n300000000",
+    "dataset_stem": "synthetic_true_func_2d_ntrain10000000",
     "n_train": 10000000,
     "subset_seed": 0,
     "subset_mode": "prefix",
+    "expected_dataset_noise_std": null,
+    "expected_dataset_seed_train": null,
+    "expected_dataset_seed_test": null,
+    "expected_dataset_generation_chunk_rows": null,
+    "expected_dataset_target_function": null,
     "max_test_rows": 2500000,
     "kernel_family": "matern",
     "lengthscale": 0.1,
@@ -41,7 +46,7 @@
     "eig_maxiter": 1280,
     "score_tau": 1.0,
     "box_budget": 35721,
-    "inverse_max_size": 1024,
+    "inverse_max_size": 6000,
     "nystrom_seed": 17,
     "rpcholesky_seed": 23,
     "eig_seed": 0,
@@ -66,15 +71,18 @@
       "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain30000000",
       "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain100000000",
       "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain300000000",
-      "synthetic_true_func_2d_n300000000"
+      "synthetic_true_func_2d_ntrain10000000",
+      "synthetic_true_func_2d_ntrain30000000",
+      "synthetic_true_func_2d_ntrain100000000",
+      "synthetic_true_func_2d_ntrain300000000"
     ],
     "allowed_resource_limit_methods": ["rpcholesky-krr"],
     "rule": "Select the largest N with all six declared pipeline rows present, successful Nystrom/EFGP rows, full-eig/ours inside the every-repeat broad absolute RMSE/R2 usability range, and standard EFGP-CG median iterations in [3000,6000]. The 1% full-eig reference-equivalence label is descriptive only and never suppresses raw speedups. An RPCholesky resource_limit row is a prospectively allowed scalability outcome and does not block solver-target selection; it never receives a speedup. Equal-N ties use the declared Winnebago-then-Synthetic priority. If no case qualifies, fail closed rather than substitute a post-hoc target."
   },
   "stage2_fixed_ab": {
     "inverse_max_size": 16384,
-    "default_inverse_max_size": 1024,
-    "inverse_policy": "Stage-2 explicit active-inverse may use the 16384 cap, while default keeps the frozen 1024 deployment threshold and therefore remains the Stage-1 active-eig route."
+    "default_inverse_max_size": 6000,
+    "inverse_policy": "Stage-2 explicit active-inverse may use the 16384 cap, while default keeps the frozen 6000 A100 deployment threshold and therefore follows the same routing rule as the Stage-1 proposed pipeline."
   },
   "profiles": {
     "scale_10m_300m": {
@@ -83,49 +91,69 @@
         {
           "id": "synthetic_matern_n10m",
           "dataset_family": "Synthetic",
-          "dataset_stem": "synthetic_true_func_2d_n300000000",
+          "dataset_stem": "synthetic_true_func_2d_ntrain10000000",
           "n_train": 10000000,
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d",
           "rank": 256,
           "full_eig_rank": 256,
           "active_topk": 4096,
           "expected_active_box_size": 5329,
-          "parameter_source": "historical transfer: archived synthetic noise=0.3 group_a winner -> current noise=0.02 nested master; configuration only; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
+          "parameter_source": "archived synthetic noise=0.3 group_a selected configuration on the matching generated-data family; configuration only, old timings excluded; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
           "accuracy_max_rmse": 0.02
         },
         {
           "id": "synthetic_matern_n30m",
           "dataset_family": "Synthetic",
-          "dataset_stem": "synthetic_true_func_2d_n300000000",
+          "dataset_stem": "synthetic_true_func_2d_ntrain30000000",
           "n_train": 30000000,
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d",
           "rank": 320,
           "full_eig_rank": 256,
           "active_topk": 8192,
           "expected_active_box_size": 10609,
-          "parameter_source": "historical transfer: archived synthetic noise=0.3 group_a winner -> current noise=0.02 nested master; configuration only; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
+          "parameter_source": "archived synthetic noise=0.3 group_a selected configuration on the matching generated-data family; configuration only, old timings excluded; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
           "accuracy_max_rmse": 0.02
         },
         {
           "id": "synthetic_matern_n100m",
           "dataset_family": "Synthetic",
-          "dataset_stem": "synthetic_true_func_2d_n300000000",
+          "dataset_stem": "synthetic_true_func_2d_ntrain100000000",
           "n_train": 100000000,
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d",
           "rank": 320,
           "full_eig_rank": 320,
           "active_topk": 35721,
           "expected_active_box_size": 35721,
-          "parameter_source": "historical transfer: archived synthetic noise=0.3 group_c winner -> current noise=0.02 nested master; configuration only; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
+          "parameter_source": "archived synthetic noise=0.3 group_c selected configuration on the matching generated-data family; configuration only, old timings excluded; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
           "accuracy_max_rmse": 0.02
         },
         {
           "id": "synthetic_matern_n300m",
           "dataset_family": "Synthetic",
-          "dataset_stem": "synthetic_true_func_2d_n300000000",
+          "dataset_stem": "synthetic_true_func_2d_ntrain300000000",
           "n_train": 300000000,
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d",
           "rank": 320,
           "full_eig_rank": 384,
           "active_topk": 35721,
           "expected_active_box_size": 35721,
-          "parameter_source": "historical transfer: archived synthetic noise=0.3 group_c winner -> current noise=0.02 nested master; configuration only; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
+          "parameter_source": "archived synthetic noise=0.3 group_c selected configuration on the matching generated-data family; configuration only, old timings excluded; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
           "accuracy_max_rmse": 0.02
         },
         {
@@ -137,7 +165,7 @@
           "full_eig_rank": 128,
           "active_topk": 8192,
           "expected_active_box_size": 10609,
-          "parameter_source": "historical selected group_a configuration on the matching Winnebago dataset route; configuration only; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
+          "parameter_source": "historical selected group_a configuration on the matching Winnebago dataset route; configuration only, old timings excluded; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
           "accuracy_max_rmse": 0.15
         },
         {
@@ -149,7 +177,7 @@
           "full_eig_rank": 128,
           "active_topk": 4096,
           "expected_active_box_size": 5329,
-          "parameter_source": "historical selected group_a configuration on the matching Winnebago dataset route; configuration only; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
+          "parameter_source": "historical selected group_a configuration on the matching Winnebago dataset route; configuration only, old timings excluded; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
           "accuracy_max_rmse": 0.15
         },
         {
@@ -161,7 +189,7 @@
           "full_eig_rank": 256,
           "active_topk": 35721,
           "expected_active_box_size": 35721,
-          "parameter_source": "historical selected group_c configuration on the matching Winnebago dataset route; configuration only; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
+          "parameter_source": "historical selected group_c configuration on the matching Winnebago dataset route; configuration only, old timings excluded; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
           "accuracy_max_rmse": 0.15
         },
         {
@@ -173,7 +201,7 @@
           "full_eig_rank": 320,
           "active_topk": 35721,
           "expected_active_box_size": 35721,
-          "parameter_source": "historical selected group_c configuration on the matching Winnebago dataset route; configuration only; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
+          "parameter_source": "historical selected group_c configuration on the matching Winnebago dataset route; configuration only, old timings excluded; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
           "accuracy_max_rmse": 0.15
         }
       ]
@@ -186,7 +214,17 @@
       "datasets": [
         {
           "dataset_family": "Synthetic",
-          "dataset_stem": "synthetic_true_func_2d_n300000000",
+          "dataset_stems_by_n_train": {
+            "10000000": "synthetic_true_func_2d_ntrain10000000",
+            "30000000": "synthetic_true_func_2d_ntrain30000000",
+            "100000000": "synthetic_true_func_2d_ntrain100000000",
+            "300000000": "synthetic_true_func_2d_ntrain300000000"
+          },
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d",
           "accuracy_max_rmse": 0.02
         },
         {
@@ -197,6 +235,11 @@
             "100000000": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain100000000",
             "300000000": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain300000000"
           },
+          "expected_dataset_noise_std": null,
+          "expected_dataset_seed_train": null,
+          "expected_dataset_seed_test": null,
+          "expected_dataset_generation_chunk_rows": null,
+          "expected_dataset_target_function": null,
           "accuracy_max_rmse": 0.15
         }
       ]

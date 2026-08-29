@@ -78,6 +78,26 @@ STAGE2_SYSTEM_CONFIG_FIELDS = (
     "precompute_chunk_size",
 )
 
+# Optional fail-closed metadata expectations for generated datasets.  These
+# fields describe the data family, not the particular sampled file: a formal
+# Synthetic case can therefore validate any imported artifact against the
+# frozen noise=0.3 benchmark family.
+DATASET_PROVENANCE_CONFIG_FIELDS = (
+    "expected_dataset_noise_std",
+    "expected_dataset_seed_train",
+    "expected_dataset_seed_test",
+    "expected_dataset_generation_chunk_rows",
+    "expected_dataset_target_function",
+)
+
+_DATASET_GENERATION_EXPECTATIONS = {
+    "expected_dataset_noise_std": "noise_std",
+    "expected_dataset_seed_train": "seed_train",
+    "expected_dataset_seed_test": "seed_test",
+    "expected_dataset_generation_chunk_rows": "chunk_rows",
+    "expected_dataset_target_function": "target_function",
+}
+
 PROTOCOL_FAMILY = "end_to_end_krr"
 TIMING_SCOPE = (
     "Each method owns algorithmic model setup and solve. train_total_seconds = "
@@ -119,6 +139,14 @@ class EndToEndConfig:
     n_train: int | None = None
     subset_seed: int = 0
     subset_mode: str = "prefix"
+    # When any expectation is set, missing or incompatible metadata is a hard
+    # error.  Formal Synthetic cases use these fields to exclude the old
+    # noise=0.02 development master.
+    expected_dataset_noise_std: float | None = None
+    expected_dataset_seed_train: int | None = None
+    expected_dataset_seed_test: int | None = None
+    expected_dataset_generation_chunk_rows: int | None = None
+    expected_dataset_target_function: str | None = None
     max_test_rows: int = 2_500_000
     kernel_family: str = "matern"
     lengthscale: float = 0.1
@@ -151,7 +179,8 @@ class EndToEndConfig:
     eig_maxiter: int | None = 1280
     score_tau: float = 1.0
     box_budget: int = 8192
-    inverse_max_size: int = 1024
+    # A100 deployment default: use the exact active-box inverse through |B|=6000.
+    inverse_max_size: int = 6000
     nystrom_seed: int = 17
     rpcholesky_seed: int = 23
     eig_seed: int = 0
@@ -274,6 +303,23 @@ def _validate_config(cfg: EndToEndConfig) -> None:
         )
     if int(cfg.max_test_rows) <= 0:
         raise ValueError("max_test_rows must be positive.")
+    if cfg.expected_dataset_noise_std is not None and (
+        not math.isfinite(float(cfg.expected_dataset_noise_std))
+        or float(cfg.expected_dataset_noise_std) < 0.0
+    ):
+        raise ValueError("expected_dataset_noise_std must be finite and nonnegative.")
+    if (
+        cfg.expected_dataset_generation_chunk_rows is not None
+        and int(cfg.expected_dataset_generation_chunk_rows) <= 0
+    ):
+        raise ValueError(
+            "expected_dataset_generation_chunk_rows must be positive or None."
+        )
+    if (
+        cfg.expected_dataset_target_function is not None
+        and not str(cfg.expected_dataset_target_function).strip()
+    ):
+        raise ValueError("expected_dataset_target_function must be nonempty or None.")
     if float(cfg.accuracy_relative_tolerance) < 0.0:
         raise ValueError("accuracy_relative_tolerance must be nonnegative.")
     if cfg.accuracy_max_rmse is not None and float(cfg.accuracy_max_rmse) <= 0.0:
@@ -569,6 +615,153 @@ def _load_member_prefix(path: Path, name: str, rows: int, *, dtype: Any) -> np.n
         return np.ascontiguousarray(array[: int(rows)])
 
 
+def validate_dataset_generation_provenance(
+    cfg: EndToEndConfig, dataset: dict[str, Any]
+) -> dict[str, Any]:
+    """Validate and expose the declared generated-data family.
+
+    Expectations are deliberately metadata based.  They establish that each
+    artifact belongs to the same frozen Synthetic generation family; they do
+    not claim byte identity with any particular historical NPZ copy.
+    """
+    expected = {
+        config_key: getattr(cfg, config_key)
+        for config_key in DATASET_PROVENANCE_CONFIG_FIELDS
+        if getattr(cfg, config_key) is not None
+    }
+    metadata = dataset.get("metadata")
+    if not expected:
+        return {
+            "dataset_content_index_sha256": dataset.get("content_index_sha256"),
+            "dataset_metadata_sha256": dataset.get("metadata_sha256"),
+            "dataset_source_n_train": int(dataset["source_n_train"]),
+        }
+    if not isinstance(metadata, dict) or not metadata:
+        raise ValueError(
+            "Dataset generation expectations were declared, but the metadata JSON "
+            f"for {cfg.dataset_stem!r} is missing or empty."
+        )
+    generation = metadata.get("generation")
+    if not isinstance(generation, dict):
+        raise ValueError(
+            f"Dataset metadata for {cfg.dataset_stem!r} has no generation object."
+        )
+
+    mismatches: dict[str, dict[str, Any]] = {}
+    observed: dict[str, Any] = {}
+    for config_key, expected_value in expected.items():
+        metadata_key = _DATASET_GENERATION_EXPECTATIONS[config_key]
+        observed_value = generation.get(metadata_key)
+        observed[f"observed_{config_key.removeprefix('expected_')}"] = observed_value
+        matches = False
+        if config_key == "expected_dataset_noise_std":
+            try:
+                matches = math.isclose(
+                    float(observed_value),
+                    float(expected_value),
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+            except (TypeError, ValueError):
+                matches = False
+        elif config_key in {
+            "expected_dataset_seed_train",
+            "expected_dataset_seed_test",
+            "expected_dataset_generation_chunk_rows",
+        }:
+            try:
+                matches = int(observed_value) == int(expected_value)
+            except (TypeError, ValueError):
+                matches = False
+        else:
+            matches = str(observed_value) == str(expected_value)
+        if not matches:
+            mismatches[metadata_key] = {
+                "observed": observed_value,
+                "expected": expected_value,
+            }
+
+    dataset_name = metadata.get("dataset_name")
+    if dataset_name != cfg.dataset_stem:
+        mismatches["dataset_name"] = {
+            "observed": dataset_name,
+            "expected": cfg.dataset_stem,
+        }
+    source_n = int(dataset["source_n_train"])
+    for location, value in (
+        ("generation.n_train", generation.get("n_train")),
+        ("shapes.n_train", metadata.get("shapes", {}).get("n_train")),
+    ):
+        try:
+            matches = int(value) == source_n
+        except (TypeError, ValueError):
+            matches = False
+        if not matches:
+            mismatches[location] = {"observed": value, "expected": source_n}
+    expected_test_n = int(round(source_n * 0.25))
+    for location, value in (
+        ("generation.n_test", generation.get("n_test")),
+        ("shapes.n_test", metadata.get("shapes", {}).get("n_test")),
+    ):
+        try:
+            matches = int(value) == expected_test_n
+        except (TypeError, ValueError):
+            matches = False
+        if not matches:
+            mismatches[location] = {
+                "observed": value,
+                "expected": expected_test_n,
+            }
+    generation_dim = generation.get("dim")
+    actual_dim = int(dataset["x"].shape[1])
+    try:
+        dim_matches = int(generation_dim) == actual_dim
+    except (TypeError, ValueError):
+        dim_matches = False
+    if not dim_matches:
+        mismatches["generation.dim"] = {
+            "observed": generation_dim,
+            "expected": actual_dim,
+        }
+    shapes_dim = metadata.get("shapes", {}).get("dim")
+    try:
+        shapes_dim_matches = int(shapes_dim) == actual_dim
+    except (TypeError, ValueError):
+        shapes_dim_matches = False
+    if not shapes_dim_matches:
+        mismatches["shapes.dim"] = {
+            "observed": shapes_dim,
+            "expected": actual_dim,
+        }
+    if cfg.expected_dataset_noise_std is not None:
+        y_noise = metadata.get("y_transform", {}).get("noise_std")
+        try:
+            y_noise_matches = math.isclose(
+                float(y_noise),
+                float(cfg.expected_dataset_noise_std),
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+        except (TypeError, ValueError):
+            y_noise_matches = False
+        if not y_noise_matches:
+            mismatches["y_transform.noise_std"] = {
+                "observed": y_noise,
+                "expected": cfg.expected_dataset_noise_std,
+            }
+    if mismatches:
+        raise ValueError(
+            f"Dataset {cfg.dataset_stem!r} does not match the declared generation "
+            f"family: {json.dumps(mismatches, sort_keys=True, default=_json_default)}"
+        )
+    return {
+        **observed,
+        "dataset_content_index_sha256": dataset.get("content_index_sha256"),
+        "dataset_metadata_sha256": dataset.get("metadata_sha256"),
+        "dataset_source_n_train": source_n,
+    }
+
+
 def load_end_to_end_dataset(cfg: EndToEndConfig) -> dict[str, Any]:
     train = fixed_ab._load_dataset(
         cfg.dataset_stem,
@@ -590,7 +783,14 @@ def load_end_to_end_dataset(cfg: EndToEndConfig) -> dict[str, Any]:
     )
     if int(x_test.shape[0]) != int(y_test.size):
         raise ValueError("x_test and y_test row counts differ.")
-    return {**train, "x_test": x_test, "y_test": y_test, "n_test": test_rows}
+    provenance = validate_dataset_generation_provenance(cfg, train)
+    return {
+        **train,
+        **provenance,
+        "x_test": x_test,
+        "y_test": y_test,
+        "n_test": test_rows,
+    }
 
 
 def _fixed_config(
@@ -868,6 +1068,25 @@ def _base_row(
         "dim": int(dataset["x"].shape[1]),
         "subset_seed": int(cfg.subset_seed),
         "subset_mode": str(cfg.subset_mode),
+        "expected_dataset_noise_std": cfg.expected_dataset_noise_std,
+        "expected_dataset_seed_train": cfg.expected_dataset_seed_train,
+        "expected_dataset_seed_test": cfg.expected_dataset_seed_test,
+        "expected_dataset_generation_chunk_rows": (
+            cfg.expected_dataset_generation_chunk_rows
+        ),
+        "expected_dataset_target_function": cfg.expected_dataset_target_function,
+        "observed_dataset_noise_std": dataset.get("observed_dataset_noise_std"),
+        "observed_dataset_seed_train": dataset.get("observed_dataset_seed_train"),
+        "observed_dataset_seed_test": dataset.get("observed_dataset_seed_test"),
+        "observed_dataset_generation_chunk_rows": dataset.get(
+            "observed_dataset_generation_chunk_rows"
+        ),
+        "observed_dataset_target_function": dataset.get(
+            "observed_dataset_target_function"
+        ),
+        "dataset_source_n_train": int(dataset["source_n_train"]),
+        "dataset_content_index_sha256": dataset.get("content_index_sha256"),
+        "dataset_metadata_sha256": dataset.get("metadata_sha256"),
         "kernel_family": str(cfg.kernel_family),
         "lengthscale": float(cfg.lengthscale),
         "nu": float(cfg.nu),
@@ -1037,6 +1256,19 @@ def summarize_pipeline_rows(
                     "dim",
                     "subset_seed",
                     "subset_mode",
+                    "expected_dataset_noise_std",
+                    "expected_dataset_seed_train",
+                    "expected_dataset_seed_test",
+                    "expected_dataset_generation_chunk_rows",
+                    "expected_dataset_target_function",
+                    "observed_dataset_noise_std",
+                    "observed_dataset_seed_train",
+                    "observed_dataset_seed_test",
+                    "observed_dataset_generation_chunk_rows",
+                    "observed_dataset_target_function",
+                    "dataset_source_n_train",
+                    "dataset_content_index_sha256",
+                    "dataset_metadata_sha256",
                     "kernel_family",
                     "lengthscale",
                     "nu",
@@ -1090,6 +1322,7 @@ def summarize_pipeline_rows(
             "dataset_stem",
             "subset_seed",
             "subset_mode",
+            *DATASET_PROVENANCE_CONFIG_FIELDS,
             "kernel_family",
             "lengthscale",
             "nu",
@@ -1484,6 +1717,26 @@ def run_end_to_end_experiment(cfg: EndToEndConfig) -> dict[str, Any]:
         "methods": list(cfg.methods),
         "n_train": int(dataset["x"].shape[0]),
         "n_test": int(dataset["n_test"]),
+        "dataset_provenance": {
+            "dataset_stem": cfg.dataset_stem,
+            "source_n_train": int(dataset["source_n_train"]),
+            "content_index_sha256": dataset.get("content_index_sha256"),
+            "metadata_sha256": dataset.get("metadata_sha256"),
+            **{
+                key: getattr(cfg, key)
+                for key in DATASET_PROVENANCE_CONFIG_FIELDS
+            },
+            **{
+                key: dataset.get(key)
+                for key in (
+                    "observed_dataset_noise_std",
+                    "observed_dataset_seed_train",
+                    "observed_dataset_seed_test",
+                    "observed_dataset_generation_chunk_rows",
+                    "observed_dataset_target_function",
+                )
+            },
+        },
         "expected_row_count": len(expected_row_keys),
         "observed_row_count": len(rows),
         "all_rows_present": all_rows_present,
@@ -1532,6 +1785,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n-train", type=int, default=0, help="0 means all rows")
     parser.add_argument(
         "--subset-mode", choices=("prefix", "random"), default=defaults.subset_mode
+    )
+    parser.add_argument(
+        "--expected-dataset-noise-std",
+        type=float,
+        default=defaults.expected_dataset_noise_std,
+    )
+    parser.add_argument(
+        "--expected-dataset-seed-train",
+        type=int,
+        default=defaults.expected_dataset_seed_train,
+    )
+    parser.add_argument(
+        "--expected-dataset-seed-test",
+        type=int,
+        default=defaults.expected_dataset_seed_test,
+    )
+    parser.add_argument(
+        "--expected-dataset-generation-chunk-rows",
+        type=int,
+        default=defaults.expected_dataset_generation_chunk_rows,
+    )
+    parser.add_argument(
+        "--expected-dataset-target-function",
+        default=defaults.expected_dataset_target_function,
     )
     parser.add_argument("--max-test-rows", type=int, default=defaults.max_test_rows)
     parser.add_argument("--kernel-family", default=defaults.kernel_family)
@@ -1601,6 +1878,31 @@ def config_from_args(args: argparse.Namespace) -> EndToEndConfig:
         dataset_dir=str(args.dataset_dir),
         n_train=None if int(args.n_train) == 0 else int(args.n_train),
         subset_mode=str(args.subset_mode),
+        expected_dataset_noise_std=(
+            None
+            if args.expected_dataset_noise_std is None
+            else float(args.expected_dataset_noise_std)
+        ),
+        expected_dataset_seed_train=(
+            None
+            if args.expected_dataset_seed_train is None
+            else int(args.expected_dataset_seed_train)
+        ),
+        expected_dataset_seed_test=(
+            None
+            if args.expected_dataset_seed_test is None
+            else int(args.expected_dataset_seed_test)
+        ),
+        expected_dataset_generation_chunk_rows=(
+            None
+            if args.expected_dataset_generation_chunk_rows is None
+            else int(args.expected_dataset_generation_chunk_rows)
+        ),
+        expected_dataset_target_function=(
+            None
+            if args.expected_dataset_target_function is None
+            else str(args.expected_dataset_target_function)
+        ),
         max_test_rows=int(args.max_test_rows),
         kernel_family=str(args.kernel_family),
         lengthscale=float(args.lengthscale),

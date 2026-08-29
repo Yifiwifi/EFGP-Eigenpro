@@ -126,25 +126,26 @@ def build_notebook() -> dict:
             PREDICTION_AUDIT_MAX_TEST_N = 2_500_000
             PREDICTION_AUDIT_PROFILES = ["fixed_ab_selected_target"]
 
-            # 一键模式中的 profile 级数据族过滤。尤其禁止把已知失败的
-            # Winnebago raw-prefix development cases 混入 Synthetic scale job。
-            PROFILE_DATASET_FAMILIES = {
-                "scale_development_masters": ["Synthetic"],
-                "scale_archived_exact": ["Winnebago"],
-            } if RUN_ALL_FORMAL_EXPERIMENTS else {}
+            # 正式 Stage 1 自己声明 exact dataset stem，不复用 controlled legacy
+            # profile 的数据族过滤。
+            PROFILE_DATASET_FAMILIES = {}
             ACTIVE_CASE_IDS = []
 
-            # 缺失数据的可选生成动作；默认不执行。
-            # controlled scale 缺 30/100/300M；完整 legacy groups 还需补 1/3M。
+            # 优先使用 archived_exact_available；未登记的现成文件可从原实验
+            # MyDrive cache 直接导入。生成只作补救，默认不重新造数据。
             GENERATE_ARCHIVED_SYNTHETIC_SIZES = []  # noise=.3 / chunk=5M / _ntrainN
+            # 兼容原实验已经保存在 MyDrive cache、但尚未列入新 manifest 的
+            # exact Synthetic 文件；直接导入后仍计算并记录本次 SHA-256。
+            DIRECT_IMPORT_ARCHIVED_SYNTHETIC_FROM_DRIVE = RUN_STAGE1_END_TO_END_KRR
             GENERATE_MANITOWOC_300M = False
             MANITOWOC_START_LOD = 8  # 只是起点；容量不足时必须提高并重新精确扫描
             SYNC_GENERATED_DATA_TO_DRIVE = False
 
             required_bundles = []
             if RUN_STAGE1_END_TO_END_KRR:
-                # Synthetic 300M nested master + Winnebago 10/30/100/300M exact artifacts.
-                required_bundles.extend(["development_scale_masters", "archived_exact_available"])
+                # Frozen noise=.3 Synthetic family + Winnebago exact artifacts.
+                # Unregistered Synthetic exact files may use the direct cache route.
+                required_bundles.append("archived_exact_available")
             if RUN_LEGACY_GROUPS:
                 required_bundles.append("legacy_named_route_inputs")
             if RUN_ARCHIVED_EXACT_SCALE:
@@ -348,9 +349,9 @@ def build_notebook() -> dict:
             r"""
             ## 4. Drive manifest 校验与单份 master staging
 
-            `drive_manifest.json` 由 `colab_drive_pack.py` 生成。开发用 300M Synthetic（noise=.02）和 Winnebago raw master 只属于新的 `controlled_master_prefix` protocol，不能冒充论文 archived Synthetic（noise=.3）或原 spatial-stratified exact artifacts。
+            `drive_manifest.json` 由 `colab_drive_pack.py` 生成。开发用 300M Synthetic（noise=.02）和 Winnebago raw master 只属于 `controlled_master_prefix` protocol，不能进入本次正式 Stage 1。正式 Synthetic 直接导入 Google Drive 中 noise=.3 的四个 `_ntrainN` artifacts；它们属于同一生成数据族，不要求与某个历史副本逐字节相同。
 
-            对 ZIP_STORED master，controlled runner 的 `subset_mode='prefix'` 会直接 memory-map 所需的 10M/30M/100M 前缀；不会先加载全部 300M。10M 正式输入登记到 `controlled_10m`；旧 named routes 的现有输入登记到 `legacy_named_route_inputs`，但 notebook 仍会强制检查完整 noise=.3 Synthetic `_ntrainN`，不会接受 low-noise fallback。
+            对 ZIP_STORED master，controlled runner 的 `subset_mode='prefix'` 会直接 memory-map 所需的 10M/30M/100M 前缀；不会先加载全部 300M。正式 exact 输入优先取自 `archived_exact_available`；未登记的 Synthetic 可按原实验缓存文件名直接导入，`controlled_10m` 只服务 plumbing smoke。notebook 会强制检查完整 noise=.3 Synthetic `_ntrainN`，不会接受 low-noise fallback。
             """
         )
     )
@@ -505,6 +506,90 @@ def build_notebook() -> dict:
                     ):
                         shutil.copy2(staged[metadata_name], canonical_json)
 
+            # The original experiment notebook already supported exact files
+            # cached elsewhere in MyDrive.  Preserve that route for Synthetic:
+            # prefer catalog artifacts, otherwise import the exact basename
+            # directly and record a fresh SHA-256 for this formal run.
+            direct_imported_by_basename = {}
+
+            def find_unique_drive_cached_file(filename):
+                mydrive_root = DRIVE_PROJECT_ROOT.parent
+                candidate_dirs = [
+                    DRIVE_DATA_ROOT,
+                    DRIVE_PROJECT_ROOT / "benchmark_dataset_cache",
+                    mydrive_root / "EFGP_Eigenpro" / "benchmark_dataset_cache",
+                    mydrive_root / "Colab_Experiments/EFGP_Eigenpro/benchmark_dataset_cache",
+                    mydrive_root / "benchmark_dataset_cache",
+                ]
+                for base in candidate_dirs:
+                    direct = Path(base) / filename
+                    if direct.is_file():
+                        return direct
+                matches = sorted(
+                    path for path in mydrive_root.rglob(filename) if path.is_file()
+                )
+                if len(matches) > 1:
+                    raise RuntimeError(
+                        f"Ambiguous Drive cache basename {filename!r}: "
+                        + ", ".join(str(path) for path in matches)
+                    )
+                return matches[0] if matches else None
+
+            def copy_and_hash_drive_artifact(source, destination):
+                expected_size = int(source.stat().st_size)
+                source_sha = None
+                if destination.is_file() and destination.stat().st_size == expected_size:
+                    source_sha = streaming_sha256(source)
+                    if streaming_sha256(destination) == source_sha:
+                        return source_sha
+                existing_size = destination.stat().st_size if destination.is_file() else 0
+                additional_bytes = max(expected_size - int(existing_size), 0)
+                if additional_bytes > shutil.disk_usage("/content").free:
+                    raise RuntimeError(
+                        f"Direct-import artifact does not fit local disk: {source}"
+                    )
+                digest = hashlib.sha256()
+                with source.open("rb") as source_handle, destination.open("wb") as destination_handle:
+                    while True:
+                        block = source_handle.read(16 * 2**20)
+                        if not block:
+                            break
+                        digest.update(block)
+                        destination_handle.write(block)
+                if destination.stat().st_size != expected_size:
+                    raise RuntimeError(f"Direct-import byte-size mismatch: {destination}")
+                copied_sha = digest.hexdigest()
+                if source_sha is not None and copied_sha != source_sha:
+                    raise RuntimeError(f"Direct-import SHA changed while copying: {source}")
+                return copied_sha
+
+            if DIRECT_IMPORT_ARCHIVED_SYNTHETIC_FROM_DRIVE:
+                for n_train in FORMAL_SCALE_SIZES:
+                    stem = f"synthetic_true_func_2d_ntrain{int(n_train)}"
+                    for suffix in (".npz", ".json"):
+                        filename = f"{stem}{suffix}"
+                        if filename in selected_by_basename:
+                            continue
+                        source = find_unique_drive_cached_file(filename)
+                        if source is None:
+                            continue
+                        destination = LOCAL_DATA_DIR / filename
+                        if CACHE_DATA_LOCALLY:
+                            print("Direct-importing archived Synthetic from Drive:", source)
+                            artifact_sha = copy_and_hash_drive_artifact(source, destination)
+                        else:
+                            artifact_sha = streaming_sha256(source)
+                            if destination.exists() or destination.is_symlink():
+                                destination.unlink()
+                            destination.symlink_to(source)
+                        direct_imported_by_basename[filename] = {
+                            "source": str(source),
+                            "destination": str(destination),
+                            "size_bytes": int(source.stat().st_size),
+                            "sha256": artifact_sha,
+                            "source_kind": "direct_drive_cache_import",
+                        }
+
             REPO_PROCESSED = LOCAL_REPO / "efgp_eigenpro_py/gpu/benchmark_dataset/processed"
             REPO_PROCESSED.mkdir(parents=True, exist_ok=True)
             for local_file in LOCAL_DATA_DIR.iterdir():
@@ -525,9 +610,9 @@ def build_notebook() -> dict:
     cells.append(
         _markdown(
             r"""
-            ## 5. 可选：补建缺失的 archived Synthetic / Manitowoc master
+            ## 5. 可选补救：补建缺失的 archived Synthetic / Manitowoc master
 
-            archived Synthetic 必须是 `_ntrainN`、noise=0.3、train/test seeds 20260421/1、generation chunk=5M。现有 `_nN` 300M master 是 noise=.02 development artifact，不能重命名代替。
+            默认正式流程直接使用 Drive 的 archived Synthetic。只有 Drive 确实缺文件时，才手动设置 `GENERATE_ARCHIVED_SYNTHETIC_SIZES`；生成物必须是 `_ntrainN`、noise=0.3、train/test seeds 20260421/1、generation chunk=5M。现有 `_nN` 300M master 是 noise=.02 development artifact，不能重命名代替。
 
             Manitowoc 300M 必须保持冻结 AOI、hash split、浅层优先顺序。LOD 8 只是起点；若精确容量不足 300M/75M，应提高到 LOD 9，不能用密度估算替代扫描结果。
             """
@@ -681,6 +766,7 @@ def build_notebook() -> dict:
 
             def validate_archived_synthetic_inputs(required_sizes):
                 failures = []
+                validated = []
                 for n_train in sorted({int(value) for value in required_sizes}):
                     stem = f"synthetic_true_func_2d_ntrain{n_train}"
                     npz_path = LOCAL_DATA_DIR / f"{stem}.npz"
@@ -688,6 +774,17 @@ def build_notebook() -> dict:
                     if not npz_path.is_file() or not json_path.is_file():
                         failures.append(f"{stem}: missing NPZ/JSON")
                         continue
+                    catalog_complete = True
+                    for path in (npz_path, json_path):
+                        if (
+                            path.name not in selected_by_basename
+                            and path.name not in direct_imported_by_basename
+                        ):
+                            catalog_complete = False
+                            failures.append(
+                                f"{stem}: {path.name} was neither selected from the "
+                                "Drive catalog nor directly imported from the Drive cache"
+                            )
                     metadata = json.loads(json_path.read_text(encoding="utf-8"))
                     generation = metadata.get("generation", {})
                     expected = {
@@ -695,20 +792,78 @@ def build_notebook() -> dict:
                         "seed_train": 20260421,
                         "seed_test": 1,
                         "chunk_rows": 5_000_000,
+                        "target_function": "true_func_2d",
+                        "dim": 2,
+                        "n_train": n_train,
+                        "n_test": n_train // 4,
                     }
                     mismatches = {
                         key: (generation.get(key), value)
                         for key, value in expected.items()
                         if generation.get(key) != value
                     }
+                    expected_shapes = {
+                        "n_train": n_train,
+                        "n_test": n_train // 4,
+                        "dim": 2,
+                    }
+                    shapes = metadata.get("shapes", {})
+                    shape_mismatches = {
+                        key: (shapes.get(key), value)
+                        for key, value in expected_shapes.items()
+                        if shapes.get(key) != value
+                    }
+                    if metadata.get("dataset_name") != stem:
+                        mismatches["dataset_name"] = (
+                            metadata.get("dataset_name"), stem
+                        )
+                    if metadata.get("y_transform", {}).get("noise_std") != 0.3:
+                        mismatches["y_transform.noise_std"] = (
+                            metadata.get("y_transform", {}).get("noise_std"), 0.3
+                        )
+                    if shape_mismatches:
+                        mismatches["shapes"] = shape_mismatches
                     if mismatches:
                         failures.append(f"{stem}: archived generation mismatch {mismatches}")
+                    elif catalog_complete:
+                        npz_record = selected_by_basename.get(
+                            npz_path.name, direct_imported_by_basename.get(npz_path.name)
+                        )
+                        metadata_record = selected_by_basename.get(
+                            json_path.name, direct_imported_by_basename.get(json_path.name)
+                        )
+                        validated.append({
+                            "dataset_stem": stem,
+                            "n_train": n_train,
+                            "data_family": "true_func_2d_uniform_gaussian_noise_0.3",
+                            "noise_std": generation["noise_std"],
+                            "seed_train": generation["seed_train"],
+                            "seed_test": generation["seed_test"],
+                            "chunk_rows": generation["chunk_rows"],
+                            "npz_sha256": npz_record["sha256"],
+                            "metadata_sha256": metadata_record["sha256"],
+                            "npz_source_kind": npz_record.get(
+                                "source_kind", "drive_catalog"
+                            ),
+                            "metadata_source_kind": metadata_record.get(
+                                "source_kind", "drive_catalog"
+                            ),
+                            "npz_source_reference": npz_record.get(
+                                "source", npz_record.get("relative_path")
+                            ),
+                            "metadata_source_reference": metadata_record.get(
+                                "source", metadata_record.get("relative_path")
+                            ),
+                        })
                 if failures:
                     raise RuntimeError(
                         "Archived Synthetic inputs are incomplete or incompatible. "
-                        "Use GENERATE_ARCHIVED_SYNTHETIC_SIZES first:\n- "
+                        "Place the four existing noise=0.3 artifacts in a standard "
+                        "MyDrive cache location or register them in "
+                        "archived_exact_available:\n- "
                         + "\n- ".join(failures)
                     )
+                return validated
             """
         )
     )
@@ -821,7 +976,7 @@ def build_notebook() -> dict:
             - `train_total_seconds = setup_seconds + solving_phase_seconds`；
             - prediction 单列，用于报告 RMSE/R² 和 usability，不并入训练加速。
 
-            `ours-binned-default` 与 `efgp-standard-full-eig` 不在本次正式计时中重新扫参。每个 dataset/N 直接冻结原实验 `paper_table1_selected.csv` 的 proposed top-k/rank 与 full-eig rank，只转移配置并在当前 1 次预热 + 5 次 measured 协议下重新测量全部时间。Synthetic 的旧来源与当前 master 噪声不同，因此明确标为 historical transfer，而不是当前数据上的最优点。
+            `ours-binned-default` 与 `efgp-standard-full-eig` 不在本次正式计时中重新扫参。每个 dataset/N 直接冻结原实验 `paper_table1_selected.csv` 的 proposed top-k/rank 与 full-eig rank，只转移配置；旧 timing 明确排除，并在当前 1 次预热 + 5 次 measured 协议下重新测量全部时间。Synthetic 四个规模直接导入 Drive 的 noise=0.3 `_ntrainN` artifacts，按相同 target function、输入分布和噪声模型声明为同一数据生成族。
 
             robustness 中冻结的 proposed top-k 是上界。若改变 lengthscale/dataset 后同一 score prefix 的中心闭包超过仍然冻结的 box budget，只有 robustness 配置会显式授权按同一确定性 score 顺序缩短到可容纳的最大 prefix；这不是扫参，不读取时间、迭代数、标签或精度。`configured_active_topk`、`effective_active_topk`、`effective_active_box_size`、`active_selection_rule` 与 `capacity_adapted` 都进入 canonical 表，必须披露实际运行配置。
 
@@ -854,6 +1009,31 @@ def build_notebook() -> dict:
                 raise RuntimeError(
                     "Stage-1 suite method order differs from the frozen true-KRR method list."
                 )
+            synthetic_family_manifest_path = (
+                STAGE1_OUTPUT_ROOT / "synthetic_data_family_manifest.json"
+            )
+            stage1_synthetic_inputs = []
+            if RUN_STAGE1_END_TO_END_KRR:
+                stage1_synthetic_inputs = validate_archived_synthetic_inputs(FORMAL_SCALE_SIZES)
+                if synthetic_family_manifest_path.is_file():
+                    prior_synthetic_inputs = json.loads(
+                        synthetic_family_manifest_path.read_text(encoding="utf-8")
+                    )
+                    if prior_synthetic_inputs != stage1_synthetic_inputs:
+                        raise RuntimeError(
+                            "This run directory is already bound to different Synthetic "
+                            "artifact hashes; change RUN_TAG_PREFIX instead of mixing data."
+                        )
+                else:
+                    synthetic_family_manifest_partial = (
+                        synthetic_family_manifest_path.with_suffix(".json.partial")
+                    )
+                    synthetic_family_manifest_partial.write_text(
+                        json.dumps(stage1_synthetic_inputs, indent=2), encoding="utf-8"
+                    )
+                    synthetic_family_manifest_partial.replace(
+                        synthetic_family_manifest_path
+                    )
 
             stage1_scale_plan = stage1_suite.build_profile_plan(
                 stage1_config,
@@ -921,6 +1101,14 @@ def build_notebook() -> dict:
                 observed_config = normalize_stage1_config_value(saved_config)
                 required_summary_columns = {
                     *stage1_suite.STAGE2_SYSTEM_CONFIG_FIELDS,
+                    *stage1_suite.DATASET_PROVENANCE_CONFIG_FIELDS,
+                    "observed_dataset_noise_std",
+                    "observed_dataset_seed_train",
+                    "observed_dataset_seed_test",
+                    "observed_dataset_generation_chunk_rows",
+                    "observed_dataset_target_function",
+                    "dataset_content_index_sha256",
+                    "dataset_metadata_sha256",
                     "accuracy_relative_tolerance",
                     "accuracy_max_rmse",
                     "accuracy_min_r2",
@@ -4194,6 +4382,16 @@ def build_notebook() -> dict:
                 "scale_method_availability": str(SCALE_METHOD_AVAILABILITY_PATH),
                 "stage1_protocol_family": "end_to_end_krr",
                 "stage1_suite_config": str(STAGE1_SUITE_CONFIG),
+                "stage1_synthetic_data_family_manifest": (
+                    str(synthetic_family_manifest_path)
+                    if synthetic_family_manifest_path.is_file() else None
+                ),
+                "stage1_synthetic_data_family_manifest_sha256": (
+                    hashlib.sha256(
+                        synthetic_family_manifest_path.read_bytes()
+                    ).hexdigest()
+                    if synthetic_family_manifest_path.is_file() else None
+                ),
                 "stage1_case_index": str(STAGE1_CASE_INDEX_PATH),
                 "stage1_scale_summary": str(STAGE1_SCALE_SUMMARY_PATH),
                 "stage1_robustness_summary": str(STAGE1_ROBUSTNESS_SUMMARY_PATH),

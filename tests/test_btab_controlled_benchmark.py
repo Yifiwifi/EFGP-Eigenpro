@@ -84,7 +84,9 @@ def _expanded_lengthscale_system() -> PreparedSystem:
 
 
 def test_formal_default_methods_are_fixed_system_controls() -> None:
-    assert ControlledConfig().methods == ("cg", "jacobi", "default", "full-eig")
+    config = ControlledConfig()
+    assert config.methods == ("cg", "jacobi", "default", "full-eig")
+    assert config.inverse_max_size == 6000
 
 
 def test_new_configs_reject_ambiguous_krr_method_names_but_artifacts_can_load() -> None:

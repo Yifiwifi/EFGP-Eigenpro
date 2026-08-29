@@ -14,7 +14,12 @@ routes while preserving their different timing semantics.
    new runner available to Colab.
 2. Upload the **contents** of `D:\NU\ML\colab_drive_upload_ready` to
    `MyDrive/EFGP_Colab/data_bundle`.  Preserve the directory structure and the
-   two top-level files `drive_manifest.json` and `checksums.sha256`.
+   two top-level files `drive_manifest.json` and `checksums.sha256`. Formal
+   Stage 1 needs exact noise-0.3 Synthetic NPZ/JSON pairs named `_ntrainN` for
+   10M, 30M, 100M, and 300M. The notebook first uses catalog entries; for a
+   Synthetic pair not listed there, it searches the original experiment's
+   standard MyDrive cache locations by exact basename, imports it directly,
+   and records a fresh SHA-256. It never substitutes the noise-0.02 master.
 3. Select an A100 High-RAM runtime and choose **Runtime -> Run all**.  The
    one-click formal campaign enables the 100M/300M gates automatically.  If the
    runtime has less than 30 GiB GPU memory or 20 GiB currently available host
@@ -29,24 +34,34 @@ routes while preserving their different timing semantics.
 `RUN_ALL_FORMAL_EXPERIMENTS=True` creates this fixed job order automatically:
 
 1. cuFINUFFT/GPU smoke.
-2. `paper_10m`: Synthetic, Winnebago, and Manitowoc, six methods.
-3. Winnebago 10M lambda/lengthscale OAT.
-4. Winnebago 10M box-budget ablation at 4096/8192/16384.
-5. Synthetic development-master prefixes at 10M/30M/100M/300M.
-6. Winnebago archived-exact artifacts at 10M/30M/100M/300M.
-7. Prediction audit that reuses the timed system and canonical timed solutions:
-   all methods for the three `paper_10m` cases, plus `cg/default` for Synthetic
-   development-master 100M and 300M.  Every case uses at most the first 2.5M
-   test rows.
-8. Artifact audit, solver-only and setup-inclusive scale plots, campaign
-   ledger, and an atomically replaced final manifest.
+2. Stage 1 complete-KRR comparison on exact Synthetic and Winnebago artifacts
+   at 10M/30M/100M/300M.
+3. Prospective target selection, followed by the declared lambda, lengthscale,
+   box-budget, and dataset checks using the frozen selected configuration.
+4. Stage 2 paired solver/preconditioner comparison on one hashed fixed
+   `A,b` at the selected target.
+5. Prediction audit that reuses the timed systems and canonical timed
+   solutions without rebuilding or solving.
+6. Cross-artifact audit, two-stage tables/plots, campaign ledger, and an
+   atomically replaced final manifest.
 
-The development scale is filtered to `dataset_family="Synthetic"`; the known
-failing Winnebago raw-prefix route is not launched.  The archived scale is
-filtered to `dataset_family="Winnebago"`; unavailable archived Synthetic high-N
-files are not requested.  Scale 10M and 30M run independently.  A 100M job
-requires its 30M core methods (`cg/default/full-eig`) to pass, and 300M requires
-the 100M core gate plus the hardware gate.
+Formal Stage-1 Synthetic data are four exact `_ntrainN` artifacts imported
+directly from the existing Google Drive collection under the frozen
+original-task definition: noise standard deviation 0.3,
+train/test seeds 20260421/1, five-million-row generation chunks, and `N/4`
+noise-free test points.  The noise-0.02 `_n300000000` development master and its
+prefixes are never a fallback for this route.  The 30M, 100M, and 300M exact
+files may be cataloged or directly imported from the original MyDrive cache.
+Both routes are SHA-verified and recorded in
+`synthetic_data_family_manifest.json`. If an artifact hash changes under the
+same run directory, the notebook stops and requires a new `RUN_TAG_PREFIX`;
+do not resume a run directory containing the earlier low-noise Stage-1 matrix.
+
+The claim is therefore only that the imported files belong to the same frozen
+generation family, not that they reproduce one historical NPZ byte for byte.
+Archived `paper_table1_selected.csv`
+contributes only the predeclared full-eig/active configuration; none of its old
+timings enters the formal Stage-1 result.
 
 The one-click formal campaign intentionally excludes redundant CG screening,
 legacy exploratory reruns, q128/SE optional controls, Winnebago raw-prefix
@@ -57,20 +72,26 @@ manual mode but are not required for the final controlled paper package.
 
 | switch | data definition | status |
 |---|---|---|
-| `RUN_ARCHIVED_EXACT_SCALE` | archived/exact artifacts; one-click selects Winnebago only and does not claim cross-N nesting | Winnebago ready through 300M |
-| `RUN_DEVELOPMENT_MASTER_SCALE` | exact prefixes of one 300M master; one-click selects noise-0.02 Synthetic only | ready at 10M/30M/100M/300M |
+| `RUN_STAGE1_END_TO_END_KRR` | formal exact per-N artifacts; Synthetic is noise 0.3 `_ntrainN` and is not assumed nested | directly import and verify the existing four-size Google Drive collection; catalog registration is preferred but not required |
+| `RUN_ARCHIVED_EXACT_SCALE` | optional older fixed-system archived/exact route; it does not replace Stage 1 | Winnebago ready through 300M |
+| `RUN_DEVELOPMENT_MASTER_SCALE` | optional development-only prefixes of the noise-0.02 300M Synthetic master | ready at 10M/30M/100M/300M; forbidden as formal Stage-1 fallback |
 | `RUN_MANITOWOC_SCALE` | independent 2023 USGS 3DEP acquisition, nested EPT master | 10M ready; 300M master must still be generated and prefix-verified |
 
-Advanced/manual mode can use
+The default formal run does not generate Synthetic data. It imports the four
+existing Drive artifacts. Only if a file is genuinely missing, advanced/manual
+mode can use
 `GENERATE_ARCHIVED_SYNTHETIC_SIZES=[30_000_000,100_000_000,300_000_000]`
-to create the missing archived Synthetic files.  Add 1M and 3M before running
-the complete legacy groups.  `GENERATE_MANITOWOC_300M=True` starts the frozen
+to recreate it, then rebuild and verify the Drive
+catalog and use a fresh `RUN_TAG`.  Add 1M and 3M only if separately running the
+complete legacy groups.  `GENERATE_MANITOWOC_300M=True` starts the frozen
 EPT build at LOD 8; if its exact eligible-row report is insufficient, raise the
 depth to 9.  Capacity estimates are not accepted as a substitute for the exact
 scan.
 
-The three output protocol families must never share a speedup column:
+The output protocol families must never share a speedup column:
 
+- `end_to_end_krr`: each complete KRR method owns its setup and solve; the
+  formal Stage-1 timing is newly measured and excludes archived timings.
 - `archived_complete_pipeline`: original direct-CG versus binned-candidate
   complete pipeline; setup routes and linear systems are not matched.
 - `controlled_fixed_system`: one hashed system per case, 1 warm-up and 5 paired

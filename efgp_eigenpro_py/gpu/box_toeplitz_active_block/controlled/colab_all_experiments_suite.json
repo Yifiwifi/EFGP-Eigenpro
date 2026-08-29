@@ -21,7 +21,7 @@
     "methods": ["cg", "jacobi", "default", "full-eig"],
     "score_tau": 1.0,
     "box_budget": 8192,
-    "inverse_max_size": 1024,
+    "inverse_max_size": 6000,
     "rank": 256,
     "eig_tol": 1e-3,
     "eig_maxiter": 1280,

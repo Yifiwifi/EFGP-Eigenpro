@@ -20,7 +20,24 @@ usable-quality range. The 1% full-eig-relative label is descriptive and never
 removes a timing or time-quality result.
 
 `end_to_end_suite.json` declares the 10M, 30M, 100M, and 300M scale matrix on
-Synthetic and Winnebago data. Exact RPCholesky keeps its published rank-by-N
+Synthetic and Winnebago data.  The forward formal Stage-1 Synthetic route uses
+four exact `_ntrainN` artifacts, not prefixes of the low-noise development
+master.  Each artifact follows the frozen original-task generation definition:
+training-noise standard deviation 0.3, train/test seeds 20260421/1, five-million-
+row generation chunks, and a noise-free test set of size `N/4`.  Falling back
+to `synthetic_true_func_2d_n300000000` (noise 0.02) is forbidden. The four exact
+artifacts already stored in Google Drive are imported directly. Cataloged files
+come from `archived_exact_available`; otherwise the notebook searches the
+original experiment's standard MyDrive cache locations by exact basename.
+Either route is SHA-verified and validated from JSON metadata before a formal
+run starts. They must not be resumed under a formal run tag that already
+contains low-noise Stage-1 results.
+
+The formal statement is only that all four artifacts belong to the frozen
+noise-0.3 generated-data family. It does not require byte-for-byte identity with
+a particular historical copy; recorded SHA-256 values identify the files used now.
+
+Exact RPCholesky keeps its published rank-by-N
 factor requirement: if that factor cannot fit, the row remains visible as
 `resource_limit` and is never replaced by a pilot-set approximation. The suite
 uses a frozen CG-iteration window and declared dataset tie priority to select
@@ -40,10 +57,12 @@ The formal rerun does not rescan full-eig or proposed parameters on current
 timings. It freezes the archived `paper_table1_selected.csv` winners: separate
 full-eig rank `q`, proposed active top-k, and proposed eigenspace rank `q` for
 each dataset/N case. Only the configuration is transferred; all setup and solve
-times are measured again under the 1-warm-up + 5-measured-repeat protocol. The
-Synthetic source used noise 0.3 while the current nested master uses noise
-0.02, so those rows are explicitly labelled historical transfers rather than
-current-data optima. Lambda, lengthscale, and dataset robustness freeze the
+times from the archived sweep are excluded, and all formal times are measured
+again under the 1-warm-up + 5-measured-repeat protocol.  The Stage-1 Synthetic
+inputs use the frozen noise-0.3 exact `_ntrainN` definition above.  Because the
+historical high-N NPZ hashes are unavailable, the transferred configuration is
+historical provenance, not a claim that the imported NPZ is byte-identical to
+one particular historical copy. Lambda, lengthscale, and dataset robustness freeze the
 selected target configuration. The box-budget axis is separately labelled
 budget-adaptive because a frozen enclosing box cannot fit every smaller cap.
 If a lengthscale change produces fewer Fourier modes than the frozen top-k, the
@@ -119,11 +138,12 @@ is recorded as infeasible with a reason and is not allowed to abort the whole
 fixed-system case. The artifact is bound to all 15 system-building fields and
 the frozen method configuration, not just dataset, N, and kernel parameters.
 The formal suite declares a Stage-2 explicit-inverse cap of 16,384 while
-retaining a separate deployment/default threshold of 1,024. Thus Stage 2's
-primary `default` remains the same frozen active-eig route used by the Stage-1
+retaining a separate A100 deployment/default threshold of 6,000. Thus Stage 2's
+primary `default` follows the same frozen routing rule used by the Stage-1
 proposed pipeline; relaxing the explicit inverse feasibility cap cannot change
 that primary algorithm. On the expected 30M target, the archived active box has
-size 10,609, so the explicit inverse comparison is prospectively feasible.
+size 10,609, so `default` uses active-eig while the explicit inverse comparison
+is prospectively feasible.
 
 The canonical reporter does not trust summary eligibility flags. It recomputes
 Stage-1 accuracy and timing eligibility from each case's `pipeline_runs.csv`,

@@ -19,6 +19,7 @@ from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.suite import (
 
 CONTROLLED_DIR = Path(notebook_builder.__file__).resolve().parent
 SUITE_PATH = CONTROLLED_DIR / "colab_all_experiments_suite.json"
+STAGE1_SUITE_PATH = CONTROLLED_DIR / "end_to_end_suite.json"
 NOTEBOOK_PATH = CONTROLLED_DIR.parent / "colab_all_experiments_10m_300m.ipynb"
 
 
@@ -26,8 +27,17 @@ def _all_source(notebook: dict) -> str:
     return "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
 
 
+def _cell_source_containing(notebook: dict, needle: str) -> str:
+    return next(
+        "".join(cell.get("source", []))
+        for cell in notebook["cells"]
+        if needle in "".join(cell.get("source", []))
+    )
+
+
 def test_colab_suite_declares_dataset_family_for_every_case() -> None:
     suite = load_suite_config(SUITE_PATH)
+    assert suite["base"]["inverse_max_size"] == 6000
     allowed = {"Synthetic", "Winnebago", "Manitowoc"}
     for profile_name, profile in suite["profiles"].items():
         for case in profile["cases"]:
@@ -48,6 +58,16 @@ def test_box_budget_profile_is_a_fixed_three_method_sweep() -> None:
 def test_one_click_plan_is_strictly_two_stage() -> None:
     notebook = notebook_builder.build_notebook()
     source = _all_source(notebook)
+    configuration_source = _cell_source_containing(notebook, "required_bundles = []")
+    formal_stage1_bundle_branch = configuration_source.split(
+        "if RUN_STAGE1_END_TO_END_KRR:", 1
+    )[1].split("if RUN_LEGACY_GROUPS:", 1)[0]
+    stage1_source = _cell_source_containing(
+        notebook, "stage1_scale_plan = stage1_suite.build_profile_plan("
+    )
+    archived_validator_source = _cell_source_containing(
+        notebook, "def validate_archived_synthetic_inputs("
+    )
     assert "RUN_ALL_FORMAL_EXPERIMENTS = True" in source
     assert "RUN_STAGE1_END_TO_END_KRR = RUN_ALL_FORMAL_EXPERIMENTS" in source
     assert "RUN_STAGE2_FIXED_AB_SOLVERS = RUN_ALL_FORMAL_EXPERIMENTS" in source
@@ -69,7 +89,33 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
         in source
     )
     assert "observed_config == expected_config" in source
-    assert "Winnebago 10/30/100/300M exact artifacts" in source
+    assert "archived_exact_available" in formal_stage1_bundle_branch
+    assert "development_scale_masters" not in formal_stage1_bundle_branch
+    assert "GENERATE_ARCHIVED_SYNTHETIC_SIZES = []" in configuration_source
+    assert (
+        "DIRECT_IMPORT_ARCHIVED_SYNTHETIC_FROM_DRIVE = "
+        "RUN_STAGE1_END_TO_END_KRR"
+    ) in configuration_source
+    archived_validator_call = (
+        "validate_archived_synthetic_inputs(FORMAL_SCALE_SIZES)"
+    )
+    assert archived_validator_call in stage1_source
+    assert stage1_source.index(archived_validator_call) < stage1_source.index(
+        "completed_stage1_scale_items = []"
+    )
+    for expected_metadata_check in (
+        '"noise_std": 0.3',
+        '"seed_train": 20260421',
+        '"seed_test": 1',
+        '"chunk_rows": 5_000_000',
+    ):
+        assert expected_metadata_check in archived_validator_source
+    assert "path.name not in selected_by_basename" in archived_validator_source
+    assert "direct_imported_by_basename" in source
+    assert "direct_drive_cache_import" in source
+    assert "different Synthetic " in stage1_source
+    assert "artifact hashes" in stage1_source
+    assert '"stage1_synthetic_data_family_manifest_sha256"' in source
     assert (
         'frame["declared_dataset_family"] = declared_stage1_dataset_family(item)'
         in source
@@ -143,6 +189,33 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
     assert '"pending_data_generation_and_prefix_verification"' in source
     assert "check=False" in source
     assert "NO_ELIGIBLE_TARGET_FAIL_CLOSED" in source
+
+
+def test_formal_stage1_suite_uses_exact_noise03_synthetic_artifacts() -> None:
+    suite = json.loads(STAGE1_SUITE_PATH.read_text(encoding="utf-8"))
+    synthetic_cases = {
+        int(case["n_train"]): case
+        for case in suite["profiles"]["scale_10m_300m"]["cases"]
+        if case["dataset_family"] == "Synthetic"
+    }
+    assert {
+        n_train: case["dataset_stem"]
+        for n_train, case in synthetic_cases.items()
+    } == {
+        10_000_000: "synthetic_true_func_2d_ntrain10000000",
+        30_000_000: "synthetic_true_func_2d_ntrain30000000",
+        100_000_000: "synthetic_true_func_2d_ntrain100000000",
+        300_000_000: "synthetic_true_func_2d_ntrain300000000",
+    }
+    assert all(
+        "noise=0.3" in str(case.get("parameter_source", ""))
+        for case in synthetic_cases.values()
+    )
+    assert all(
+        "noise=0.02" not in str(case.get("parameter_source", ""))
+        for case in synthetic_cases.values()
+    )
+    assert "synthetic_true_func_2d_n300000000" not in json.dumps(suite)
 
 
 def test_committed_notebook_matches_generator() -> None:
@@ -229,7 +302,7 @@ def test_one_click_orchestrator_runs_only_fixed_ab_at_frozen_target(
             "full-eig",
         ],
         "END_TO_END_TARGET": {
-            "dataset_stem": "synthetic_true_func_2d_n300000000",
+            "dataset_stem": "synthetic_true_func_2d_ntrain30000000",
             "n_train": 30_000_000,
             "subset_seed": 0,
             "subset_mode": "prefix",
@@ -258,7 +331,7 @@ def test_one_click_orchestrator_runs_only_fixed_ab_at_frozen_target(
         },
         "stage1_config": {
             "base": {
-                "dataset_stem": "synthetic_true_func_2d_n300000000",
+                "dataset_stem": "synthetic_true_func_2d_ntrain10000000",
                 "n_train": 10_000_000,
                 "rank": 320,
                 "full_eig_rank": 256,
@@ -266,7 +339,7 @@ def test_one_click_orchestrator_runs_only_fixed_ab_at_frozen_target(
                 "expected_active_box_size": active_box_upper_bound,
                 "allow_frozen_topk_capacity_adaptation": False,
                 "box_budget": box_budget,
-                "inverse_max_size": 1_024,
+                "inverse_max_size": 6_000,
                 "parameter_selection_policy": (
                     "historical_selected_transfer_no_current_scan"
                 ),
@@ -274,14 +347,14 @@ def test_one_click_orchestrator_runs_only_fixed_ab_at_frozen_target(
             },
             "stage2_fixed_ab": {
                 "inverse_max_size": inverse_max_size,
-                "default_inverse_max_size": 1_024,
+                "default_inverse_max_size": 6_000,
             },
             "profiles": {
                 "scale_10m_300m": {
                     "cases": [
                         {
                             "id": "synthetic_matern_n30m",
-                            "dataset_stem": "synthetic_true_func_2d_n300000000",
+                            "dataset_stem": "synthetic_true_func_2d_ntrain30000000",
                             "n_train": 30_000_000,
                         }
                     ],
@@ -291,7 +364,7 @@ def test_one_click_orchestrator_runs_only_fixed_ab_at_frozen_target(
         "stage1_scale_summary": pd.DataFrame(
             [
                 {
-                    "dataset_stem": "synthetic_true_func_2d_n300000000",
+                    "dataset_stem": "synthetic_true_func_2d_ntrain30000000",
                     "n_train": 30_000_000,
                     "dataset_family": "Synthetic",
                 }
@@ -321,10 +394,7 @@ def test_one_click_orchestrator_runs_only_fixed_ab_at_frozen_target(
         "SMOKE_OK": True,
         "SMOKE_RETURN_CODE": 0,
         "CAN_RUN_300M": True,
-        "PROFILE_DATASET_FAMILIES": {
-            "scale_development_masters": ["Synthetic"],
-            "scale_archived_exact": ["Winnebago"],
-        },
+        "PROFILE_DATASET_FAMILIES": {},
         "ACTIVE_CASE_IDS": [],
         "run_cmd": fake_run_cmd,
         "display": lambda value: None,
@@ -351,7 +421,7 @@ def test_one_click_orchestrator_runs_only_fixed_ab_at_frozen_target(
     assert target_profile["overrides"]["methods"] == expected_methods
     assert target_profile["overrides"]["box_budget"] == box_budget
     assert target_profile["overrides"]["inverse_max_size"] == inverse_max_size
-    assert target_profile["overrides"]["default_inverse_max_size"] == 1_024
+    assert target_profile["overrides"]["default_inverse_max_size"] == 6_000
     method_config_fields = (
         "rank",
         "full_eig_rank",
@@ -413,7 +483,7 @@ def test_one_click_orchestrator_runs_only_fixed_ab_at_frozen_target(
     assert feasibility["active_box_upper_bound"] == active_box_upper_bound
     assert feasibility["allow_frozen_topk_capacity_adaptation"] is False
     assert feasibility["inverse_max_size"] == inverse_max_size
-    assert feasibility["default_inverse_max_size"] == 1_024
+    assert feasibility["default_inverse_max_size"] == 6_000
     assert feasibility["default_resolved_kind"] == "active-eig"
     assert feasibility["decision_basis"] == (
         "prospective declared active-box upper bound before timing"

@@ -22,6 +22,7 @@ from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end import
     kernel_cross,
     predict_restricted_krr,
     summarize_pipeline_rows,
+    validate_dataset_generation_provenance,
 )
 from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end_suite import (
     _load_completed_case,
@@ -46,6 +47,63 @@ def test_protocol_methods_are_complete_krr_pipelines() -> None:
     assert "cg" not in END_TO_END_METHODS
     assert "nystrom" not in END_TO_END_METHODS
     assert "rpcholesky" not in END_TO_END_METHODS
+    assert EndToEndConfig().inverse_max_size == 6000
+
+
+def _synthetic_generation_dataset(noise_std: float) -> dict[str, object]:
+    stem = "synthetic_true_func_2d_ntrain100"
+    return {
+        "metadata": {
+            "dataset_name": stem,
+            "generation": {
+                "noise_std": noise_std,
+                "seed_train": 20260421,
+                "seed_test": 1,
+                "chunk_rows": 5_000_000,
+                "target_function": "true_func_2d",
+                "n_train": 100,
+                "n_test": 25,
+                "dim": 2,
+            },
+            "shapes": {"n_train": 100, "n_test": 25, "dim": 2},
+            "y_transform": {"noise_std": noise_std},
+        },
+        "source_n_train": 100,
+        "x": np.zeros((8, 2), dtype=np.float64),
+        "content_index_sha256": "content-sha",
+        "metadata_sha256": "metadata-sha",
+    }
+
+
+def test_synthetic_generation_provenance_accepts_noise_03_family() -> None:
+    cfg = EndToEndConfig(
+        dataset_stem="synthetic_true_func_2d_ntrain100",
+        expected_dataset_noise_std=0.3,
+        expected_dataset_seed_train=20260421,
+        expected_dataset_seed_test=1,
+        expected_dataset_generation_chunk_rows=5_000_000,
+        expected_dataset_target_function="true_func_2d",
+    )
+    observed = validate_dataset_generation_provenance(
+        cfg, _synthetic_generation_dataset(0.3)
+    )
+    assert observed["observed_dataset_noise_std"] == 0.3
+    assert observed["dataset_content_index_sha256"] == "content-sha"
+
+
+def test_synthetic_generation_provenance_rejects_noise_002_master() -> None:
+    cfg = EndToEndConfig(
+        dataset_stem="synthetic_true_func_2d_ntrain100",
+        expected_dataset_noise_std=0.3,
+        expected_dataset_seed_train=20260421,
+        expected_dataset_seed_test=1,
+        expected_dataset_generation_chunk_rows=5_000_000,
+        expected_dataset_target_function="true_func_2d",
+    )
+    with pytest.raises(ValueError, match="noise_std"):
+        validate_dataset_generation_provenance(
+            cfg, _synthetic_generation_dataset(0.02)
+        )
 
 
 def test_efgp_pipeline_total_charges_score_selection(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -487,7 +545,7 @@ def test_summary_fails_closed_when_effective_active_set_changes() -> None:
 
 def _target_rows(n_train: int, cg_iterations: int) -> list[dict[str, object]]:
     common: dict[str, object] = {
-        "dataset_stem": "synthetic_true_func_2d_n300000000",
+        "dataset_stem": f"synthetic_true_func_2d_ntrain{int(n_train)}",
         "n_train": n_train,
         "kernel_family": "matern",
         "lengthscale": 0.1,
@@ -531,7 +589,10 @@ def test_target_selection_uses_prospectively_declared_equal_n_priority() -> None
     ]
     selected = select_target_regime(
         [*synthetic, *winnebago],
-        dataset_priority=("winnebago_master", "synthetic_true_func_2d_n300000000"),
+        dataset_priority=(
+            "winnebago_master",
+            "synthetic_true_func_2d_ntrain10000000",
+        ),
     )
     assert selected["dataset_stem"] == "winnebago_master"
 
@@ -600,6 +661,26 @@ def test_shipped_suite_covers_10m_to_300m_and_materializes_robustness(
         "Synthetic",
         "Winnebago",
     }
+    expected_synthetic_stems = {
+        10_000_000: "synthetic_true_func_2d_ntrain10000000",
+        30_000_000: "synthetic_true_func_2d_ntrain30000000",
+        100_000_000: "synthetic_true_func_2d_ntrain100000000",
+        300_000_000: "synthetic_true_func_2d_ntrain300000000",
+    }
+    assert {
+        int(item["config"].n_train): item["config"].dataset_stem
+        for item in scale
+        if item["dataset_family"] == "Synthetic"
+    } == expected_synthetic_stems
+    assert set(expected_synthetic_stems.values()).issubset(
+        suite["target_selection"]["dataset_priority"]
+    )
+    assert "synthetic_true_func_2d_n300000000" not in suite["target_selection"][
+        "dataset_priority"
+    ]
+    assert suite["base"]["dataset_stem"].startswith(
+        "synthetic_true_func_2d_ntrain"
+    )
     assert all(
         item["config"].allow_frozen_topk_capacity_adaptation is False
         for item in scale
@@ -616,7 +697,7 @@ def test_shipped_suite_covers_10m_to_300m_and_materializes_robustness(
     assert {cfg.lengthscale for cfg in configs} >= {0.05, 0.1, 0.2}
     assert {cfg.box_budget for cfg in configs} >= {4096, 8192, 16384}
     assert {cfg.dataset_stem for cfg in configs} >= {
-        "synthetic_true_func_2d_n300000000",
+        "synthetic_true_func_2d_ntrain10000000",
         "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
     }
     adaptive = [
@@ -671,14 +752,51 @@ def test_shipped_suite_freezes_archived_full_eig_and_ours_winners(
         for item in scale
     )
     assert all("0D6827265" in item["config"].parameter_source for item in scale)
-    assert suite["base"]["inverse_max_size"] == 1024
+    synthetic_parameter_sources = [
+        item["config"].parameter_source
+        for item in scale
+        if item["dataset_family"] == "Synthetic"
+    ]
+    assert synthetic_parameter_sources
+    assert all("noise=0.3" in source for source in synthetic_parameter_sources)
+    assert all("noise=0.02" not in source for source in synthetic_parameter_sources)
+    assert all("current noise=0.02" not in source for source in synthetic_parameter_sources)
+    assert all("old timings excluded" in source for source in synthetic_parameter_sources)
+    synthetic_configs = [
+        item["config"] for item in scale if item["dataset_family"] == "Synthetic"
+    ]
+    assert all(cfg.expected_dataset_noise_std == 0.3 for cfg in synthetic_configs)
+    assert all(
+        cfg.expected_dataset_seed_train == 20260421 for cfg in synthetic_configs
+    )
+    assert all(cfg.expected_dataset_seed_test == 1 for cfg in synthetic_configs)
+    assert all(
+        cfg.expected_dataset_generation_chunk_rows == 5_000_000
+        for cfg in synthetic_configs
+    )
+    assert all(
+        cfg.expected_dataset_target_function == "true_func_2d"
+        for cfg in synthetic_configs
+    )
+    assert suite["base"]["inverse_max_size"] == 6000
     assert suite["base"]["allow_frozen_topk_capacity_adaptation"] is False
     assert suite["stage2_fixed_ab"]["inverse_max_size"] == 16384
-    assert suite["stage2_fixed_ab"]["default_inverse_max_size"] == 1024
+    assert suite["stage2_fixed_ab"]["default_inverse_max_size"] == 6000
 
 
-def test_robustness_uses_exact_dataset_artifact_at_selected_n(tmp_path: Path) -> None:
+def test_robustness_uses_exact_dataset_artifacts_at_selected_n(tmp_path: Path) -> None:
     suite = load_suite_config()
+    datasets = {
+        item["dataset_family"]: item
+        for item in suite["profiles"]["robustness_at_selected_target"]["datasets"]
+    }
+    assert datasets["Synthetic"]["dataset_stems_by_n_train"] == {
+        "10000000": "synthetic_true_func_2d_ntrain10000000",
+        "30000000": "synthetic_true_func_2d_ntrain30000000",
+        "100000000": "synthetic_true_func_2d_ntrain100000000",
+        "300000000": "synthetic_true_func_2d_ntrain300000000",
+    }
+    assert "dataset_stem" not in datasets["Synthetic"]
     target = select_target_regime(_target_rows(30_000_000, 4000))
     robust = materialize_robustness_plan(
         suite,
@@ -691,6 +809,17 @@ def test_robustness_uses_exact_dataset_artifact_at_selected_n(tmp_path: Path) ->
     assert winnebago[0]["config"].n_train == 30_000_000
     assert winnebago[0]["config"].dataset_stem.endswith("ntrain30000000")
     assert winnebago[0]["config"].accuracy_max_rmse == 0.15
+    synthetic = [
+        item
+        for item in robust
+        if "dataset_synthetic" in item.get("robustness_axes", [])
+    ]
+    assert len(synthetic) == 1
+    assert synthetic[0]["config"].n_train == 30_000_000
+    assert (
+        synthetic[0]["config"].dataset_stem
+        == "synthetic_true_func_2d_ntrain30000000"
+    )
 
 
 def test_resume_reuses_resource_outcome_but_not_execution_error(tmp_path: Path) -> None:
