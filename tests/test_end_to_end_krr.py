@@ -662,10 +662,8 @@ def test_shipped_suite_covers_10m_to_300m_and_materializes_robustness(
         "Winnebago",
     }
     expected_synthetic_stems = {
-        10_000_000: "synthetic_true_func_2d_ntrain10000000",
-        30_000_000: "synthetic_true_func_2d_ntrain30000000",
-        100_000_000: "synthetic_true_func_2d_ntrain100000000",
-        300_000_000: "synthetic_true_func_2d_ntrain300000000",
+        n_train: f"synthetic_true_func_2d_ntrain{n_train}"
+        for n_train in (10_000_000, 30_000_000, 100_000_000, 300_000_000)
     }
     assert {
         int(item["config"].n_train): item["config"].dataset_stem
@@ -675,12 +673,7 @@ def test_shipped_suite_covers_10m_to_300m_and_materializes_robustness(
     assert set(expected_synthetic_stems.values()).issubset(
         suite["target_selection"]["dataset_priority"]
     )
-    assert "synthetic_true_func_2d_n300000000" not in suite["target_selection"][
-        "dataset_priority"
-    ]
-    assert suite["base"]["dataset_stem"].startswith(
-        "synthetic_true_func_2d_ntrain"
-    )
+    assert suite["base"]["dataset_stem"] == "synthetic_true_func_2d_ntrain10000000"
     assert all(
         item["config"].allow_frozen_topk_capacity_adaptation is False
         for item in scale
@@ -758,9 +751,8 @@ def test_shipped_suite_freezes_archived_full_eig_and_ours_winners(
         if item["dataset_family"] == "Synthetic"
     ]
     assert synthetic_parameter_sources
-    assert all("noise=0.3" in source for source in synthetic_parameter_sources)
-    assert all("noise=0.02" not in source for source in synthetic_parameter_sources)
-    assert all("current noise=0.02" not in source for source in synthetic_parameter_sources)
+    assert all("generated diagnostic table" in source for source in synthetic_parameter_sources)
+    assert all("matching noise=0.3" in source for source in synthetic_parameter_sources)
     assert all("old timings excluded" in source for source in synthetic_parameter_sources)
     synthetic_configs = [
         item["config"] for item in scale if item["dataset_family"] == "Synthetic"
@@ -784,7 +776,7 @@ def test_shipped_suite_freezes_archived_full_eig_and_ours_winners(
     assert suite["stage2_fixed_ab"]["default_inverse_max_size"] == 6000
 
 
-def test_robustness_uses_exact_dataset_artifacts_at_selected_n(tmp_path: Path) -> None:
+def test_robustness_uses_exact_synthetic_and_winnebago_at_selected_n(tmp_path: Path) -> None:
     suite = load_suite_config()
     datasets = {
         item["dataset_family"]: item

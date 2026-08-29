@@ -65,8 +65,11 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
     stage1_source = _cell_source_containing(
         notebook, "stage1_scale_plan = stage1_suite.build_profile_plan("
     )
-    archived_validator_source = _cell_source_containing(
+    formal_validator_source = _cell_source_containing(
         notebook, "def validate_archived_synthetic_inputs("
+    )
+    formal_generator_source = _cell_source_containing(
+        notebook, "formal_synthetic_missing_sizes = []"
     )
     assert "RUN_ALL_FORMAL_EXPERIMENTS = True" in source
     assert "RUN_STAGE1_END_TO_END_KRR = RUN_ALL_FORMAL_EXPERIMENTS" in source
@@ -93,14 +96,13 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
     assert "development_scale_masters" not in formal_stage1_bundle_branch
     assert "GENERATE_ARCHIVED_SYNTHETIC_SIZES = []" in configuration_source
     assert (
-        "DIRECT_IMPORT_ARCHIVED_SYNTHETIC_FROM_DRIVE = "
-        "RUN_STAGE1_END_TO_END_KRR"
-    ) in configuration_source
-    archived_validator_call = (
-        "validate_archived_synthetic_inputs(FORMAL_SCALE_SIZES)"
+        "GENERATE_FORMAL_SYNTHETIC_IF_MISSING = RUN_STAGE1_END_TO_END_KRR"
+        in configuration_source
     )
-    assert archived_validator_call in stage1_source
-    assert stage1_source.index(archived_validator_call) < stage1_source.index(
+    assert 'stem = f"synthetic_true_func_2d_ntrain{int(n_train)}"' in formal_generator_source
+    formal_validator_call = "validate_archived_synthetic_inputs(FORMAL_SCALE_SIZES)"
+    assert formal_validator_call in stage1_source
+    assert stage1_source.index(formal_validator_call) < stage1_source.index(
         "completed_stage1_scale_items = []"
     )
     for expected_metadata_check in (
@@ -109,10 +111,9 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
         '"seed_test": 1',
         '"chunk_rows": 5_000_000',
     ):
-        assert expected_metadata_check in archived_validator_source
-    assert "path.name not in selected_by_basename" in archived_validator_source
-    assert "direct_imported_by_basename" in source
-    assert "direct_drive_cache_import" in source
+        assert expected_metadata_check in formal_validator_source
+    assert 'stem = f"synthetic_true_func_2d_ntrain{n_train}"' in formal_validator_source
+    assert '"--noise", "0.3"' in formal_generator_source
     assert "different Synthetic " in stage1_source
     assert "artifact hashes" in stage1_source
     assert '"stage1_synthetic_data_family_manifest_sha256"' in source
@@ -191,7 +192,7 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
     assert "NO_ELIGIBLE_TARGET_FAIL_CLOSED" in source
 
 
-def test_formal_stage1_suite_uses_exact_noise03_synthetic_artifacts() -> None:
+def test_formal_stage1_suite_matches_archived_noise03_generation_route() -> None:
     suite = json.loads(STAGE1_SUITE_PATH.read_text(encoding="utf-8"))
     synthetic_cases = {
         int(case["n_train"]): case
@@ -202,20 +203,20 @@ def test_formal_stage1_suite_uses_exact_noise03_synthetic_artifacts() -> None:
         n_train: case["dataset_stem"]
         for n_train, case in synthetic_cases.items()
     } == {
-        10_000_000: "synthetic_true_func_2d_ntrain10000000",
-        30_000_000: "synthetic_true_func_2d_ntrain30000000",
-        100_000_000: "synthetic_true_func_2d_ntrain100000000",
-        300_000_000: "synthetic_true_func_2d_ntrain300000000",
+        n_train: f"synthetic_true_func_2d_ntrain{n_train}"
+        for n_train in synthetic_cases
     }
     assert all(
-        "noise=0.3" in str(case.get("parameter_source", ""))
+        case["expected_dataset_noise_std"] == 0.3
         for case in synthetic_cases.values()
     )
     assert all(
-        "noise=0.02" not in str(case.get("parameter_source", ""))
+        case["expected_dataset_generation_chunk_rows"] == 5_000_000
         for case in synthetic_cases.values()
     )
-    assert "synthetic_true_func_2d_n300000000" not in json.dumps(suite)
+    assert "synthetic_true_func_2d_n300000000" not in json.dumps(
+        [*synthetic_cases.values(), suite["profiles"]["robustness_at_selected_target"]["datasets"][0]]
+    )
 
 
 def test_committed_notebook_matches_generator() -> None:

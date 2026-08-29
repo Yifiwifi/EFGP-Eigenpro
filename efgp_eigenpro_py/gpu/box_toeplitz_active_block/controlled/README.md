@@ -20,22 +20,12 @@ usable-quality range. The 1% full-eig-relative label is descriptive and never
 removes a timing or time-quality result.
 
 `end_to_end_suite.json` declares the 10M, 30M, 100M, and 300M scale matrix on
-Synthetic and Winnebago data.  The forward formal Stage-1 Synthetic route uses
-four exact `_ntrainN` artifacts, not prefixes of the low-noise development
-master.  Each artifact follows the frozen original-task generation definition:
-training-noise standard deviation 0.3, train/test seeds 20260421/1, five-million-
-row generation chunks, and a noise-free test set of size `N/4`.  Falling back
-to `synthetic_true_func_2d_n300000000` (noise 0.02) is forbidden. The four exact
-artifacts already stored in Google Drive are imported directly. Cataloged files
-come from `archived_exact_available`; otherwise the notebook searches the
-original experiment's standard MyDrive cache locations by exact basename.
-Either route is SHA-verified and validated from JSON metadata before a formal
-run starts. They must not be resumed under a formal run tag that already
-contains low-noise Stage-1 results.
-
-The formal statement is only that all four artifacts belong to the frozen
-noise-0.3 generated-data family. It does not require byte-for-byte identity with
-a particular historical copy; recorded SHA-256 values identify the files used now.
+Synthetic and Winnebago data. The forward formal Stage-1 Synthetic route matches
+the archived group_a/b/c notebook: exact `synthetic_true_func_2d_ntrainN`
+artifacts, training-noise standard deviation 0.3, train/test seeds 20260421/1,
+five-million-row generation chunks, and an `N/4` noise-free test set. Existing
+matching files are reused; missing sizes are generated locally. Metadata and
+SHA-256 are recorded before Stage 1 starts.
 
 Exact RPCholesky keeps its published rank-by-N
 factor requirement: if that factor cannot fit, the row remains visible as
@@ -54,15 +44,14 @@ every declared case must exist, and its raw repeat file is revalidated before
 target selection or any downstream run begins.
 
 The formal rerun does not rescan full-eig or proposed parameters on current
-timings. It freezes the archived `paper_table1_selected.csv` winners: separate
+timings. It freezes configurations recorded in the tracked generated diagnostic
+table `paper_table1_selected.csv`: separate
 full-eig rank `q`, proposed active top-k, and proposed eigenspace rank `q` for
 each dataset/N case. Only the configuration is transferred; all setup and solve
 times from the archived sweep are excluded, and all formal times are measured
-again under the 1-warm-up + 5-measured-repeat protocol.  The Stage-1 Synthetic
-inputs use the frozen noise-0.3 exact `_ntrainN` definition above.  Because the
-historical high-N NPZ hashes are unavailable, the transferred configuration is
-historical provenance, not a claim that the imported NPZ is byte-identical to
-one particular historical copy. Lambda, lengthscale, and dataset robustness freeze the
+again under the 1-warm-up + 5-measured-repeat protocol. The table is not a raw
+dataset or an authoritative formal timing source; its Synthetic settings now
+refer to the matching noise-0.3 generated-data route. Lambda, lengthscale, and dataset robustness freeze the
 selected target configuration. The box-budget axis is separately labelled
 budget-adaptive because a frozen enclosing box cannot fit every smaller cap.
 If a lengthscale change produces fewer Fourier modes than the frozen top-k, the

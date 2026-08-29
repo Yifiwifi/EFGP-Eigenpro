@@ -15,11 +15,9 @@ routes while preserving their different timing semantics.
 2. Upload the **contents** of `D:\NU\ML\colab_drive_upload_ready` to
    `MyDrive/EFGP_Colab/data_bundle`.  Preserve the directory structure and the
    two top-level files `drive_manifest.json` and `checksums.sha256`. Formal
-   Stage 1 needs exact noise-0.3 Synthetic NPZ/JSON pairs named `_ntrainN` for
-   10M, 30M, 100M, and 300M. The notebook first uses catalog entries; for a
-   Synthetic pair not listed there, it searches the original experiment's
-   standard MyDrive cache locations by exact basename, imports it directly,
-   and records a fresh SHA-256. It never substitutes the noise-0.02 master.
+   Stage 1 follows the archived group_a/b/c notebook: Synthetic uses exact
+   `_ntrainN` files and generates only missing sizes locally with noise 0.3,
+   seeds 20260421/1, 5M-row chunks, and `N/4` test rows.
 3. Select an A100 High-RAM runtime and choose **Runtime -> Run all**.  The
    one-click formal campaign enables the 100M/300M gates automatically.  If the
    runtime has less than 30 GiB GPU memory or 20 GiB currently available host
@@ -45,23 +43,18 @@ routes while preserving their different timing semantics.
 6. Cross-artifact audit, two-stage tables/plots, campaign ledger, and an
    atomically replaced final manifest.
 
-Formal Stage-1 Synthetic data are four exact `_ntrainN` artifacts imported
-directly from the existing Google Drive collection under the frozen
-original-task definition: noise standard deviation 0.3,
-train/test seeds 20260421/1, five-million-row generation chunks, and `N/4`
-noise-free test points.  The noise-0.02 `_n300000000` development master and its
-prefixes are never a fallback for this route.  The 30M, 100M, and 300M exact
-files may be cataloged or directly imported from the original MyDrive cache.
-Both routes are SHA-verified and recorded in
+Formal Stage-1 Synthetic data use exact `_ntrainN` artifacts under the archived
+notebook definition: noise standard deviation 0.3, train/test seeds 20260421/1,
+five-million-row generation chunks, and `N/4` noise-free test points. Existing
+matching files are reused; missing sizes are generated locally. All files are
+metadata-validated and SHA-verified in
 `synthetic_data_family_manifest.json`. If an artifact hash changes under the
 same run directory, the notebook stops and requires a new `RUN_TAG_PREFIX`;
-do not resume a run directory containing the earlier low-noise Stage-1 matrix.
+do not mix this matrix with the separate `_nN` noise-0.02 family.
 
-The claim is therefore only that the imported files belong to the same frozen
-generation family, not that they reproduce one historical NPZ byte for byte.
-Archived `paper_table1_selected.csv`
-contributes only the predeclared full-eig/active configuration; none of its old
-timings enters the formal Stage-1 result.
+The tracked `paper_table1_selected.csv` is a generated diagnostic table, not a
+raw-data artifact or a formal timing source. It contributes only predeclared
+full-eig/active configurations; none of its old timings enters Stage 1.
 
 The one-click formal campaign intentionally excludes redundant CG screening,
 legacy exploratory reruns, q128/SE optional controls, Winnebago raw-prefix
@@ -72,16 +65,15 @@ manual mode but are not required for the final controlled paper package.
 
 | switch | data definition | status |
 |---|---|---|
-| `RUN_STAGE1_END_TO_END_KRR` | formal exact per-N artifacts; Synthetic is noise 0.3 `_ntrainN` and is not assumed nested | directly import and verify the existing four-size Google Drive collection; catalog registration is preferred but not required |
+| `RUN_STAGE1_END_TO_END_KRR` | formal Synthetic noise-0.3 exact `_ntrainN` plus exact Winnebago artifacts | missing Synthetic sizes are generated locally before Stage 1 |
 | `RUN_ARCHIVED_EXACT_SCALE` | optional older fixed-system archived/exact route; it does not replace Stage 1 | Winnebago ready through 300M |
-| `RUN_DEVELOPMENT_MASTER_SCALE` | optional development-only prefixes of the noise-0.02 300M Synthetic master | ready at 10M/30M/100M/300M; forbidden as formal Stage-1 fallback |
+| `RUN_DEVELOPMENT_MASTER_SCALE` | optional separate route over the noise-0.02 `_n300000000` master | ready at 10M/30M/100M/300M; not a Stage-1 substitute |
 | `RUN_MANITOWOC_SCALE` | independent 2023 USGS 3DEP acquisition, nested EPT master | 10M ready; 300M master must still be generated and prefix-verified |
 
-The default formal run does not generate Synthetic data. It imports the four
-existing Drive artifacts. Only if a file is genuinely missing, advanced/manual
-mode can use
+The default formal run generates only missing formal Synthetic sizes. The
+following advanced/manual option can request additional sizes for legacy groups:
 `GENERATE_ARCHIVED_SYNTHETIC_SIZES=[30_000_000,100_000_000,300_000_000]`
-to recreate it, then rebuild and verify the Drive
+to create additional exact files, then rebuild and verify the Drive
 catalog and use a fresh `RUN_TAG`.  Add 1M and 3M only if separately running the
 complete legacy groups.  `GENERATE_MANITOWOC_300M=True` starts the frozen
 EPT build at LOD 8; if its exact eligible-row report is insufficient, raise the

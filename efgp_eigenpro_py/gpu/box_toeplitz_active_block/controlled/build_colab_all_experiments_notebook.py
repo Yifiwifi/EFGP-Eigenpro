@@ -126,25 +126,22 @@ def build_notebook() -> dict:
             PREDICTION_AUDIT_MAX_TEST_N = 2_500_000
             PREDICTION_AUDIT_PROFILES = ["fixed_ab_selected_target"]
 
-            # 正式 Stage 1 自己声明 exact dataset stem，不复用 controlled legacy
-            # profile 的数据族过滤。
+            # 正式 Stage 1 自己声明 exact per-N dataset stems。
             PROFILE_DATASET_FAMILIES = {}
             ACTIVE_CASE_IDS = []
 
-            # 优先使用 archived_exact_available；未登记的现成文件可从原实验
-            # MyDrive cache 直接导入。生成只作补救，默认不重新造数据。
+            # Match the archived group_a/b/c notebook: formal Synthetic is
+            # generated locally per N when absent, with _ntrainN/noise=.3.
+            GENERATE_FORMAL_SYNTHETIC_IF_MISSING = RUN_STAGE1_END_TO_END_KRR
             GENERATE_ARCHIVED_SYNTHETIC_SIZES = []  # noise=.3 / chunk=5M / _ntrainN
-            # 兼容原实验已经保存在 MyDrive cache、但尚未列入新 manifest 的
-            # exact Synthetic 文件；直接导入后仍计算并记录本次 SHA-256。
-            DIRECT_IMPORT_ARCHIVED_SYNTHETIC_FROM_DRIVE = RUN_STAGE1_END_TO_END_KRR
             GENERATE_MANITOWOC_300M = False
             MANITOWOC_START_LOD = 8  # 只是起点；容量不足时必须提高并重新精确扫描
             SYNC_GENERATED_DATA_TO_DRIVE = False
 
             required_bundles = []
             if RUN_STAGE1_END_TO_END_KRR:
-                # Frozen noise=.3 Synthetic family + Winnebago exact artifacts.
-                # Unregistered Synthetic exact files may use the direct cache route.
+                # Winnebago exact artifacts come from the catalog. Synthetic
+                # exact per-N files are generated locally if not already selected.
                 required_bundles.append("archived_exact_available")
             if RUN_LEGACY_GROUPS:
                 required_bundles.append("legacy_named_route_inputs")
@@ -349,9 +346,9 @@ def build_notebook() -> dict:
             r"""
             ## 4. Drive manifest 校验与单份 master staging
 
-            `drive_manifest.json` 由 `colab_drive_pack.py` 生成。开发用 300M Synthetic（noise=.02）和 Winnebago raw master 只属于 `controlled_master_prefix` protocol，不能进入本次正式 Stage 1。正式 Synthetic 直接导入 Google Drive 中 noise=.3 的四个 `_ntrainN` artifacts；它们属于同一生成数据族，不要求与某个历史副本逐字节相同。
+            `drive_manifest.json` 由 `colab_drive_pack.py` 生成。正式 Synthetic 与指定的 group_a/b/c notebook 一致：每个 N 使用 `synthetic_true_func_2d_ntrainN`；本地没有时，以 noise=.3、固定 seeds、5M chunk 和 `N/4` test 直接生成。
 
-            对 ZIP_STORED master，controlled runner 的 `subset_mode='prefix'` 会直接 memory-map 所需的 10M/30M/100M 前缀；不会先加载全部 300M。正式 exact 输入优先取自 `archived_exact_available`；未登记的 Synthetic 可按原实验缓存文件名直接导入，`controlled_10m` 只服务 plumbing smoke。notebook 会强制检查完整 noise=.3 Synthetic `_ntrainN`，不会接受 low-noise fallback。
+            已存在且 metadata 完全匹配的 `_ntrainN` 文件可以复用；缺失规模才生成。Winnebago 仍取 `archived_exact_available`。所有正式 Synthetic 文件在 Stage 1 前验证 metadata 并记录 SHA-256。
             """
         )
     )
@@ -506,15 +503,14 @@ def build_notebook() -> dict:
                     ):
                         shutil.copy2(staged[metadata_name], canonical_json)
 
-            # The original experiment notebook already supported exact files
-            # cached elsewhere in MyDrive.  Preserve that route for Synthetic:
-            # prefer catalog artifacts, otherwise import the exact basename
-            # directly and record a fresh SHA-256 for this formal run.
+            # Selected catalog artifacts are already staged above. Synthetic
+            # files absent there are generated below, matching the archived notebook.
             direct_imported_by_basename = {}
 
             def find_unique_drive_cached_file(filename):
                 mydrive_root = DRIVE_PROJECT_ROOT.parent
                 candidate_dirs = [
+                    mydrive_root,
                     DRIVE_DATA_ROOT,
                     DRIVE_PROJECT_ROOT / "benchmark_dataset_cache",
                     mydrive_root / "EFGP_Eigenpro" / "benchmark_dataset_cache",
@@ -563,33 +559,6 @@ def build_notebook() -> dict:
                     raise RuntimeError(f"Direct-import SHA changed while copying: {source}")
                 return copied_sha
 
-            if DIRECT_IMPORT_ARCHIVED_SYNTHETIC_FROM_DRIVE:
-                for n_train in FORMAL_SCALE_SIZES:
-                    stem = f"synthetic_true_func_2d_ntrain{int(n_train)}"
-                    for suffix in (".npz", ".json"):
-                        filename = f"{stem}{suffix}"
-                        if filename in selected_by_basename:
-                            continue
-                        source = find_unique_drive_cached_file(filename)
-                        if source is None:
-                            continue
-                        destination = LOCAL_DATA_DIR / filename
-                        if CACHE_DATA_LOCALLY:
-                            print("Direct-importing archived Synthetic from Drive:", source)
-                            artifact_sha = copy_and_hash_drive_artifact(source, destination)
-                        else:
-                            artifact_sha = streaming_sha256(source)
-                            if destination.exists() or destination.is_symlink():
-                                destination.unlink()
-                            destination.symlink_to(source)
-                        direct_imported_by_basename[filename] = {
-                            "source": str(source),
-                            "destination": str(destination),
-                            "size_bytes": int(source.stat().st_size),
-                            "sha256": artifact_sha,
-                            "source_kind": "direct_drive_cache_import",
-                        }
-
             REPO_PROCESSED = LOCAL_REPO / "efgp_eigenpro_py/gpu/benchmark_dataset/processed"
             REPO_PROCESSED.mkdir(parents=True, exist_ok=True)
             for local_file in LOCAL_DATA_DIR.iterdir():
@@ -612,7 +581,7 @@ def build_notebook() -> dict:
             r"""
             ## 5. 可选补救：补建缺失的 archived Synthetic / Manitowoc master
 
-            默认正式流程直接使用 Drive 的 archived Synthetic。只有 Drive 确实缺文件时，才手动设置 `GENERATE_ARCHIVED_SYNTHETIC_SIZES`；生成物必须是 `_ntrainN`、noise=0.3、train/test seeds 20260421/1、generation chunk=5M。现有 `_nN` 300M master 是 noise=.02 development artifact，不能重命名代替。
+            正式流程与指定 archived notebook 一致：Synthetic 使用 `_ntrainN`，本地缺失时生成 noise=.3 数据。`GENERATE_ARCHIVED_SYNTHETIC_SIZES` 仍可为可选 legacy 路线额外请求 1M/3M 等规模。
 
             Manitowoc 300M 必须保持冻结 AOI、hash split、浅层优先顺序。LOD 8 只是起点；若精确容量不足 300M/75M，应提高到 LOD 9，不能用密度估算替代扫描结果。
             """
@@ -622,8 +591,21 @@ def build_notebook() -> dict:
         _code(
             r"""
             generated_before = {path.resolve() for path in LOCAL_DATA_DIR.iterdir()}
-            if GENERATE_ARCHIVED_SYNTHETIC_SIZES:
-                sizes_arg = ",".join(str(int(n)) for n in GENERATE_ARCHIVED_SYNTHETIC_SIZES)
+            formal_synthetic_missing_sizes = []
+            if GENERATE_FORMAL_SYNTHETIC_IF_MISSING:
+                for n_train in FORMAL_SCALE_SIZES:
+                    stem = f"synthetic_true_func_2d_ntrain{int(n_train)}"
+                    if not all(
+                        (LOCAL_DATA_DIR / f"{stem}{suffix}").is_file()
+                        for suffix in (".npz", ".json")
+                    ):
+                        formal_synthetic_missing_sizes.append(int(n_train))
+            synthetic_sizes_to_generate = sorted({
+                *formal_synthetic_missing_sizes,
+                *(int(n) for n in GENERATE_ARCHIVED_SYNTHETIC_SIZES),
+            })
+            if synthetic_sizes_to_generate:
+                sizes_arg = ",".join(str(int(n)) for n in synthetic_sizes_to_generate)
                 run_cmd([
                     sys.executable, "-m",
                     "efgp_eigenpro_py.gpu.benchmark_dataset.preprocess_synthetic_true_func_2d_size_sweep",
@@ -774,17 +756,6 @@ def build_notebook() -> dict:
                     if not npz_path.is_file() or not json_path.is_file():
                         failures.append(f"{stem}: missing NPZ/JSON")
                         continue
-                    catalog_complete = True
-                    for path in (npz_path, json_path):
-                        if (
-                            path.name not in selected_by_basename
-                            and path.name not in direct_imported_by_basename
-                        ):
-                            catalog_complete = False
-                            failures.append(
-                                f"{stem}: {path.name} was neither selected from the "
-                                "Drive catalog nor directly imported from the Drive cache"
-                            )
                     metadata = json.loads(json_path.read_text(encoding="utf-8"))
                     generation = metadata.get("generation", {})
                     expected = {
@@ -825,13 +796,21 @@ def build_notebook() -> dict:
                         mismatches["shapes"] = shape_mismatches
                     if mismatches:
                         failures.append(f"{stem}: archived generation mismatch {mismatches}")
-                    elif catalog_complete:
-                        npz_record = selected_by_basename.get(
-                            npz_path.name, direct_imported_by_basename.get(npz_path.name)
-                        )
-                        metadata_record = selected_by_basename.get(
-                            json_path.name, direct_imported_by_basename.get(json_path.name)
-                        )
+                    else:
+                        def source_record(path):
+                            record = selected_by_basename.get(
+                                path.name, direct_imported_by_basename.get(path.name)
+                            )
+                            if record is not None:
+                                return record
+                            return {
+                                "sha256": streaming_sha256(path),
+                                "source_kind": "generated_local_if_missing",
+                                "source": str(path),
+                            }
+
+                        npz_record = source_record(npz_path)
+                        metadata_record = source_record(json_path)
                         validated.append({
                             "dataset_stem": stem,
                             "n_train": n_train,
@@ -858,9 +837,8 @@ def build_notebook() -> dict:
                 if failures:
                     raise RuntimeError(
                         "Archived Synthetic inputs are incomplete or incompatible. "
-                        "Place the four existing noise=0.3 artifacts in a standard "
-                        "MyDrive cache location or register them in "
-                        "archived_exact_available:\n- "
+                        "Generate the requested _ntrainN/noise=0.3 artifacts with the "
+                        "frozen protocol before Stage 1:\n- "
                         + "\n- ".join(failures)
                     )
                 return validated
@@ -976,7 +954,7 @@ def build_notebook() -> dict:
             - `train_total_seconds = setup_seconds + solving_phase_seconds`；
             - prediction 单列，用于报告 RMSE/R² 和 usability，不并入训练加速。
 
-            `ours-binned-default` 与 `efgp-standard-full-eig` 不在本次正式计时中重新扫参。每个 dataset/N 直接冻结原实验 `paper_table1_selected.csv` 的 proposed top-k/rank 与 full-eig rank，只转移配置；旧 timing 明确排除，并在当前 1 次预热 + 5 次 measured 协议下重新测量全部时间。Synthetic 四个规模直接导入 Drive 的 noise=0.3 `_ntrainN` artifacts，按相同 target function、输入分布和噪声模型声明为同一数据生成族。
+            `ours-binned-default` 与 `efgp-standard-full-eig` 不在本次正式计时中重新扫参。每个 dataset/N 的 proposed top-k/rank 与 full-eig rank取自仓库中由旧诊断 notebook 生成的 `paper_table1_selected.csv`；它只作为预先固定配置的参考，不是原始数据或正式 timing 来源。旧 timing 明确排除，全部时间按当前 1 次预热 + 5 次 measured 协议重新测量。Synthetic 数据引入严格匹配该 notebook：每个规模为 `_ntrainN`，缺失时使用 noise=.3、seeds 20260421/1、5M chunk、`N/4` test 本地生成。
 
             robustness 中冻结的 proposed top-k 是上界。若改变 lengthscale/dataset 后同一 score prefix 的中心闭包超过仍然冻结的 box budget，只有 robustness 配置会显式授权按同一确定性 score 顺序缩短到可容纳的最大 prefix；这不是扫参，不读取时间、迭代数、标签或精度。`configured_active_topk`、`effective_active_topk`、`effective_active_box_size`、`active_selection_rule` 与 `capacity_adapted` 都进入 canonical 表，必须披露实际运行配置。
 
