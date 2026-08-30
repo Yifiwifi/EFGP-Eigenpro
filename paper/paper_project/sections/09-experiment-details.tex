@@ -1,0 +1,622 @@
+\section{Experiment Configuration Details}
+\label{app:experiment-details}
+
+This appendix separates the end-to-end KRR protocol from the protocol used to
+isolate the Fourier linear solver.  The saved bundle contains the formal
+six-pipeline broad-comparison matrix over \(10^7\)--\(3\times10^8\), explicit
+inverse/eigenpair family replays, the earlier EFGP-only regime map, and the
+formal matched fixed-system rows.  Each row records the
+data set, kernel, \(N\), effective configuration, residual, timing components,
+and prediction metrics.  Medians and paired ratios are formed only within one
+protocol and never combine timings from different systems.
+
+\subsection{Stage protocols}
+
+\Cref{tab:experiment-stage-protocols} separates the accounting rules.  Stage~1
+compares KRR algorithms, so each method pays for its own model
+construction.  Stage~2 compares solvers, so every method receives exactly the
+same \(A\) and \(\bvec\).
+
+\begin{table}[H]
+\centering
+\footnotesize
+\caption{Roles and accounting of the two formal experimental stages.}
+\label{tab:experiment-stage-protocols}
+\begin{tabular}{@{}p{0.18\textwidth}p{0.36\textwidth}p{0.36\textwidth}@{}}
+\toprule
+Quantity & Stage~1: end-to-end KRR & Stage~2: fixed \(A\betavec=\bvec\) \\
+\midrule
+Primary question
+& Accuracy and setup-plus-solve time of complete KRR pipelines from \(10^7\)
+to \(3\times10^8\) samples
+& Solver acceleration on one identical Fourier system per case \\
+Methods
+& Primary family replay: EFGP-CG, explicit inverse, localized EigenPro, and
+full-grid EigenPro; secondary broad matrix: Nystr\"om KRR, RPCholesky KRR,
+EFGP+Jacobi, and the corresponding EFGP rows
+& CG; Jacobi-PCG; proposed full-grid, active-inverse, and active-eigenpair PCG \\
+System construction
+& Each KRR method performs and pays for its own setup
+& One shared, hashed \(D,G,\bvec,\lambda\) for all methods \\
+Timing unit
+& Method-specific setup plus solve; prediction reported separately
+& Preconditioner selection/build plus solve; shared Fourier setup separate \\
+Selection
+& Inverse and eigenpair configurations fixed separately before timing; all
+successful raw time and accuracy rows retained
+& Configuration frozen before matched timing \\
+Repetition
+& One warm-up plus five measured repetitions on the common A100
+& One warm-up plus five shuffled, paired measured repetitions \\
+Arithmetic and check
+& Per-method residual or optimization check and test RMSE
+& fp64/complex128 and independently recomputed true residual \\
+Numerical status
+& Complete matrix with explicit resource-limit outcomes
+& Complete matched A100 run with verified common system hash \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The formal fixed-system target is the Synthetic \(N=3\times10^7\) Mat\'ern
+case selected by the completed scale campaign.  Its shared construction cannot
+be added to or substituted for any end-to-end KRR row.  Likewise, the earlier
+regime-map ratios remain a separate historical protocol.
+
+\subsection{Formal Stage 1 end-to-end KRR campaign}
+
+The primary family scale profile uses
+\texttt{efgp-standard-cg}, \texttt{efgp-standard-full-eig},
+\texttt{ours-binned-inverse}, and
+\texttt{ours-binned-active-eig}.  The inverse and active-eigenpair routes
+carry separate transferred top-$k$/box/rank fields.  The reporter keeps the
+inverse row and minimizes current median total over localized and full-grid
+EigenPro for the second family.  It never minimizes across the two families.
+The kernel profile applies the same rule separately to SE and Mat\'ern, and
+the robustness profile repeats it at every parameter or data-set value.
+
+The secondary broad scale matrix uses
+\(N\in\{10^7,3\times10^7,10^8,3\times10^8\}\) on the same declared training
+and test artifacts.  Plain EFGP-CG and EFGP+Jacobi run as reference EFGP
+pipelines.  The proposed family includes the full-grid spectral route and the
+first-order binned default followed by its frozen active inverse/eigenpair
+rule.  Nystr\"om
+KRR and RPCholesky KRR act on the data-space kernel problem; their landmark or
+pivot selection, feature/factor construction, and solve are part of setup and
+solve time.  A Fourier-space Nystr\"om or RPCholesky preconditioner is not a
+replacement for either data-space row.
+
+For every method, the primary training total is
+\(T_{\mathrm{setup}}+T_{\mathrm{solve}}\).  These two components are also
+reported separately so that acceleration from faster setup is not attributed
+to the solver, or vice versa.  This is the method-owned algorithmic training
+total rather than process wall clock: common data-file input, backend creation,
+and host-to-device staging are excluded by declaration.  Prediction time is
+reported separately.  All successful time--accuracy outcomes remain visible;
+reference-relative accuracy labels are descriptive metadata and do not remove
+raw timings.  All methods use the same hardware and repeated-timing policy.
+Unavailable, resource-limited, or timed-out rows remain explicit rather than
+disappearing from a curve.
+
+Exact simple RPCholesky retains its rank-by-\(N\) factor.  At the frozen rank
+256 in fp64 this factor exceeds the declared 48-GiB cap from
+\(N=3\times10^7\) onward, so a \texttt{resource\_limit} row is the expected
+scalability outcome, not a pilot-method substitution.  It counts as a complete
+protocol outcome but not as a timed speed comparison.  The completed scale
+study then freezes the \(N=3\times10^7\) Synthetic target before Stage~2
+timing.
+
+\subsection{Archived regime map and original full-result audit}
+\label{app:archived-regime-map}
+
+\begin{sloppypar}
+The archived experiment is retained for two purposes: it records the broad
+regime map used to choose configurations before the prospective replay, and
+it exposes every original candidate rather than only the row printed in the
+main text.  The authoritative Mat\'ern files are
+\path{diagnostic_tables/paper_table1_candidates.csv} and
+\path{diagnostic_tables/paper_table1_selected.csv} inside the tracked
+\path{btab_group_a_group_b_group_c_20260703_053504} export bundle.  The SE
+rows use the later corrective
+\path{btab_group_b_20260704_081848} bundle.  The one-click notebook copies
+these into the run directory as
+\path{archived_original_full_results.csv} and
+\path{archived_original_operation_selected.csv}, and also writes the collapsed
+\path{archived_regime_map_two_family.csv}.  Thus the complete row-level result
+is part of the saved paper artifact even though it is too large to typeset in
+full.
+
+\Cref{tab:archived-selection-hierarchy} states the selection procedure.  It
+is important to separate its historical screen from the current reporting
+policy.  The old sweep used a training-fit screen to prevent a nonconverged
+candidate from becoming the representative timing row.  The present paper
+does not use that screen to hide a successful time--accuracy tradeoff: raw
+attempts and test RMSE remain in the full-result CSV, and rejected inverse
+attempts are marked explicitly when displayed.  The old rule is reported
+because it explains exactly how the transferred configurations were obtained.
+\end{sloppypar}
+
+\begin{table}[H]
+\centering
+\footnotesize
+\caption{Auditable hierarchy from original candidates to the two-family
+tables.  No current-run timing is consulted when configurations are
+transferred.}
+\label{tab:archived-selection-hierarchy}
+\begin{tabular}{@{}p{0.18\textwidth}p{0.73\textwidth}@{}}
+\toprule
+Step & Rule \\
+\midrule
+Candidate universe
+& Keep every recorded EFGP-CG, active-inverse, localized Box-EigenPro, and
+full-grid EigenPro-PCG row, including failed or capped attempts. \\
+Historical operation screen
+& Within each data set, kernel, and $N$, require the archived convergence
+status and training RMSE no larger than $1.10$ times EFGP-CG.  Test RMSE is
+not used for selection. \\
+Operation winner
+& Among rows passing that historical screen, minimize recorded complete
+pipeline total separately for Active inverse, Box-EigenPro, and full-grid
+EigenPro-PCG. \\
+Family collapse
+& The inverse operation is the inverse family.  Box-EigenPro and full-grid
+EigenPro-PCG are one active-box EigenPro family; choose the smaller operation
+winner by total time. \\
+Main-text display
+& Report EFGP-CG, the inverse-family result, and the active-box EigenPro-family
+result together with test RMSE.  Any shown raw row outside the old screen is
+marked and excluded from the headline speed claim rather than deleted. \\
+Prospective replay
+& Transfer only top-$k$, observed box size, and rank.  Rerun one warm-up plus
+five measured repetitions; select the faster localized/full-grid eigenpair
+row from the current medians.  Archived time never substitutes for replay
+time. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The archived regime map is interpretable only at the family level.  For SE,
+$M=1225$ makes full inversion the usual winner.  For Mat\'ern, Synthetic
+selects moderate inverse boxes, whereas Winnebago increasingly selects the
+global eigenpair limit as $N$ grows.  These transitions generate the frozen
+family-specific configurations used by the revised
+\path{family_scale_10m_300m},
+\path{family_robustness_at_selected_target}, and
+\path{family_kernel_at_30m} notebook profiles.  The original full candidate
+CSV remains the source for verifying every alternative box, rank, iteration
+count, timing component, and accuracy value.
+
+\subsection{Legacy EFGP scale-map settings}
+
+\Cref{tab:common-experiment-parameters} collects the common parameters and the
+two Fourier setup routes. The six training sizes are used for both the
+synthetic and USGS tasks. The kernels differ in Fourier dimension because the
+same Fourier approximation tolerance is applied to different spectral
+densities.
+
+\begin{table}[H]
+\centering
+\small
+\caption{Settings used in the archived exploratory scale map.}
+\label{tab:common-experiment-parameters}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Quantity & Value \tabularnewline
+\midrule
+Training sizes \(N\) & \(10^6,3\times10^6,10^7,3\times10^7,10^8,3\times10^8\) \tabularnewline
+Kernel variance & \(1\) \tabularnewline
+Lengthscale \(\ell\) & \(0.1\) \tabularnewline
+Regularization \(\lambda\) & \(0.1\) \tabularnewline
+Fourier approximation tolerance & \(10^{-5}\) \tabularnewline
+NUFFT tolerance & \(10^{-10}\) \tabularnewline
+Fourier setup routes & direct (baseline); first-order binned (candidates) \tabularnewline
+Relative residual tolerance & \(10^{-7}\) \tabularnewline
+Maximum CG iterations & \(80000\) (baseline), \(3000\) (preconditioned) \tabularnewline
+Fourier dimensions & \(1225\) (SE), \(35721\) (Mat\'ern-\(3/2\)) \tabularnewline
+Device & NVIDIA A100-SXM4-40GB \tabularnewline
+\bottomrule
+\end{tabular}
+\end{table}
+
+The relative residual is \(\|b-A\betavec_t\|_2/\|b\|_2\). A run is marked
+converged only when this value reaches the tolerance before the iteration
+limit. For the synthetic task, the data seeds are 20260421 (training) and 1
+(test), and the noise-free test set has \(N/4\) points. The USGS test set is
+the fixed held-out portion described in \cref{subsec:exp-setup}. All methods
+within a row use the same training and test data. Synthetic training targets
+use Gaussian noise with standard deviation \(0.3\).
+
+\subsection{Candidate boxes and ranks}
+
+The requested score budget \(s\) is not generally equal to \(|B|\): the
+smallest centered Cartesian box may include additional indices. The actual box
+sizes, rather than \(s\), determine memory and runtime. The values represented
+in the saved main sweep are summarized in
+\cref{tab:candidate-configurations}. Not every listed box--rank combination is
+run for every \(N\); the complete Cartesian sweep over the final three
+Mat\'ern boxes and five ranks is the one reported in
+\cref{tab:box-rank-sweep}.
+
+\begin{table}[H]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\caption{Candidate score budgets, resulting box sizes, and EigenPro ranks in
+the saved experiment bundle. Entries in braces are aligned by position.}
+\label{tab:candidate-configurations}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llll}
+\toprule
+Kernel & Operation & Requested \(s\) / observed \(|B|\) & Candidate \(q\) \\
+\midrule
+SE & inverse
+& \(\{512,1024\}/\{625,1225\}\) & -- \\
+SE & EigenPro
+& \(\{256,512,768\}/\{361,625,961\}\) & \(\{64,128\}\) \\
+Mat\'ern & inverse
+& \(\{512,728,1024,2048,4096,8192,12288\}\) & -- \\
+& & \(\{625,961,1369,2601,5329,10609,15625\}\) & \\
+Mat\'ern & EigenPro
+& \(\{2048,4096,8192,16384\}/\{2601,5329,10609,21025\}\) & \(\{192,256,320\}\) \\
+& & \(\{20480,25720,35721\}/\{25921,32761,35721\}\) & \(\{192,256,320,384,448\}\) \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+These sets explain two conventions used in the main text. First, a
+configuration is always labeled by the observed \(|B|\), because this is the
+dimension on which the operation is performed. Second, \(B=J_m\) is written as
+\(P_{\mathrm{inv}}(J_m)\) or \(P_{\mathrm{eig}}(J_m,q)\), without assigning a
+new method name.
+
+\subsection{Legacy active-box alternatives on the largest systems}
+
+\Cref{tab:matern-large-method-comparison} reports the alternatives omitted
+from the main scalability tables. A full-grid configuration is written with
+\(B=J_m\); it is not assigned another method name.
+
+\begin{table}[H]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{4pt}
+\caption{Largest Mat\'ern-\(3/2\) systems (\(M=35721\)). ``No candidate met
+the screen'' means that no tested inverse converged within 3000 iterations and
+passed the training-RMSE check. Speedup compares the recorded complete
+pipelines.}
+\label{tab:matern-large-method-comparison}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lllrrrrr}
+\toprule
+Data & \(N\) & Method & Configuration & Iter. & \(T_{\mathrm{tot}}\) & Test RMSE & Speedup \\
+\midrule
+Synthetic & \(10^8\) & EFGP-CG & -- & 8831 & 10.54 & \(2.95{\times}10^{-3}\) & 1.00 \\
+Synthetic & \(10^8\) & \(P_{\mathrm{inv}}(B)\) & \(|B|=5329\) & 187 & 1.76 & \(2.97{\times}10^{-3}\) & 6.00 \\
+Synthetic & \(10^8\) & \(P_{\mathrm{eig}}(B,q)\) & \(|B|=35721,\ q=320\) & 495 & 2.04 & \(2.97{\times}10^{-3}\) & 5.16 \\
+\addlinespace[1pt]
+Synthetic & \(3{\times}10^8\) & EFGP-CG & -- & 11494 & 15.33 & \(1.73{\times}10^{-3}\) & 1.00 \\
+Synthetic & \(3{\times}10^8\) & \(P_{\mathrm{inv}}(B)\) & \(|B|=5329\) & 246 & 2.86 & \(1.74{\times}10^{-3}\) & 5.36 \\
+Synthetic & \(3{\times}10^8\) & \(P_{\mathrm{eig}}(B,q)\) & \(|B|=35721,\ q=320\) & 643 & 3.34 & \(1.74{\times}10^{-3}\) & 4.58 \\
+\addlinespace[1pt]
+USGS & \(10^8\) & EFGP-CG & -- & 13539 & 15.46 & \(1.12{\times}10^{-1}\) & 1.00 \\
+USGS & \(10^8\) & \(P_{\mathrm{inv}}(B)\) & no candidate met the screen & -- & -- & -- & -- \\
+USGS & \(10^8\) & \(P_{\mathrm{eig}}(B,q)\) & \(|B|=35721,\ q=320\) & 264 & 1.60 & \(1.12{\times}10^{-1}\) & 9.65 \\
+\addlinespace[1pt]
+USGS & \(3{\times}10^8\) & EFGP-CG & -- & 22466 & 27.75 & \(1.11{\times}10^{-1}\) & 1.00 \\
+USGS & \(3{\times}10^8\) & \(P_{\mathrm{inv}}(B)\) & no candidate met the screen & -- & -- & -- & -- \\
+USGS & \(3{\times}10^8\) & \(P_{\mathrm{eig}}(B,q)\) & \(|B|=35721,\ q=384\) & 320 & 2.90 & \(1.11{\times}10^{-1}\) & 9.56 \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+\subsection{Row selection and timing}
+
+For each data set, kernel, and \(N\), EFGP-CG supplies the baseline training
+RMSE. A preconditioned row is eligible if it converges and its training RMSE
+is at most \(1.10\) times that baseline. Among eligible rows of a given
+operation, the row with the smallest total time is reported. Test RMSE is
+copied from that same row; it is not used to choose between candidates. When
+no row passes both conditions, the table states that no candidate met the
+screen.
+
+Four timing fields are distinguished. Fourier setup includes the spectral
+weights, Toeplitz generator, and right-hand side. The baseline rows use direct
+cuFINUFFT setup; the preconditioned rows use the first-order binned route. The
+saved label for the latter is \texttt{binned\_c1}. The
+two routes target the same prescribed Fourier modes but do not hold the
+assembled matrix and right-hand side fixed. Preconditioner construction starts after the
+setup recorded for its row. PCG time in \cref{tab:timing-breakdown}
+excludes construction, while total time includes setup, construction, and
+PCG. Prediction is measured separately and is not included in total time.
+Consequently, the reported speedup compares complete recorded pipelines. The
+matched reruns in \cref{subsec:matched-confirmation} provide the separate
+fixed-system solver comparison.
+
+The output bundle also retains the unrounded values used to compute speedup.
+Displayed times are rounded to two decimals, so recomputing a ratio from the
+printed values can differ slightly from the printed speedup. Failed runs remain
+in the raw tables and are excluded only by the stated convergence and fit
+rules.
+
+\subsection{Legacy EFGP cost breakdown}
+\label{subsec:timing-breakdown}
+
+The alternative configurations for the largest Mat\'ern systems are reported
+once, in \cref{tab:matern-large-method-comparison}. On USGS, no tested inverse
+passes the screen at \(N=10^8\) or \(3\times10^8\), whereas
+\(P_{\mathrm{eig}}(J_m,q)\) gives \(9.65\times\) and \(9.56\times\)
+complete-pipeline speedups.
+
+Iteration counts alone do not include the cost of constructing a
+preconditioner. \Cref{tab:timing-breakdown} separates the largest Mat\'ern
+runs into Fourier setup, preconditioner construction, and PCG after
+construction. It also records the two setup routes, so the faster binned setup
+is not attributed to preconditioning. The components sum to total time up to
+rounding.
+
+\begin{table}[t]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3.5pt}
+\caption{Timing breakdown in seconds for the fastest configuration in each
+largest Mat\'ern case. Binned denotes the first-order binned setup route. The
+PCG column excludes preconditioner construction.}
+\label{tab:timing-breakdown}
+\begin{tabular}{llllrrrr}
+\toprule
+Data & \(N\) & Setup route & Method & Setup & Prec. build & PCG & Total \\
+\midrule
+Synthetic & \(10^8\) & Direct & EFGP-CG & 1.00 & -- & 9.54 & 10.54 \\
+Synthetic & \(10^8\) & Binned & \(P_{\mathrm{inv}}(B)\) & 0.53 & 0.88 & 0.35 & 1.76 \\
+Synthetic & \(3{\times}10^8\) & Direct & EFGP-CG & 2.99 & -- & 12.34 & 15.33 \\
+Synthetic & \(3{\times}10^8\) & Binned & \(P_{\mathrm{inv}}(B)\) & 1.53 & 0.88 & 0.46 & 2.86 \\
+\addlinespace[1pt]
+USGS & \(10^8\) & Direct & EFGP-CG & 1.02 & -- & 14.44 & 15.46 \\
+USGS & \(10^8\) & Binned & \(P_{\mathrm{eig}}(J_m,320)\) & 0.51 & 0.60 & 0.49 & 1.60 \\
+USGS & \(3{\times}10^8\) & Direct & EFGP-CG & 3.43 & -- & 24.32 & 27.75 \\
+USGS & \(3{\times}10^8\) & Binned & \(P_{\mathrm{eig}}(J_m,384)\) & 1.55 & 0.74 & 0.61 & 2.90 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+For the selected inverse, construction is more expensive than the subsequent
+PCG solve, but their sum is much smaller than the solve time of the recorded
+baseline. The same statement holds for the EigenPro rows. At
+\(N=3\times10^8\), the binned setup is about \(54\%\) of each selected
+total. Even if construction and PCG took no time, leaving that setup unchanged
+could improve the selected totals by only about \(1.9\times\). Further gains
+must therefore reduce setup as well as iterations. The table also shows why
+candidates are selected by total time rather than iteration count. Dividing
+the solve times by their iteration counts shows that PCG costs about
+\(1.7\)--\(1.8\) times as much per step, but the saved iteration reduction is
+much larger than the one-time build cost expressed in baseline steps.
+
+\subsection{Legacy active-box size and EigenPro rank}
+\label{subsec:box-rank-sweep}
+
+\Cref{tab:box-rank-sweep} reports all 15 configurations in the detailed USGS
+Mat\'ern sweep at \(N=3\times10^8\). The actual box size is reported after
+enclosing the selected Fourier indices; it may exceed the requested top-\(s\)
+budget. All converged rows have test RMSE between \(0.11058\) and \(0.11059\),
+so this comparison is determined by computation rather than prediction error.
+
+\begin{table}[H]
+\centering
+\caption{Total time in seconds / PCG iterations for
+\(P_{\mathrm{eig}}(B,q)\) on USGS with \(N=3\times10^8\) and \(M=35721\).
+The dagger marks a run that did not reach tolerance within 3000 iterations.}
+\label{tab:box-rank-sweep}
+\begin{tabular}{rccccc}
+\toprule
+\(|B|\backslash q\) & 192 & 256 & 320 & 384 & 448 \\
+\midrule
+25921 & \(7.05/3000^\dagger\) & \(8.92/3000^\dagger\) & \(6.99/2783\) & \(6.36/2232\) & \(5.95/1905\) \\
+32761 & \(7.12/3000^\dagger\) & \(7.53/3000^\dagger\) & \(6.81/2557\) & \(5.92/1946\) & \(5.64/1639\) \\
+35721 & \(3.29/794\) & \(3.01/541\) & \(2.91/408\) & \(\mathbf{2.90/320}\) & \(2.99/272\) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+For either smaller box, increasing \(q\) reduces the iteration count, yet even
+\(q=448\) is slower than the full box with \(q=192\). On the full grid,
+increasing \(q\) from 192 to 448 reduces the iterations from 794 to 272, but
+total time is lowest at \(q=384\). Thus box size and rank are not
+interchangeable, and the rank giving the fewest iterations need not give the
+lowest time. The two fastest rows come from single runs, so their small
+difference does not establish a universal best rank.
+
+\subsection{Stage 2 fixed-system timing protocol}
+
+For every controlled case, the Fourier weights, Toeplitz generator, right-hand
+side, and regularization are constructed once and fingerprinted with SHA-256.
+The fingerprint is checked again after all methods finish.  The reported
+method set is CG, Jacobi, and the proposed full-grid, active-inverse, and
+active-eigenpair family members, as applicable to the grid size.  The method order is reshuffled in
+every repetition and the eigensolver seed is fixed.  A timing repetition
+reruns score-box selection for every active method, verifies that its frozen
+box hash, rule, and effective rank are unchanged, rebuilds the method-specific
+preconditioner, starts from zero, solves, synchronizes the GPU at every timing
+boundary, and then recomputes the true residual in complex128.  A row is
+eligible only if all claimed repetitions satisfy the \(10^{-7}\) tolerance.
+
+The formal target loads the exact \(N=3\times10^7\), noise-0.3 Synthetic
+artifact used in Stage~1.  The default active box has
+\(|B|=10609\) and rank 320.  Method configurations are transferred from the
+prior sweep and frozen before formal timing; no measured repetition tunes a
+box, rank, or method.  CG, Jacobi, the default, active EigenPro, the full-grid
+spectral family member, and active inverse are all executed.
+
+The common Fourier construction is excluded from the primary solver total
+because it is shared by all methods.  The compared total is active-set
+selection plus preconditioner construction plus solve; for CG it is the solve
+alone.  The formal reporter recomputes this sum and convergence from
+repeat-level files.  It verifies equal initial, final, and per-repeat system
+fingerprints, the timing-system SHA-256, the embedded canonical configuration
+hash, and the component hashes of the weights, Toeplitz generator, and both
+right-hand-side representations.  It also checks the common tolerance,
+iteration limit, and zero initial vector before emitting
+\cref{tab:fixed-system-formal}.  The formal run passes these checks with system
+identifier \texttt{12c0a9811168\ldots}; older build-plus-solve artifacts that
+omit selection time are not used for that table.
+
+\subsection{Manitowoc provenance, capacity, and reproduction}
+\label{subsec:manitowoc-reproduction}
+
+NOAA identifies the independent source as the 641-square-mile Manitowoc work
+unit 300411 and links its official USGS EPT endpoint.  It also records that EPT
+conversion changes the horizontal CRS to EPSG:3857 without changing NAVD88
+GEOID18 elevations \cite{noaa_wi2county_2023}.  The USGS project report gives
+the native EPSG:6345 horizontal CRS, EPSG:5703 vertical CRS, and 2023
+collection dates \cite{usgs_wi2county_project_report}.  The work-unit report
+gives a mean classification-2 density of 11.37 points m\(^{-2}\)
+\cite{usgs_wi2county_manitowoc_report}.
+
+The frozen bounding square is centered at \((437100,4884400)\) m in
+EPSG:6345 and has side 52000 m.  It contains the entire conforming work-unit
+extent.  The preprocessor first uses EPT node bounds only as a coarse filter,
+then transforms every candidate point and applies the exact square test.  It
+keeps finite class-2 rows, assigns a stable source identifier from the node
+rank and point ordinal, and applies SplitMix64 modulo five (residue zero is
+test).  An independent hash orders rows within each EPT depth; shallower
+additive levels precede deeper levels.  The train/test split is target-blind,
+disjoint, and without replacement.  Both coordinates share the fixed 52-km
+scale, while a target center and scale fitted on the first one million rows of
+the canonical training order are reused at every size and future depth.  The
+sidecars verify exact nested 100k, 1M, and 10M prefixes and 2.5 million test
+rows for the largest artifact.
+
+The EPT header reports 24,781,638,330 source points across all classes.  The
+exact scan through LOD 6 yields 40,787,587 training-bucket and 10,197,897
+test-bucket class-2 points.  The official area and mean-ground-density figures
+give a planning estimate of 18,876,273,646 ground points, or
+15,101,018,917 training-bucket points after the fixed 80/20 split.  This
+estimate motivates a streamed route to a 300M/75M artifact, but it is not an
+exact deep-level count.  No 300M artifact and no 300M solver run are reported;
+both require a deeper exact scan, and the present resident-array solver cannot
+load that task on its 4-GB GPU.
+
+Dataset support was not chosen in a blind held-out evaluation.  A first pilot
+used a fixed 8-km square in the separate Buffalo work unit
+\path{WI_2County_2_B23}.  On its \(N=10^7\) matched system, CG takes 5374
+iterations and 10.972 seconds, while the default takes 1717 iterations and
+5.863 seconds, a \(1.9109\times\) paired median speedup; the full-grid family member is
+faster.  That pilot prompted the move to full-work-unit support before
+Manitowoc was screened.  We therefore retain the Buffalo result only here as a
+negative geometry pilot and classify Manitowoc as exploratory despite its
+independent acquisition.
+
+From the repository root, the checked preprocessing command is:
+
+\begingroup\scriptsize
+\begin{verbatim}
+PRE=efgp_eigenpro_py.gpu.benchmark_dataset.preprocess_usgs_ept_wi_2county
+EPT=https://s3-us-west-2.amazonaws.com/usgs-lidar-public
+PREFIX=USGS_EPT_WI_2County_1_B23
+python -m "$PRE" \
+  --ept-json "$EPT/WI_2County_1_B23/ept.json" \
+  --n-train-list 100000,1000000,10000000 \
+  --aoi-center-x 437100 --aoi-center-y 4884400 --aoi-side-m 52000 \
+  --aoi-crs EPSG:6345 --max-lod-depth 6 \
+  --source-project WI_2County_1_B23 \
+  --official-mean-ground-density 11.37 \
+  --official-work-unit-area-km2 1660.1823787253759 \
+  --dataset-stem-prefix "${PREFIX}_full_workunit_ground_elevation"
+\end{verbatim}
+\endgroup
+
+The matched timing and separate prediction audit are reproduced by:
+
+\begingroup\scriptsize
+\begin{verbatim}
+CTL=efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled
+STEM=${PREFIX}_full_workunit_ground_elevation_n10000000
+OUT=efgp_eigenpro_py/gpu/box_toeplitz_active_block/controlled/outputs
+RUN=${OUT}/integrated_manitowoc_n10000000_matern_q256_primary
+python -m "$CTL.benchmark" \
+  --dataset-stem "$STEM" \
+  --n-train 0 --kernel matern --lengthscale 0.1 --nu 1.5 \
+  --variance 1 --lambda 0.1 --fourier-eps 1e-5 --nufft-tol 1e-10 \
+  --tol 1e-7 --maxiter 6000 --precision fp64 \
+  --methods cg,jacobi,default,full-eig \
+  --score-tau 1 --box-budget 8192 --inverse-max-size 1024 \
+  --rank 256 \
+  --eig-tol 1e-3 --eig-maxiter 1280 --warmup-repeats 1 \
+  --measured-repeats 5 --method-order-seed 20260823 \
+  --eig-seed 0 \
+  --nufft-backend none --precompute-chunk-size 1000000 \
+  --post-diagnostic-mode cheap --strict-gpu-eig \
+  --output-dir "$RUN"
+
+python -m "$CTL.prediction_audit" \
+  --config "$RUN/experiment_config.json" \
+  --prediction-chunk-size 100000 --warmup-solves 1 \
+  --output-dir "$RUN/prediction_audit"
+\end{verbatim}
+\endgroup
+
+\subsection{Fixed-system bridge to legacy configurations}
+
+\Cref{tab:matched-q128-bridge} revisits the archived rank and box sizes without
+choosing the fastest row after timing.  The Mat\'ern columns form the rank-128
+configuration bridge and use \(|B|=2601\).  The SE columns are a separate
+matched full-inverse control: their score threshold gives \(|B|=841\), and
+they also add the archived full grid \(|J_m|=1225\).  Full inversion is not
+formed for the Mat\'ern grid with \(M=35721\).  Every displayed method
+converges in all five measured repetitions.
+
+\begin{table}[H]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{2.6pt}
+\caption{Matched archived-configuration bridge. Each entry is median
+iterations / old-runner construction-plus-solve seconds / paired speedup over
+CG; active-method score selection is not included.  Entries in different
+columns are separate fixed-system cases and are not combined.}
+\label{tab:matched-q128-bridge}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccc}
+\toprule
+Method & Synthetic Mat\'ern & USGS Mat\'ern & Synthetic SE & USGS SE \\
+\midrule
+CG
+& \(4246/8.657/1.000\) & \(4905/10.158/1.000\)
+& \(2054/3.279/1.000\) & \(1528/2.458/1.000\) \\
+Jacobi
+& \(1716/4.125/2.111\) & \(8447/20.509/0.497\)
+& \(1724/3.262/0.996\) & \(12039/23.711/0.103\) \\
+\(P_{\mathrm{inv}}(B)\)
+& \(169/2.514/3.464\) & \(1180/5.667/1.793\)
+& \(6/0.159/20.677\) & \(12/0.162/15.069\) \\
+\(P_{\mathrm{inv}}(J_m)\)
+& -- & --
+& \(1/0.289/11.356\) & \(1/0.314/7.853\) \\
+\(P_{\mathrm{eig}}(B,128)\)
+& \(733/2.465/3.522\) & \(1488/4.622/2.198\)
+& \(156/0.705/4.643\) & \(12/0.373/6.630\) \\
+\(P_{\mathrm{eig}}(J_m,128)\)
+& \(704/3.144/2.754\) & \(303/1.846/5.528\)
+& \(106/0.586/5.600\) & \(3/0.359/6.803\) \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+For SE, full-grid inversion reduces PCG to one iteration, but its median build
+cost is 0.285 seconds on Synthetic and 0.310 seconds on USGS.  The active
+inverse builds in 0.144 and 0.135 seconds, respectively, and is therefore
+\(1.82\times\) and \(1.94\times\) faster in cold time than the full inverse.
+This directly demonstrates why the archived fastest-row rule cannot be
+replaced by iteration count alone.
+
+\subsection{Untimed prediction audit}
+
+The controlled prediction audit is deliberately separate from the timing
+repetitions.  It rebuilds one system per data set, solves every reported
+Stage~2 method against that shared system, rechecks the fingerprint, loads the same held-out
+test artifact, and evaluates the prescribed Fourier predictor in chunks of
+100000 points.  Coefficients are transferred to the GPU once per method.
+Neither the audit solve nor prediction time enters a speedup.  The audit CSV
+records the system hash, independently recomputed residual, test RMSE, RMSE
+ratio and difference relative to CG, prediction time, test size, and chunk
+size.

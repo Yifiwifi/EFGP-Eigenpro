@@ -1,0 +1,541 @@
+\section{Active-Box Preconditioners}
+\label{sec:main-algorithms}
+We partition the Fourier system in \cref{eq:fourier-system} into the box
+\(B\) selected in \cref{subsec:active-box-selection} and its complement
+\(T=J_m\setminus B\). The method treats these two parts differently: it uses
+a more accurate operation on \(A_{BB}\), retains only diagonal scaling on
+\(T\), and leaves products with the full matrix \(A\) unchanged.
+
+
+% General idea； explain: we want P \approx A^{-1}, but only correct active Fourier modes.
+
+% We now construct preconditioners for the EFGP weight-space system \eqref{eq:A-DGD}
+% \[
+%     A\betavec=b,
+%     \qquad
+%     A=DGD+\lambda\I_M.
+% \]
+% The active score
+% \[
+%     \rho_j=\frac{N|D_{j,j}|^2}{\lambda}
+% \]
+% introduced in Section~\ref{sec:background} identifies Fourier modes whose
+% diagonal signal level is large relative to the regularization scale. Given an
+% active set \(S\), we use a centered Cartesian box \(B\supseteq S\) to preserve
+% the Toeplitz structure of the restricted Fourier grid, and denote its complement
+% by
+% \[
+%     T=J_m\setminus B.
+% \]
+
+% The role of the active box should be understood as a continuum rather than as a fixed small-set assumption. When the ill-conditioned part of \(A\) is concentrated in a small Fourier region, a small active box is enough and an inverse active-block solve can be very effective. As \(N\) increases, or as the effective regularization becomes smaller, more Fourier modes may become important and the useful active box can expand. In the limiting case \(B=J_m\), the inverse active-block variant becomes a full dense inverse of the EFGP weight-space matrix, while the EigenPro-type active-box variant becomes a
+% full-grid EigenPro-style spectral preconditioner. Thus the proposed methods are
+% best viewed as structured intermediate regimes between diagonal scaling,
+% small-block correction, and full spectral preconditioning.
+
+\subsection{Block-diagonal form}
+\label{subsec:block-diagonal-active-preconditioner}
+% Control B and S ;
+
+Let \(P_B\) approximate \(A_{BB}^{-1}\). We use
+\[
+    P
+    =
+    \begin{bmatrix}
+        P_B & 0 \\
+        0 & \Delta_T^{-1}
+    \end{bmatrix},
+    \qquad
+    \Delta_T=\diag(A_{TT}),
+    \qquad
+    (\Delta_T)_{j,j}=N |D_{j,j}|^2+\lambda,
+    \quad j\in T.
+\]
+For a residual \(r=(r_B,r_T)\), this means
+\(Pr=(P_Br_B,\Delta_T^{-1}r_T)\).
+Constructing and applying \(\Delta_T^{-1}\) each cost \(O(|T|)\). The
+remaining cost depends on \(P_B\).
+
+
+
+\subsection{Spectral bound}
+\label{subsec:spectral-error-decomposition}
+
+The preconditioner depends on its accuracy on \(A_{BB}\), the error of
+diagonal scaling on \(T\), and the coupling between \(B\) and \(T\).
+\Cref{prop:active-block-precond} bounds their combined effect.
+
+\begin{proposition}[Active-box spectral bound]
+\label{prop:active-block-precond}
+Let \(A\in\mathbb C^{M\times M}\) be Hermitian positive definite, let
+\(B\subseteq J_m\), and let \(T=J_m\setminus B\). Let
+\(\Delta_T=\diag(A_{TT})\), \(P_B\succ0\), and
+\(P=\diag(P_B,\Delta_T^{-1})\).
+Define
+\begin{align*}
+ \mu_B^-&=\lambda_{\min}(P_B^{1/2}A_{BB}P_B^{1/2}),
+ &
+ \mu_B^+&=\lambda_{\max}(P_B^{1/2}A_{BB}P_B^{1/2}),\\
+ \delta_T&=
+ \|\Delta_T^{-1/2}A_{TT}\Delta_T^{-1/2}-I_T\|_2,
+ &
+ \gamma_{BT}&=
+ \|P_B^{1/2}A_{BT}\Delta_T^{-1/2}\|_2.
+\end{align*}
+Every eigenvalue \(\xi\) of \(P^{1/2}AP^{1/2}\) satisfies the first line
+below. If \(\min(\mu_B^-,1-\delta_T)>\gamma_{BT}\), its condition number also
+satisfies the second line:
+\begin{equation}
+\begin{aligned}
+\min(\mu_B^-,1-\delta_T)-\gamma_{BT}
+&\leq \xi \leq
+\max(\mu_B^+,1+\delta_T)+\gamma_{BT},\\
+\kappa(P^{1/2}AP^{1/2})
+&\leq
+\frac{\max(\mu_B^+,1+\delta_T)+\gamma_{BT}}
+{\min(\mu_B^-,1-\delta_T)-\gamma_{BT}}.
+\end{aligned}
+\label{eq:active-box-bound}
+\end{equation}
+
+\end{proposition}
+
+\begin{corollary}[Bounds for the Fourier system]
+\label{cor:fourier-system-bounds}
+Let \(B\supseteq S_\tau\) and \(T=J_m\setminus B\). Then
+\begin{equation}
+\begin{aligned}
+\delta_T
+&\le
+\frac{\tau}{1+\tau}
+\left\|
+\frac{G_{TT}}{N}-I_T
+\right\|_2,
+\\
+\gamma_{BT}
+&\le
+\sqrt{\frac{\tau}{1+\tau}}\,
+\left\|\sqrt{N}P_B^{1/2}D_B\right\|_2
+\left\|\frac{G_{BT}}{N}\right\|_2.
+\end{aligned}
+\label{eq:fourier-system-bounds}
+\end{equation}
+\end{corollary}
+
+The normalized blocks of \(G\) depend on the sampling design rather than on
+the kernel spectrum directly. The next result separates their population and
+finite-sample contributions, conditional on a fixed Fourier grid.
+
+\begin{proposition}[Population Fourier Gram matrix]
+\label{prop:fourier-gram-population}
+Assume that \(x_1,\ldots,x_N\) are independent and identically distributed.
+For \(r\in J_{2m}\), define
+\begin{equation}
+    \psi(r)
+    =\mathbb E\!\left[e^{2\pi i h\langle r,x_1\rangle}\right],
+    \qquad
+    H=\mathbb E\!\left[\frac{G}{N}\right].
+    \label{eq:input-fourier-coefficient}
+\end{equation}
+Then, for \(j,\ell\in J_m\),
+\begin{equation}
+    H_{j,\ell}=\psi(\ell-j),
+    \qquad
+    \mathbb E\left|\frac{g_r}{N}-\psi(r)\right|^2
+    =\frac{1-|\psi(r)|^2}{N}\leq\frac1N.
+    \label{eq:population-fourier-gram}
+\end{equation}
+
+If \(x_n\sim\mathcal N(\mu,\Sigma)\) with
+\(\Sigma\succeq\sigma_x^2I_d\) for some \(\sigma_x>0\), then
+\begin{equation}
+    \psi(r)
+    =\exp\!\left(
+        2\pi i h\langle r,\mu\rangle
+        -2\pi^2h^2r^\top\Sigma r
+    \right).
+    \label{eq:gaussian-input-fourier-coefficient}
+\end{equation}
+Let
+\begin{equation}
+    a=2\pi^2h^2\sigma_x^2,
+    \qquad
+    \eta_d(a)=\sum_{r\in\mathbb Z^d\setminus\{0\}}e^{-a\|r\|_2^2}.
+    \label{eq:gaussian-population-correlation}
+\end{equation}
+For every partition \(J_m=B\mathbin{\dot\cup}T\),
+\begin{equation}
+    \|H_{TT}-I_T\|_2\leq\eta_d(a),
+    \qquad
+    \|H_{BT}\|_2\leq\eta_d(a),
+    \label{eq:gaussian-population-block-bounds}
+\end{equation}
+where the explicit lattice-sum bound
+\begin{equation}
+    \eta_d(a)
+    \leq
+    \left[1+\left(2+\frac1a\right)e^{-a}\right]^d-1
+    \label{eq:gaussian-lattice-sum-bound}
+\end{equation}
+holds. Finally, for a fixed finite Fourier grid,
+\begin{equation}
+    \left\|\frac{G}{N}-H\right\|_2\longrightarrow0
+    \qquad\text{almost surely as }N\to\infty.
+    \label{eq:fourier-gram-convergence}
+\end{equation}
+\end{proposition}
+
+\begin{remark}[Uniform inputs]
+\label{rem:uniform-input-fourier-gram}
+For the synthetic design \(x_n\sim\operatorname{Unif}([0,1]^d)\),
+\begin{equation}
+    \psi(r)
+    =\prod_{s=1}^d e^{\pi i h r_s}\operatorname{sinc}(hr_s),
+    \qquad
+    \operatorname{sinc}(u)=\frac{\sin(\pi u)}{\pi u},
+    \quad \operatorname{sinc}(0)=1.
+    \label{eq:uniform-input-fourier-coefficient}
+\end{equation}
+In particular, \(h=1\) gives \(H=I_M\). For the kernel-dependent value of
+\(h\) used in an EFGP grid, \cref{eq:uniform-input-fourier-coefficient}
+instead gives the exact population matrix. Thus the uniform synthetic
+experiment does not require a Gaussian-input assumption.
+\end{remark}
+
+\begin{corollary}[Population and sampling contributions]
+\label{cor:input-distribution-active-box}
+Under the assumptions of \cref{prop:fourier-gram-population}, define
+\begin{equation}
+    \varepsilon_{TT}
+    =\left\|\frac{G_{TT}}{N}-H_{TT}\right\|_2,
+    \qquad
+    \varepsilon_{BT}
+    =\left\|\frac{G_{BT}}{N}-H_{BT}\right\|_2.
+    \label{eq:gram-sampling-errors}
+\end{equation}
+If \(B\supseteq S_\tau\), then
+\begin{align}
+    \delta_T
+    &\leq
+    \frac{\tau}{1+\tau}
+    \left(\|H_{TT}-I_T\|_2+\varepsilon_{TT}\right),
+    \label{eq:distribution-tail-bound}\\
+    \gamma_{BT}
+    &\leq
+    \sqrt{\frac{\tau}{1+\tau}}\,
+    \left\|\sqrt N P_B^{1/2}D_B\right\|_2
+    \left(\|H_{BT}\|_2+\varepsilon_{BT}\right).
+    \label{eq:distribution-coupling-bound}
+\end{align}
+For Gaussian inputs, each population norm on the right is at most
+\(\eta_d(a)\). For a fixed grid and a fixed partition, both sampling errors
+converge almost surely to zero. This last statement concerns sampling error;
+it does not assert a fixed-box limit when the threshold box itself changes
+with \(N\).
+\end{corollary}
+
+\begin{remark}[What the spectral bound establishes]
+\label{rem:three-term-interpretation}
+\Cref{prop:active-block-precond} is a decomposition rather than a
+condition-number guarantee from the score alone. The interval
+\([\mu_B^-,\mu_B^+]\) measures the remaining error in the active-box
+operation, \(\delta_T\) measures the error of diagonal scaling on the
+complement, and \(\gamma_{BT}\) measures the active--tail coupling omitted by
+the block-diagonal preconditioner.
+
+The threshold enters the bound for \(\delta_T\) through
+\(\tau/(1+\tau)\) and the bound for \(\gamma_{BT}\) through its square root,
+but it does not by itself control the normalized blocks of \(G\).
+\Cref{prop:fourier-gram-population} shows that these blocks contain a
+population correlation determined by the input distribution and a
+finite-sample error. The latter vanishes for a fixed grid as \(N\) grows,
+whereas the population term need not.
+
+For nested boxes, increasing \(B\) cannot increase the induced threshold
+\(\tau_B\). It does not necessarily make the unweighted matrix
+\(G_{TT}/N-I_T\) small, because neighboring Fourier indices can remain in
+\(T\). Consequently, the score supplies a cheap candidate box, while
+\(\mu_B^-\), \(\delta_T\), and \(\gamma_{BT}\) describe whether that
+candidate gives an effective preconditioner. Measured construction and solve
+costs then determine which effective candidate is practical.
+\end{remark}
+
+The next two subsections specify the two choices of \(P_B\).
+
+\subsection{Inverse on the active box}
+\label{subsec:inverse-based-preconditioner}
+For a sufficiently small active box, set \(P_B=A_{BB}^{-1}\). The full
+preconditioner is
+\[
+    P_{\mathrm{inv}}(B)
+    =
+    \begin{bmatrix}
+        A_{BB}^{-1} & 0\\
+        0 & \Delta_T^{-1}
+    \end{bmatrix}.
+\]
+Here \(P_B^{1/2}A_{BB}P_B^{1/2}=I_B\), so
+\cref{prop:active-block-precond} has \(\mu_B^-=\mu_B^+=1\). If
+\(B=J_m\), this is the inverse of the full Fourier system; diagonal scaling on
+\(T\) then disappears. This limiting case is useful when the Fourier grid is
+small, but it does not change the definition of the method.
+
+\noindent
+The block \(A_{BB}=D_BG_{BB}D_B+\lambda I_B\) is obtained from the
+precomputed Toeplitz generator. Assembly and inversion cost
+\(O(|B|^2+|B|^3)\), and each application costs \(O(|B|^2)\). Thus this choice
+is practical only when the box is moderate. Its advantage is that no rank must
+be chosen and the box contribution to the bound is exact.
+The reported implementation forms \(A_{BB}^{-1}\) from a Cholesky
+factorization; this construction is included in the preconditioner build time.
+
+
+\subsection{Leading-eigenpair correction on the active box}
+\label{subsec:eigenpro-active-box-preconditioner}
+
+For a larger active box, let the eigenvalues of \(A_{BB}\) be
+\(\theta_1\geq\cdots\geq\theta_{|B|}>0\), and let \(U_q\) contain
+eigenvectors for the first \(q\). Then
+\[
+    A_{BB}U_q = U_q\Theta_q,
+    \qquad
+    U_q^*U_q=I_q,
+    \qquad
+    \Theta_q=\diag(\theta_1,\ldots,\theta_q),
+\]
+Following the EigenPro spectral preconditioner
+\cite{ma2017eigenpro,abedsoltan2023toward}, define
+\[
+    P_{\mathrm{eig}}(B,q)
+    =
+    \begin{bmatrix}
+        \theta_{q+1}^{-1}I_B
+        -U_q(\theta_{q+1}^{-1}I_q-\Theta_q^{-1})U_q^*
+        & 0\\
+        0 & \Delta_T^{-1}
+    \end{bmatrix}.
+\]
+The analysis uses exact eigenpairs; the implementation substitutes the
+eigensolver outputs in the same formula.
+
+In the exact case, \cref{prop:active-block-precond} has
+\(\mu_B^-=\theta_{|B|}/\theta_{q+1}\) and \(\mu_B^+=1\). Thus the leading
+\(q\) eigenvalues on the box become one, while smaller eigenvalues are scaled
+uniformly. This correction is weaker than inversion on the same box, but its
+storage and application costs grow linearly rather than quadratically in
+\(|B|\). For \(B=J_m\), this is \(P_{\mathrm{eig}}(J_m,q)\).
+
+\noindent
+For Cartesian \(B\), a product with \(A_{BB}\) costs
+\(O(|B|\log|B|)\); details are given in
+\cref{subsec:active-box-local-operators}.
+%If the Krylov eigensolver, such as ARPACK \cite{lehoucq1998arpack} \cite{virtanen2020scipy},
+If the eigensolver uses \(n_{\mathrm{eig}}\) such products, they cost
+\(O(n_{\mathrm{eig}}|B|\log|B|)\), and orthogonalization costs
+\(O(|B|q^2)\). Each application costs
+\(O(|B|q)\). The rank \(q\) must therefore be large enough to save CG
+iterations but small enough that repeated applications remain inexpensive.
+
+
+
+% \subsection{EigenPro-Type Preconditioner}
+% \label{subsec:eigenpro-active-box-preconditioner}
+% When the useful active region becomes large, an inverse active-block solve may be too expensive in both time and memory. This can happen when \(N\) is large or the regularization is small, so that the EFGP weight-space system becomes more ill-conditioned and the slow directions are no longer captured by a small Fourier box. In this regime we keep the active-box idea, but replace the inverse by a low-rank spectral correction inside \(B\). The resulting preconditioner is EigenPro-type\cite{ma2017eigenpro,abedsoltan2023toward}: it corrects the leading eigendirections of the active-box matrix while leaving the remaining directions scaled by a cheaper baseline level.
+
+% This construction should be viewed as a scalable fallback rather than as a separate competing trick. For moderate \(B\), it gives a compressed correction on a Toeplitz-preserving active box. If \(B\) expands to the full Fourier grid \(J_m\), it becomes a full-grid EigenPro-style spectral preconditioner applied
+% to the EFGP weight-space system\cite{ma2017eigenpro}.
+
+% Let
+% \begin{equation}
+%     A_{BB}U_q=U_q\Lambda_q,
+%     \qquad
+%     U_q^*U_q=I_q,
+%     \qquad
+%     \Lambda_q=\diag(\theta_1,\ldots,\theta_q),
+%     \label{eq:box-leading-eigenpairs}
+% \end{equation}
+% where \(\theta_1\ge\cdots\ge\theta_{q+1}\) are the leading eigenvalues of \(A_{BB}\). Instead of
+% using \(A_{BB}^{-1}\), we define
+% \begin{equation}
+%     P_B^{\mathrm{eig}}
+%     =
+%     \theta_{q+1}^{-1}I_B
+%     -
+%     U_q\left(\theta_{q+1}^{-1}I_q-\Lambda_q^{-1}\right)U_q^*.
+%     \label{eq:eigenpro-box-precond}
+% \end{equation}
+% The corresponding block preconditioner is
+% \begin{equation}
+%     P_{\mathrm{eig}}
+%     =
+%     \begin{bmatrix}
+%         P_B^{\mathrm{eig}} & 0\\
+%         0 & \diag(A_{TT})^{-1}
+%     \end{bmatrix}.
+%     \label{eq:eigenpro-block-precond}
+% \end{equation}
+% Thus the leading box eigendirections are deflated directly. In the ideal case where the eigenpairs in \eqref{eq:box-leading-eigenpairs} are exact, the
+% eigenvalues of \(P_B^{\mathrm{eig}}A_{BB}\) are
+% \begin{equation}
+%     1,\ldots,1,
+%     \frac{\theta_{q+1}}{\theta_{q+1}},
+%     \ldots,
+%     \frac{\theta_{|B|}}{\theta_{q+1}}.
+%     \label{eq:eigenpro-box-spectrum}
+% \end{equation}
+% Hence the largest \(q\) eigenvalues are flattened to one, \(\spec(K_B)\subset [ \frac{\theta_{|B|}}{\theta_{q+1}},1]\). This again fits Proposition~\ref{prop:active-block-precond}. For a fixed active box \(B\), this correction is weaker than the inverse active-block solve because only the leading \(q\) directions are inverted accurately. Its advantage is that \(B\) can be much larger: the method may therefore outperform a small inverse active block when the difficult spectrum is spread over a larger Fourier region.
+
+% \paragraph{Construction Cost}
+% The leading eigenpairs can be computed by a Krylov eigensolver such as the implicitly restarted Lanczos method implemented in ARPACK
+% \cite{lehoucq1998arpack}, for example through
+% \texttt{scipy.sparse.linalg.eigsh} \cite{virtanen2020scipy}. Since \(B\) is chosen as a Cartesian frequency box, the matrix-vector product of
+% \begin{equation}
+%     A_{BB}=D_B G_{BB}D_B+\lambda I_B
+%     \label{eq:ABB-eig-matvec}
+% \end{equation}
+% can still exploit the Toeplitz structure of \(G_{BB}\), with the cost \( O\!\left(|B|\log |B|\right)\) per matvec computation. Therefore, if \(n_{\mathrm{eig}}\) matrix-vector products are used in the eigensolver, the construction cost is approximately
+% \begin{equation}
+%     T_{\mathrm{build}}(P_{\mathrm{eig}})
+%     =
+%     O\!\left(n_{\mathrm{eig}}\,|B|\log |B|\right)
+%     +
+%     O(|B|q^2)
+%     +
+%     O(|T|),
+%     \label{eq:eigenpro-precond-build-cost}
+% \end{equation}
+% where the first term comes from Toeplitz-FFT matrix-vector products, the second term comes from small dense operations and orthogonalization in the eigensolver, and the last term forms the tail diagonal.
+
+% \paragraph{Application Cost}
+
+% For each PCG iteration, applying \(P_{\mathrm{eig}}\) to a residual \(r=(r_B,r_T)\) costs
+% \begin{equation}
+%     T_{\mathrm{apply}}(P_{\mathrm{eig}})
+%     =
+%     O(|B|q)+O(|T|).
+%     \label{eq:eigenpro-precond-apply-cost}
+% \end{equation}
+% The memory cost is also reduced from \(O(|B|^2)\) for storing a dense inverse to \(O(|B|q)\) for storing the leading eigenvectors. Therefore this variant trades weaker preconditioning for cheaper applications and lower memory, making it more suitable when the active box is too large for direct inverse computation.
+\FloatBarrier
+
+% \begin{algorithm}[t]
+% \caption{Build active-block preconditioner}
+% \label{alg:build-active-block-preconditioner}
+% \begin{algorithmic}[1]
+% \Require EFGP weights \(D\), Toeplitz generator for \(G\), regularization \(\lambda\),
+% active rule, block mode
+% \State Compute scores \(\rho_j=N|D_{j,j}|^2/\lambda\)
+% \State Select active set \(S\) and active box \(B\supseteq S\)
+% \State Set \(T=J_m\setminus B\) and \(\Lambda_T=\diag(A_{TT})\)
+% \If{inverse active-block solve}
+%     \State Form \(A_{BB}=D_BG_{BB}D_B+\lambda I_B\)
+%     \State Compute the inverse matrix of \(A_{BB}\)
+% \ElsIf{EigenPro-type active-box correction}
+%     \State Estimate the leading \(q+1\) eigenvalues/eigenvectors of \(A_{BB}\)
+%     \State Form the low-rank correction \(P_B^{\mathrm{eig}}\)
+% \EndIf
+% \State Return the preconditioner \(P=\diag(P_B,\Lambda_T^{-1})\)
+% \end{algorithmic}
+% \end{algorithm}
+
+%The exact active-block solve provides the strongest local flattening but has cubic build cost and quadratic application cost in \(|B|\). The EigenPro-type correction replaces this dense inverse by a rank-\(q\) spectral flattening, reducing the application and memory costs to \(O(|B|q)\). Therefore, the exact variant is preferable when the difficult directions are localized in a compact box, whereas the EigenPro-type variant is preferable when a substantially larger box is needed.
+
+\subsection{Algorithm and complexity}
+\label{subsec:algorithm-cost-summary}
+
+The applicable correction depends on box size. If a candidate box is small
+enough that its cubic construction and quadratic application costs are minor,
+the inverse is preferable because it removes the box contribution exactly. If
+an effective box is too large for inversion, \(P_{\mathrm{eig}}(B,q)\) permits
+the same box to be used at rank \(q\). Increasing \(q\) strengthens the correction but
+also increases construction, storage, and every PCG iteration.
+
+The endpoints are included in the same rule. When \(B=J_m\), the inverse is a
+full inverse and the other endpoint is \(P_{\mathrm{eig}}(J_m,q)\). When \(B\)
+is a strict subset, both choices use the same diagonal scaling on \(T\). Thus
+only two decisions are required: the box size and, for \(P_{\mathrm{eig}}\),
+the rank. The experiments compare
+a finite set of these choices by total time rather than by iteration count
+alone.
+
+This comparison can be written directly in timing terms. Let \(t_A\) be the
+average time for one product with \(A\), let \(t_P\) be the time for one
+preconditioner application, and let \(C_P\) be its construction time. If CG
+uses \(n_0\) iterations and PCG uses \(n_P\), then the preconditioner reduces
+iteration-related time when
+\[
+    C_P+n_P(t_A+t_P)<n_0t_A,
+\]
+when setup is shared by both solves. A configuration can therefore
+have the smallest iteration count and still lose in total time. Conversely, a
+moderate correction can be useful even when it leaves a larger condition
+number, provided that its construction and application are cheap.
+
+\begin{proposition}[Validity for PCG]
+\label{prop:preconditioners-positive}
+If \(A\) is Hermitian positive definite and \(0\leq q<|B|\), then
+\(P_{\mathrm{inv}}(B)\) and \(P_{\mathrm{eig}}(B,q)\) are Hermitian positive
+definite. Hence both may be used in PCG.
+\end{proposition}
+
+The result follows from the positive eigenvalues of the active operation and
+the positive diagonal on \(T\); a proof is given in \cref{app:proof-positive}.
+
+\begin{algorithm}[H]
+\caption{Construct the active-box preconditioner}
+\label{alg:build-active-box-precond}
+\begin{algorithmic}[1]
+\Require \(D,G,\lambda\), budget \(s\) or threshold \(\tau\), and choice
+\(\mathrm{inv}\) or \(\mathrm{eig}\)
+\State Compute \(\rho_j=N|D_{jj}|^2/\lambda\) and select \(S\).
+\State Let \(B\) be the smallest centered Cartesian box containing \(S\),
+and set \(T=J_m\setminus B\).
+\State Set \(\Delta_T=\diag(A_{TT})\).
+\If{choice is \(\mathrm{inv}\)}
+    \State Set \(P_B=A_{BB}^{-1}\).
+\Else
+    \State Estimate the leading \(q+1\) eigenvalues and the leading \(q\)
+    eigenvectors of \(A_{BB}\).
+    \State Set \(P_B\) to the active block of \(P_{\mathrm{eig}}(B,q)\) defined in
+    \cref{subsec:eigenpro-active-box-preconditioner}.
+\EndIf
+\State Return \(P=\diag(P_B,\Delta_T^{-1})\).
+\end{algorithmic}
+\end{algorithm}
+
+Let \(n_{\mathrm{eig}}\) be the number of products with \(A_{BB}\),
+\(n_{\mathrm{CG}}\) the number of CG iterations, and \(Q\) the number of
+prediction targets. \Cref{tab:complexity} gives the full cost.
+\Cref{app:algorithms-implementation} gives the PCG and end-to-end algorithms.
+
+\begin{table}[H]
+\centering
+\caption{Asymptotic costs. Preconditioner costs include diagonal scaling on
+\(T\).}
+\label{tab:complexity}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccc}
+\toprule
+Operation & Build cost & Apply or solve cost & Memory \\
+\midrule
+Fourier setup & \(O(N+M\log M)\) & -- & \(O(M)\) \\
+Product with \(A\) & -- & \(O(M\log M)\) & \(O(M)\) \\
+\(P_{\mathrm{inv}}(B)\)
+& \(O(M+|B|^3)\) & \(O(M+|B|^2)\) & \(O(M+|B|^2)\) \\
+\(P_{\mathrm{eig}}(B,q)\)
+& \(O(M+n_{\mathrm{eig}}|B|\log|B|+|B|q^2)\)
+& \(O(M+|B|q)\) & \(O(M+|B|q)\) \\
+CG with \(P_{\mathrm{inv}}(B)\) & --
+& \(O(n_{\mathrm{CG}}(M\log M+M+|B|^2))\)
+& \(O(M+|B|^2)\) \\
+CG with \(P_{\mathrm{eig}}(B,q)\) & --
+& \(O(n_{\mathrm{CG}}(M\log M+M+|B|q))\)
+& \(O(M+|B|q)\) \\
+Prediction at \(Q\) targets & -- & \(O(Q+M\log M)\) & \(O(M)\) \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+
+% ======================================================================

@@ -1,0 +1,64 @@
+\begin{abstract}
+Kernel ridge regression with \(N\) samples usually requires a dense
+\(N\)-dimensional solve. For low-dimensional translation-invariant kernels, an
+equispaced Fourier expansion gives a fixed \(M\)-dimensional system with
+\(M\ll N\) and \(O(M\log M)\) matrix-vector products. Weak regularization can
+still make this system ill-conditioned. We identify Fourier modes whose
+diagonal kernel contribution is large relative to regularization and enclose
+them in a Cartesian box. Inside the box, the preconditioner uses either the
+inverse of the corresponding submatrix or a rank-\(q\) correction based on its
+leading eigenpairs; outside the box, it uses diagonal scaling. A
+condition-number bound separates the box correction, the diagonal
+approximation on the complement, and the coupling between them.  We evaluate
+the complete binned EFGP pipeline against EFGP-CG on Synthetic and Winnebago
+with \(N=10^7\)--\(3\times10^8\).  We report two proposed branches rather
+than one automatic route: the fastest active inverse and the fastest
+active-box EigenPro result, with full-grid EigenPro included as the latter's
+limit.  Synthetic favors the inverse branch, giving
+\(5.36\)--\(8.52\times\) complete-pipeline speedup; Winnebago favors the
+eigenpair branch, giving \(5.42\)--\(9.65\times\), with test accuracy shown
+beside every time.  At \(N=3\times10^8\), total time falls from \(15.328\) to
+\(2.862\) seconds on Synthetic and from \(27.748\) to \(2.901\) seconds on
+Winnebago.  We additionally report Nystr\"om KRR, RPCholesky KRR,
+EFGP+Jacobi, and the full-grid extreme of our spectral family without hiding
+their raw speed--accuracy tradeoffs.  Box/rank, data-set, and kernel studies
+show that the preferred branch changes with construction cost and data
+geometry.  Finally, a controlled
+experiment gives every solver the same hashed \(A\betavec=\bvec\).  Including
+active-set selection, preconditioner construction, and solve, the frozen
+default takes \(1.481\) seconds versus \(6.525\) seconds for CG, a
+\(4.42\times\) paired-median speedup.  The full-grid family member takes
+\(1.276\) seconds, a \(5.13\times\) speedup, demonstrating the high-budget
+limit of the same spectral-preconditioning principle.
+
+
+
+
+
+% Kernel ridge regression (KRR) with $N$ training samples requires solving an
+% $N$-dimensional linear system. When applied with dense kernel matrix-vector products, a standard
+% conjugate-gradient (CG) solver costs\(O(N^2 t_{\mathrm{iter}})\). Equispaced Fourier Gaussian process regression (EFGP) reduces this
+% cost for low-dimensional translation-invariant kernels by converting the
+% function-space system into an $M$-dimensional Fourier weight-space system, with
+% $M \ll N$. By exploiting the Toeplitz structure of the weight-space matrix and
+% FFT/NUFFT-based computations, EFGP applies each matrix-vector product in
+% $O(M\log M)$ time, with per-iteration cost independent of $N$. However, in
+% ill-conditioned regimes, especially under weak regularization, the resulting
+% weight-space system may still require tens of thousands of CG
+% iterations.
+
+% The proposed method scores Fourier modes by their diagonal
+% signal-to-regularization ratio, selects a high-power active set or active box,
+% treats the active block either by an exact active-block solve or by an
+% EigenPro-type spectral correction, and approximates the remaining tail by its
+% diagonal. The active box is allowed to grow with the difficulty of the problem:
+% in small Fourier systems it may become a full-grid exact preconditioner, while
+% in large ill-conditioned systems the EigenPro-type variant becomes a full-grid
+% spectral correction. On large Mat\'ern experiments with \(N=10^8\), the best
+% selected preconditioners achieve a \(6.00\times\) speedup on synthetic data and
+% a \(9.65\times\) speedup on USGS ground-elevation regression over
+% unpreconditioned EFGP-CG, while maintaining comparable prediction accuracy.
+
+\end{abstract}
+
+%The approach is most effective for low-dimensional translation-invariant kernels whose ill-conditioned component is concentrated in a small set of Fourier modes. Its benefit may decrease when the dominant eigenspace is poorly aligned with Fourier coordinates or when the active block required for effective preconditioning becomes too large.

@@ -24,6 +24,7 @@ from typing import Any, Iterable, Sequence
 from .end_to_end import (
     DATASET_PROVENANCE_CONFIG_FIELDS,
     END_TO_END_METHODS,
+    FAMILY_END_TO_END_METHODS,
     STAGE2_SYSTEM_CONFIG_FIELDS,
     TIMING_SCOPE,
     EndToEndConfig,
@@ -47,6 +48,15 @@ FROZEN_METHOD_CONFIG_FROM_SUMMARY = {
     "box_budget": "box_budget",
     "parameter_selection_policy": "parameter_selection_policy",
     "parameter_source": "parameter_source",
+    "inverse_active_topk": "configured_inverse_active_topk",
+    "inverse_expected_active_box_size": (
+        "configured_inverse_expected_active_box_size"
+    ),
+    "active_eig_topk": "configured_active_eig_topk",
+    "active_eig_expected_active_box_size": (
+        "configured_active_eig_expected_active_box_size"
+    ),
+    "active_eig_rank": "configured_active_eig_rank",
 }
 BUDGET_ADAPTIVE_PARAMETER_POLICY = "budget_adaptive_score_rule"
 BUDGET_ADAPTIVE_PARAMETER_SOURCE = (
@@ -95,6 +105,22 @@ def build_profile_plan(
         profile_payload = suite["profiles"][str(profile)]
     except KeyError as exc:
         raise KeyError(f"unknown end-to-end profile {profile!r}") from exc
+    if "source_profile" in profile_payload:
+        source_name = str(profile_payload["source_profile"])
+        try:
+            source_payload = suite["profiles"][source_name]
+        except KeyError as exc:
+            raise KeyError(
+                f"profile {profile!r} references unknown source_profile {source_name!r}"
+            ) from exc
+        profile_payload = {
+            **source_payload,
+            **{key: value for key, value in profile_payload.items() if key != "source_profile"},
+            "overrides": {
+                **source_payload.get("overrides", {}),
+                **profile_payload.get("overrides", {}),
+            },
+        }
     if "cases" not in profile_payload:
         raise ValueError(
             f"profile {profile!r} is a template profile, not a runnable case list."
@@ -414,6 +440,63 @@ def materialize_robustness_plan(
             "config": _normalize_config(merged),
         }
     return list(unique.values())
+
+
+def materialize_family_robustness_plan(
+    suite: dict[str, Any],
+    target: dict[str, Any],
+    *,
+    dataset_dir: str,
+    output_root: str | Path,
+) -> list[dict[str, Any]]:
+    """Mirror the frozen OAT design with explicit proposed-family routes.
+
+    This is a reporting protocol, not another parameter scan.  The inverse
+    and eigenpair top-k/rank values are transferred from the selected scale
+    case.  A changed kernel/data geometry may shorten the same deterministic
+    score prefix only to respect the frozen capacity; the budget axis alone
+    reruns score selection under each declared budget.
+    """
+    base_plan = materialize_robustness_plan(
+        suite,
+        target,
+        dataset_dir=dataset_dir,
+        output_root=output_root,
+    )
+    family_plan: list[dict[str, Any]] = []
+    for item in base_plan:
+        cfg = item["config"]
+        axes = [str(axis) for axis in item.get("robustness_axes", [])]
+        is_budget_axis = any(axis.startswith("box_budget_") for axis in axes)
+        family_cfg = _normalize_config(
+            {
+                **asdict(cfg),
+                "methods": list(FAMILY_END_TO_END_METHODS),
+                "inverse_active_topk": (
+                    None if is_budget_axis else target.get("inverse_active_topk")
+                ),
+                "inverse_expected_active_box_size": None,
+                "active_eig_topk": (
+                    None if is_budget_axis else target.get("active_eig_topk")
+                ),
+                "active_eig_expected_active_box_size": None,
+                "active_eig_rank": target.get("active_eig_rank") or target.get("rank"),
+                "allow_frozen_topk_capacity_adaptation": True,
+                "output_dir": str(
+                    Path(output_root)
+                    / "family_robustness_at_selected_target"
+                    / item["case_id"]
+                ),
+            }
+        )
+        family_plan.append(
+            {
+                **item,
+                "profile": "family_robustness_at_selected_target",
+                "config": family_cfg,
+            }
+        )
+    return family_plan
 
 
 def _write_index(path: Path, rows: list[dict[str, Any]]) -> None:

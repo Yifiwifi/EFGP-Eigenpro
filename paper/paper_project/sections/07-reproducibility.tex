@@ -1,0 +1,39 @@
+\section{Code and Reproducibility}
+\label{sec:reproducibility}
+
+Code and experiment scripts are available at
+\url{https://github.com/Yifiwifi/EFGP-Eigenpro}.  The repository records the
+software dependencies, random seeds, data splits, solver tolerances, timing
+scope, and tested configurations.  The formal one-click output bundle stores
+repeat-level rows together with reporter-generated summaries, so the paper
+tables can be regenerated without repeating the 300-million-sample runs.
+The five-repeat broad-comparison and fixed-system values in this paper use the output bundle
+\path{paper_one_click_0034442c4bc1}, generated from repository commit
+\texttt{0034442c4bc1a130880dc08241b04a21ead17c56}.
+
+\begin{sloppypar}
+The two-family values in
+\cref{tab:primary-two-family-scale,tab:two-family-parameter-variation,tab:kernel-two-family}
+come from the
+tracked original candidate/selected tables identified in
+\cref{app:archived-regime-map}.  The revised one-click notebook exports those
+rows as \path{archived_original_full_results.csv} and
+\path{archived_regime_map_two_family.csv}.  The secondary end-to-end values in
+\cref{tab:other-krr-300m} come from
+\path{stage1_end_to_end_krr/stage1_scale_summary.csv}.  The controlled values
+in \cref{tab:fixed-system-formal} come from
+\path{two_stage_formal_report/stage2_formal_solver_totals.csv}, with the shared
+construction recorded in
+\path{two_stage_formal_report/stage2_shared_ab_setup.csv}.  The corresponding
+case directory contains the immutable system manifest, matched warm-up and
+measured rows, component hashes, and independently recomputed residuals.  Its
+system identifier begins \texttt{12c0a9811168}; the manifest stores the full
+SHA-256 value.
+\end{sloppypar}
+
+Row-level metadata record the setup route, effective box size and rank,
+convergence, residual, timing components, prediction metrics, and explicit
+resource-limit outcomes.  Full numerical settings, candidate grids, hardware,
+and timing accounting are given in \cref{app:experiment-details}.  Older
+controlled outputs and acquisition pilots remain in the repository as
+supplementary provenance but do not supply the formal tables above.

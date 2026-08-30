@@ -1,0 +1,216 @@
+\section{Introduction}
+\label{sec:introduction}
+
+Kernel ridge regression (KRR) combines a flexible function class with a
+quadratic objective, but its usual data-space formulation contains a dense
+\(N\times N\) kernel matrix. A direct solve costs \(O(N^3)\) operations and
+\(O(N^2)\) memory. Conjugate gradient (CG) removes the factorization, yet a
+dense kernel matrix-vector product still costs \(O(N^2)\)
+\cite{aronszajn1950theory,kimeldorf1971some,golub2013matrix,trefethen1997numerical}.
+Large-scale KRR therefore needs both a cheaper representation of the kernel
+matrix and an iterative system that converges in relatively few steps.
+
+For low-dimensional translation-invariant kernels, an equispaced Fourier
+expansion provides the first part. It replaces the data-space system by a
+weight-space system with \(M\) Fourier coefficients, where \(M\ll N\) in the
+problems considered here. The coefficient matrix has the form
+\(A=DGD+\lambda I_M\): \(D\) contains spectral weights and \(G\) is multilevel
+Toeplitz. The data enter only through one-time type-1 nonuniform fast Fourier
+transform (NUFFT) computations of the Toeplitz generator and right-hand side.
+After \(O(N+M\log M)\) setup, a product with \(A\) costs
+\(O(M\log M)\), with no direct dependence on \(N\) for fixed \(M\),
+\cite{greengard2025efgp,barnett2024uniform}. This separation is especially
+useful when the number of observations is much larger than the Fourier grid.
+
+The Fourier approximation and the iterative solution address different
+errors. The grid spacing and width determine the finite feature space and the
+approximation to the kernel, whereas the residual tolerance determines how
+accurately the resulting linear system is solved. Enlarging the grid may
+improve the kernel approximation, but it also increases \(M\) and the cost of
+each product. A preconditioner instead leaves the exact solution of the fixed
+Fourier-discretized system unchanged and changes the work needed to reach the
+residual tolerance.  Our algorithmic contribution addresses this second cost.
+The empirical comparison is broader and keeps the model-level and solver-level
+questions separate: end-to-end KRR pipelines are compared with their own setup
+costs, whereas the mechanism study fixes the Fourier model and varies only the
+solver.
+
+The low-dimensional restriction is substantive. For a tensor grid with \(2m+1\)
+indices per coordinate, \(M=(2m+1)^d\), so neither the Toeplitz product nor the
+proposed box removes exponential growth with dimension \(d\). The intended
+regime is small \(d\), very large \(N\), and a Fourier grid that fits in memory.
+
+A fast matrix-vector product does not by itself give a fast solve. When the
+regularization parameter \(\lambda\) is small, the eigenvalues of \(A\) may
+span many orders of magnitude, and CG may take thousands of iterations. Each
+iteration remains inexpensive, but their accumulated cost can dominate both
+Fourier setup and prediction. The computational question studied here is
+therefore narrow: how can the Fourier system be preconditioned without
+discarding its fast Toeplitz product?
+
+The diagonal structure of \(D\) gives a useful starting point. Fourier index
+\(j\) contributes \(N|D_{jj}|^2\) to the diagonal of the unregularized system.
+The ratio \(\rho_j=N|D_{jj}|^2/\lambda\) compares that contribution with the
+ridge term. A large ratio means that the unregularized diagonal contribution is
+not dominated by regularization, so the coordinate is worth treating
+accurately. This is only a selection rule:
+off-diagonal entries of \(G\) still couple the coordinates, so the ratio by
+itself does not prove that the remaining system is well conditioned.
+
+We select the largest-ratio Fourier indices and enclose them in a Cartesian
+box \(B\). The box has two practical roles. First, it gives a contiguous
+subgrid whose matrix \(A_{BB}\) can be obtained from the already computed
+Toeplitz data. Second, it leaves the complement available for inexpensive
+diagonal scaling. On \(B\), we use either the inverse of \(A_{BB}\) or a
+rank-\(q\) correction built from its leading eigenpairs. The latter is the
+spectral preconditioner used by EigenPro; here it is used inside PCG, without
+EigenPro's Richardson or stochastic training iteration. We denote the two
+choices by \(P_{\mathrm{inv}}(B)\) and \(P_{\mathrm{eig}}(B,q)\). The inverse
+gives the stronger correction when \(|B|\) is moderate, whereas
+\(P_{\mathrm{eig}}(B,q)\) can treat a larger box at limited rank. Taking
+\(B=J_m\) gives the corresponding full-grid cases, not separate methods.
+
+The analysis makes explicit what this selection rule can and cannot ensure.
+The condition-number bound separates three effects: the accuracy of the
+operation on \(A_{BB}\), the error of diagonal scaling on the complement, and
+the coupling between the two blocks. The ratio \(\rho_j\) helps control which
+coordinates remain outside the box, but the last two effects still depend on
+the Toeplitz matrix generated by the sample locations. This separation links
+the proof directly to the algorithm and explains why a larger box may reduce
+the iteration count while increasing total time.
+
+\subsection{Related work}
+\label{subsec:related-work}
+
+Bochner's theorem gives a spectral representation for a stationary
+positive-definite kernel
+\cite{bochner1933monotone,wendland2004scattered}. Random Fourier features draw
+frequencies from this density and obtain a finite feature model
+\cite{rahimi2007random}. The construction used here instead evaluates the
+spectrum on an equispaced grid. This deterministic grid supports a controlled
+Fourier approximation and makes \(G\) Toeplitz
+\cite{greengard2025efgp,barnett2024uniform}. The present work leaves this
+Fourier approximation fixed and addresses the conditioning of its weight-space
+solve.
+
+At the linear-solver level, diagonal (Jacobi) scaling is the simplest
+preconditioner for a positive-definite system \cite{saad2003iterative}.
+For positive-definite Toeplitz systems, circulant preconditioners have
+long been combined with conjugate gradients and FFT-based matrix-vector
+products \cite{chan1989toeplitz}. Chan also proposed an optimal
+circulant approximation in the Frobenius norm
+\cite{chan1988optimal}. These results do not apply directly to our
+system: although \(G\) is Toeplitz, the Fourier KRR matrix
+\[
+    A = DGD + \lambda I
+\]
+is generally not Toeplitz because \(D\) is nonconstant. Our
+preconditioner instead preserves the fast Toeplitz product with \(G\)
+while using the Fourier weights in \(D\) to identify the coordinates
+that receive a stronger correction.
+
+
+Another line of work reduces the model dimension through Nystr\"om
+columns or inducing locations \cite{williams2001nystrom,titsias2009variational}.
+KISS-GP places a regular interpolation grid in input space
+\cite{wilson2015kissgp}; the grid here instead lies in frequency space.
+FALKON combines a sampled model with a preconditioned iterative solve
+\cite{rudi2017falkon,meanti2020kernelroof}. Randomized Nystr\"om, sketching,
+and Cholesky constructions have also been used to precondition kernel
+systems \cite{avron2017faster,frangella2023randomized,
+chen2022rpcholesky,diaz2023robust}. In particular, Nystr\"om
+approximations can reduce the cost of spectral preconditioning while
+retaining much of its effect \cite{abedsoltan2024nystrom}.
+
+These methods typically construct data-space or inducing-point
+preconditioners from sampled kernel columns or sketches.  In the end-to-end
+comparison, Nystr\"om KRR and RPCholesky KRR are therefore treated as complete
+data-space KRR pipelines, including their own sampling, construction, and
+solve costs.  Our active-box construction instead starts after the
+equispaced-Fourier model has been fixed. The resulting system has dimension
+\(M\), and its Toeplitz generator is already available after Fourier setup.
+The active-box preconditioner therefore uses information already present in
+the Fourier system and requires no additional pass over the \(N\) training
+samples.  Fourier-system adaptations of Nystr\"om or RPCholesky are not used as
+the main end-to-end KRR baselines.
+
+The location of the selected information changes the available computation.
+A data-space column corresponds to a sample location and requires kernel
+values against the data. Here a Cartesian frequency box gives a principal
+block that can be assembled from the Toeplitz generator after Fourier setup,
+without another pass over the \(N\) samples. Its subsequent costs depend on
+\(|B|\), not directly on \(N\). The price is that the score uses only
+\(D\), \(N\), and \(\lambda\); it cannot see the off-diagonal entries of
+the sample-dependent matrix \(G\). The box is therefore a cheap proposal,
+not a substitute for data-dependent spectral information. The bound retains
+the missing coupling terms, and the experiments test a small set of boxes.
+
+EigenPro introduced a spectral preconditioner that reduces the largest
+eigenvalues through a correction based on leading eigenvectors
+\cite{ma2017eigenpro,ma2019eigenpro,abedsoltan2023toward}.
+Recent work has reduced the cost of this spectral information using
+Nystr\"om approximations \cite{abedsoltan2024nystrom}, while EigenPro4
+reduces the projection overhead of large kernel models through delayed
+projections \cite{abedsoltan2025delayed}. These methods address spectral
+preconditioning and projection in general kernel training. Our
+\(P_{\mathrm{eig}}(B,q)\) restricts the spectral correction to a fixed Fourier
+submatrix. This changes its storage and application cost from \(O(Mq)\) to
+\(O(|B|q)\); when \(B=J_m\), it gives the corresponding full-grid correction.
+
+
+Standard preconditioning theory explains CG through the spectrum of the
+preconditioned matrix \cite{hestenes1952methods,saad2003iterative}. A small
+condition number is not sufficient for lower wall time: the setup and repeated
+application of the preconditioner must also be cheaper than the iterations they
+save.  Stage~1 therefore charges every KRR pipeline for its own setup and solve.
+Stage~2 holds \(A\) and \(\bvec\) identical, reports the shared Fourier setup
+separately, and compares solver totals consisting of score selection (when
+applicable), preconditioner construction, and CG/PCG.
+
+\subsection{Contributions}
+\label{subsec:main-contributions}
+
+The main contributions are as follows.
+\begin{enumerate}
+    \item We distinguish a regularization-aware score threshold from a
+    top-\(s\) selection budget. Exact threshold radii show polylogarithmic
+    active-box growth for the squared exponential spectrum and algebraic
+    growth for the Mat\'ern spectrum before the finite grid saturates.
+
+    \item We combine \(P_{\mathrm{inv}}(B)\) or
+    \(P_{\mathrm{eig}}(B,q)\) with diagonal scaling outside the box. A
+    spectral bound separates the box correction, the diagonal approximation,
+    and the interaction between them. A population Fourier-Gram formula
+    further separates input-distribution correlations from finite-sample error
+    in the last two terms.
+
+    \item We specify a two-stage evaluation that does not mix model setup with
+    solver effects.  Stage~1 first compares EFGP-CG with explicit inverse and
+    active-box EigenPro branches---including the full-grid eigenpair limit---
+    over \(10^7\) to \(3\times10^8\) samples.  Box/rank, data-set, and kernel
+    changes use the same two-family reporting rule.  Data-space Nystr\"om,
+    data-space RPCholesky, and EFGP+Jacobi then provide a secondary complete-KRR
+    reference, with method-specific setup and solve accounting and explicit
+    time--accuracy reporting.  Stage~2
+    fixes \(A\) and \(\bvec\), uses paired repeated timing, and compares CG,
+    Jacobi and the proposed full-grid, active-inverse, and active-eigenpair
+    family members by
+    total time including score selection, preconditioner construction, and
+    solve.
+\end{enumerate}
+
+\Cref{sec:background} derives the Fourier system and its fast product.
+\Cref{sec:main-algorithms} gives the two preconditioners, their spectral bound,
+and their costs. \Cref{sec:experiments} reports the timing and accuracy results,
+and \cref{sec:discussion} states the practical limits. Proofs and full
+algorithms are in the appendices.
+
+\subsection{Notation}
+\label{subsec:notation}
+
+The symbol \((\cdot)^*\) denotes conjugate transpose, and \(\|\cdot\|_2\)
+denotes the Euclidean or spectral norm. For an index set \(B\), \(A_{BB}\)
+is the principal submatrix indexed by \(B\). For a Hermitian positive-definite
+matrix \(A\), its condition number is
+\(\kappa(A)=\lambda_{\max}(A)/\lambda_{\min}(A)\), and
+\(\|v\|_A=(v^*Av)^{1/2}\).

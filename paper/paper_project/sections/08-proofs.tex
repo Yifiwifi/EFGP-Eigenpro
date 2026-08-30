@@ -1,0 +1,221 @@
+\section{Proofs}
+\label{app:proofs}
+
+\subsection{Proof of the threshold-box growth result}
+
+\begin{proof}
+By \cref{eq:score-spectrum-form}, the threshold condition is
+\begin{equation}
+    \widehat k(hj)>\frac{\tau\lambda}{Nh^d}.
+    \label{eq:threshold-spectrum-condition-proof}
+\end{equation}
+For the squared exponential kernel,
+\[
+    \widehat k_{\mathrm{SE}}(\xi)
+    =(\sqrt{2\pi}\ell)^d
+    \exp\!\left(-2\pi^2\ell^2\|\xi\|_2^2\right).
+\]
+Substitution in \cref{eq:threshold-spectrum-condition-proof} gives
+\[
+    2\pi^2\ell^2h^2\|j\|_2^2
+    <\log\!\left(
+        \frac{Nh^d(\sqrt{2\pi}\ell)^d}{\tau\lambda}
+    \right).
+\]
+If the logarithm is nonpositive, the strict inequality has no solution;
+otherwise it is equivalent to
+\cref{eq:se-active-radius,eq:se-active-ball}.
+
+For the Mat\'ern kernel, \cref{eq:matern-spectrum-active-box} turns
+\cref{eq:threshold-spectrum-condition-proof} into
+\[
+    2\nu+4\pi^2\ell^2h^2\|j\|_2^2
+    <\left(
+        \frac{Nh^dc_{\nu,d,\ell}}{\tau\lambda}
+    \right)^{1/(\nu+d/2)}.
+\]
+Using \(1/(\nu+d/2)=2/(2\nu+d)\), and again observing that a
+nonpositive squared radius gives an empty strict-threshold set, proves
+\cref{eq:matern-active-radius,eq:matern-active-ball}.
+
+Both nonempty threshold sets are discrete Euclidean balls intersected with
+\(J_m\). Every selected index therefore satisfies
+\(\|j\|_\infty\leq\|j\|_2<R_\tau\). Since \(b_\tau\) is an integer,
+\[
+    b_\tau\leq\min\{m,\lceil R_\tau\rceil-1\},
+\]
+which proves \cref{eq:threshold-box-cardinality}. If \(R_\tau>m\), every
+axis index \(\pm m e_s\), \(s=1,\ldots,d\), is selected, so the smallest
+centered box is \(J_m\). The fixed-grid growth laws follow directly from the
+two exact radii before this truncation occurs.
+\end{proof}
+
+\subsection{Proof of the active-box spectral bound}
+
+\begin{proof}
+Write
+\[
+P^{1/2}AP^{1/2}
+=
+\begin{bmatrix}
+P_B^{1/2}A_{BB}P_B^{1/2}
+&P_B^{1/2}A_{BT}\Delta_T^{-1/2}\\
+\Delta_T^{-1/2}A_{TB}P_B^{1/2}
+&\Delta_T^{-1/2}A_{TT}\Delta_T^{-1/2}
+\end{bmatrix}.
+\]
+The eigenvalues of its block-diagonal part lie in
+\([\min(\mu_B^-,1-\delta_T),
+\max(\mu_B^+,1+\delta_T)]\). The remaining Hermitian matrix is
+\[
+\begin{bmatrix}
+0&P_B^{1/2}A_{BT}\Delta_T^{-1/2}\\
+\Delta_T^{-1/2}A_{TB}P_B^{1/2}&0
+\end{bmatrix},
+\]
+and its spectral norm is \(\gamma_{BT}\). Weyl's inequality gives the first
+line of \cref{eq:active-box-bound}. If the stated lower endpoint is positive,
+dividing the upper eigenvalue bound by the lower one gives the second line.
+\end{proof}
+
+\subsection{Proof of the first Fourier-system bound}
+
+Since \(G_{j,j}=N\), we have \(\Delta_T=ND_T^2+\lambda I_T\). Hence
+\begin{align*}
+\Delta_T^{-1/2}A_{TT}\Delta_T^{-1/2}-I_T
+&=
+\Delta_T^{-1/2}D_T(G_{TT}-NI_T)D_T\Delta_T^{-1/2}\\
+&=
+W_T\left(\frac{G_{TT}}{N}-I_T\right)W_T,
+\end{align*}
+where \(W_T=\sqrt N\,\Delta_T^{-1/2}D_T\). Its diagonal entries satisfy
+\((W_T)_{j,j}^2=\rho_j/(1+\rho_j)\). If \(B\supseteq S_\tau\), then
+\(\rho_j\leq\tau\) on \(T\), and therefore
+\[
+\delta_T
+\leq \|W_T\|_2^2
+\left\|\frac{G_{TT}}{N}-I_T\right\|_2
+\leq
+\frac{\tau}{1+\tau}
+\left\|\frac{G_{TT}}{N}-I_T\right\|_2.
+\]
+This is the first bound in \cref{eq:fourier-system-bounds}.
+
+\subsection{Proof of the second Fourier-system bound}
+
+The ridge term has no off-diagonal block, so
+\(A_{BT}=D_BG_{BT}D_T\). Thus
+\begin{align*}
+\gamma_{BT}
+&=
+\left\|P_B^{1/2}D_BG_{BT}D_T\Delta_T^{-1/2}\right\|_2\\
+&\leq
+\left\|\sqrt N\,P_B^{1/2}D_B\right\|_2
+\left\|\frac{G_{BT}}{N}\right\|_2
+\left\|\sqrt N\,D_T\Delta_T^{-1/2}\right\|_2.
+\end{align*}
+The last factor is at most \(\sqrt{\tau/(1+\tau)}\) by the preceding
+calculation. This is the second bound in \cref{eq:fourier-system-bounds}.
+
+\subsection{Proof of the population Fourier Gram results}
+
+\begin{proof}
+The definition of \(G\) gives
+\[
+    \frac{G_{j,\ell}}{N}
+    =\frac1N\sum_{n=1}^N
+    e^{2\pi i h\langle\ell-j,x_n\rangle}.
+\]
+Taking expectations proves \(H_{j,\ell}=\psi(\ell-j)\). For fixed \(r\),
+let \(Z_n(r)=e^{2\pi i h\langle r,x_n\rangle}\). Independence,
+\(|Z_n(r)|=1\), and \(\mathbb EZ_n(r)=\psi(r)\) give
+\[
+    \mathbb E\left|
+        \frac1N\sum_{n=1}^NZ_n(r)-\psi(r)
+    \right|^2
+    =\frac1N\mathbb E|Z_1(r)-\psi(r)|^2
+    =\frac{1-|\psi(r)|^2}{N}.
+\]
+
+For a Gaussian input, its characteristic function gives
+\cref{eq:gaussian-input-fourier-coefficient}. The covariance lower bound
+implies
+\[
+    |\psi(r)|
+    \leq e^{-a\|r\|_2^2},
+    \qquad a=2\pi^2h^2\sigma_x^2.
+\]
+The diagonal of \(H\) is one. For each \(j\in T\), distinct indices obey
+\[
+    \sum_{\substack{\ell\in T\\\ell\ne j}}|H_{j,\ell}|
+    \leq\sum_{r\in\mathbb Z^d\setminus\{0\}}e^{-a\|r\|_2^2}
+    =\eta_d(a).
+\]
+The Hermitian row-sum bound proves the first inequality in
+\cref{eq:gaussian-population-block-bounds}. Every row sum and every column
+sum of the rectangular block \(H_{BT}\) is bounded by the same punctured
+lattice sum, so
+\[
+    \|H_{BT}\|_2
+    \leq\sqrt{\|H_{BT}\|_1\|H_{BT}\|_\infty}
+    \leq\eta_d(a).
+\]
+
+The lattice sum factorizes as
+\[
+    1+\eta_d(a)
+    =\left(1+2\sum_{q=1}^\infty e^{-aq^2}\right)^d.
+\]
+Because \(e^{-ax^2}\) decreases on \([1,\infty)\),
+\[
+    \sum_{q=1}^\infty e^{-aq^2}
+    \leq e^{-a}+\int_1^\infty e^{-ax^2}\,dx
+    \leq e^{-a}+\int_1^\infty xe^{-ax^2}\,dx
+    =e^{-a}\left(1+\frac1{2a}\right).
+\]
+This proves \cref{eq:gaussian-lattice-sum-bound}.
+
+The strong law applied to the real and imaginary parts of each generator
+coefficient gives \(g_r/N\to\psi(r)\) almost surely. The set \(J_{2m}\) is
+finite, so all coefficients converge simultaneously almost surely. Entrywise
+convergence then implies \cref{eq:fourier-gram-convergence} because the matrix
+dimension is fixed. Integrating the characteristic exponential over the
+product-uniform density on \([0,1]^d\) also gives
+\cref{eq:uniform-input-fourier-coefficient}.
+\end{proof}
+
+\begin{proof}[Proof of \cref{cor:input-distribution-active-box}]
+The triangle inequality gives
+\[
+    \left\|\frac{G_{TT}}N-I_T\right\|_2
+    \leq\varepsilon_{TT}+\|H_{TT}-I_T\|_2,
+    \qquad
+    \left\|\frac{G_{BT}}N\right\|_2
+    \leq\varepsilon_{BT}+\|H_{BT}\|_2.
+\]
+Substitution into \cref{eq:fourier-system-bounds} proves
+\cref{eq:distribution-tail-bound,eq:distribution-coupling-bound}. The
+Gaussian specialization follows from
+\cref{eq:gaussian-population-block-bounds}, and the convergence statement
+follows by restriction of \cref{eq:fourier-gram-convergence} to fixed blocks.
+\end{proof}
+
+\subsection{Proof of Proposition~\ref{prop:preconditioners-positive}}
+\label{app:proof-positive}
+
+\begin{proof}
+Every principal submatrix of a Hermitian positive-definite matrix is Hermitian
+positive definite. Thus \(A_{BB}^{-1}\) is positive definite. Moreover,
+\(\Delta_T=\diag(A_{TT})\) has strictly positive entries, so
+\(\Delta_T^{-1}\) is positive definite. Their block diagonal combination is
+therefore positive definite, which proves the claim for
+\(P_{\mathrm{inv}}(B)\).
+
+For \(P_{\mathrm{eig}}(B,q)\), complete \(U_q\) to a unitary eigenbasis of
+\(A_{BB}\). On the direction \(u_i\) with \(i\leq q\), the active block of
+\(P_{\mathrm{eig}}(B,q)\) has eigenvalue \(\theta_i^{-1}\). On every
+orthogonal direction it has eigenvalue \(\theta_{q+1}^{-1}\). All these
+values are positive, and the complementary block \(\Delta_T^{-1}\) is also
+positive definite. Hence \(P_{\mathrm{eig}}(B,q)\) is Hermitian positive
+definite.
+\end{proof}

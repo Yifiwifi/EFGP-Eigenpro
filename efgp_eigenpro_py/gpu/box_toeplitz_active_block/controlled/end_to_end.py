@@ -29,7 +29,7 @@ import json
 import math
 import time
 import traceback
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -54,6 +54,20 @@ END_TO_END_METHODS = (
     "efgp-standard-jacobi",
     "efgp-standard-full-eig",
     "ours-binned-default",
+)
+
+# Optional proposed-family routes used by the family-structured paper tables.
+# They are intentionally not added to ``END_TO_END_METHODS``: the six-method
+# broad KRR matrix remains a separate protocol, while the family comparison
+# runs EFGP-CG and the explicit inverse/eigenpair routes together.
+FAMILY_END_TO_END_METHODS = (
+    "efgp-standard-cg",
+    "efgp-standard-full-eig",
+    "ours-binned-inverse",
+    "ours-binned-active-eig",
+)
+ALL_END_TO_END_METHODS = tuple(
+    dict.fromkeys((*END_TO_END_METHODS, *FAMILY_END_TO_END_METHODS))
 )
 
 # Configuration carried from the selected Stage-1 KRR regime into the one
@@ -170,6 +184,14 @@ class EndToEndConfig:
     full_eig_rank: int | None = None
     active_topk: int | None = None
     expected_active_box_size: int | None = None
+    # Family-reporting routes may transfer different historical optima for
+    # the inverse and eigenpair branches.  The legacy/default fields above are
+    # kept for the deployment-route and fixed-system protocols.
+    inverse_active_topk: int | None = None
+    inverse_expected_active_box_size: int | None = None
+    active_eig_topk: int | None = None
+    active_eig_expected_active_box_size: int | None = None
+    active_eig_rank: int | None = None
     allow_frozen_topk_capacity_adaptation: bool = False
     parameter_selection_policy: str = "deployable_score_rule"
     parameter_source: str = ""
@@ -262,10 +284,10 @@ def _dtype_for_name(xp: Any, name: str) -> Any:
 
 
 def _validate_config(cfg: EndToEndConfig) -> None:
-    unknown = [method for method in cfg.methods if method not in END_TO_END_METHODS]
+    unknown = [method for method in cfg.methods if method not in ALL_END_TO_END_METHODS]
     if unknown:
         raise ValueError(
-            f"unknown end-to-end methods {unknown}; choices are {list(END_TO_END_METHODS)}"
+            f"unknown end-to-end methods {unknown}; choices are {list(ALL_END_TO_END_METHODS)}"
         )
     if not cfg.methods:
         raise ValueError("methods must be nonempty.")
@@ -283,6 +305,16 @@ def _validate_config(cfg: EndToEndConfig) -> None:
         raise ValueError("full_eig_rank must be positive or None.")
     if cfg.active_topk is not None and int(cfg.active_topk) <= 0:
         raise ValueError("active_topk must be positive or None.")
+    for field_name in (
+        "inverse_active_topk",
+        "inverse_expected_active_box_size",
+        "active_eig_topk",
+        "active_eig_expected_active_box_size",
+        "active_eig_rank",
+    ):
+        value = getattr(cfg, field_name)
+        if value is not None and int(value) <= 0:
+            raise ValueError(f"{field_name} must be positive or None.")
     if (
         cfg.expected_active_box_size is not None
         and int(cfg.expected_active_box_size) <= 0
@@ -887,32 +919,87 @@ def _run_efgp_method(
     repeat_idx: int,
     is_warmup: bool,
 ) -> dict[str, Any]:
+    effective_cfg = cfg
     if method == "efgp-standard-cg":
-        controlled_cfg = _fixed_config(cfg, ("cg",))
+        controlled_cfg = _fixed_config(effective_cfg, ("cg",))
         system = fixed_ab.prepare_shared_system(controlled_cfg, dataset_payload=dataset)
         specs, _ = fixed_ab.resolve_method_specs(system, controlled_cfg)
         spec = next(spec for spec in specs if spec.label == "cg")
         setup_route = "standard_nufft"
         setup_extra: dict[str, Any] = {}
     elif method == "efgp-standard-jacobi":
-        controlled_cfg = _fixed_config(cfg, ("cg", "jacobi"))
+        controlled_cfg = _fixed_config(effective_cfg, ("cg", "jacobi"))
         system = fixed_ab.prepare_shared_system(controlled_cfg, dataset_payload=dataset)
         specs, _ = fixed_ab.resolve_method_specs(system, controlled_cfg)
         spec = next(spec for spec in specs if spec.label == "jacobi")
         setup_route = "standard_nufft"
         setup_extra: dict[str, Any] = {}
     elif method == "efgp-standard-full-eig":
-        controlled_cfg = _fixed_config(cfg, ("cg", "full-eig"))
+        controlled_cfg = _fixed_config(effective_cfg, ("cg", "full-eig"))
         system = fixed_ab.prepare_shared_system(controlled_cfg, dataset_payload=dataset)
         specs, _ = fixed_ab.resolve_method_specs(system, controlled_cfg)
         spec = next(spec for spec in specs if spec.label == "full-eig")
         setup_route = "standard_nufft"
         setup_extra = {}
     elif method == "ours-binned-default":
-        controlled_cfg = _fixed_config(cfg, ("cg", "default"))
+        controlled_cfg = _fixed_config(effective_cfg, ("cg", "default"))
         system, setup_extra = _prepare_binned_system(controlled_cfg, dataset)
         specs, _ = fixed_ab.resolve_method_specs(system, controlled_cfg)
         spec = next(spec for spec in specs if spec.label == "default")
+        setup_route = "binned_c1"
+    elif method == "ours-binned-inverse":
+        effective_topk = (
+            cfg.inverse_active_topk
+            if cfg.inverse_active_topk is not None
+            else cfg.active_topk
+        )
+        effective_box_size = (
+            cfg.inverse_expected_active_box_size
+            if cfg.inverse_expected_active_box_size is not None
+            else cfg.expected_active_box_size
+        )
+        if (
+            effective_box_size is not None
+            and int(effective_box_size) > int(cfg.inverse_max_size)
+        ):
+            raise ValueError(
+                "ours-binned-inverse frozen box exceeds inverse_max_size: "
+                f"{effective_box_size} > {cfg.inverse_max_size}"
+            )
+        effective_cfg = replace(
+            cfg,
+            active_topk=effective_topk,
+            expected_active_box_size=effective_box_size,
+        )
+        controlled_cfg = _fixed_config(effective_cfg, ("cg", "active-inverse"))
+        system, setup_extra = _prepare_binned_system(controlled_cfg, dataset)
+        specs, _ = fixed_ab.resolve_method_specs(system, controlled_cfg)
+        spec = next(spec for spec in specs if spec.label == "active-inverse")
+        setup_route = "binned_c1"
+    elif method == "ours-binned-active-eig":
+        effective_topk = (
+            cfg.active_eig_topk
+            if cfg.active_eig_topk is not None
+            else cfg.active_topk
+        )
+        effective_box_size = (
+            cfg.active_eig_expected_active_box_size
+            if cfg.active_eig_expected_active_box_size is not None
+            else cfg.expected_active_box_size
+        )
+        effective_rank = (
+            cfg.active_eig_rank if cfg.active_eig_rank is not None else cfg.rank
+        )
+        effective_cfg = replace(
+            cfg,
+            active_topk=effective_topk,
+            expected_active_box_size=effective_box_size,
+            rank=int(effective_rank),
+        )
+        controlled_cfg = _fixed_config(effective_cfg, ("cg", "active-eig"))
+        system, setup_extra = _prepare_binned_system(controlled_cfg, dataset)
+        specs, _ = fixed_ab.resolve_method_specs(system, controlled_cfg)
+        spec = next(spec for spec in specs if spec.label == "active-eig")
         setup_route = "binned_c1"
     else:  # pragma: no cover - dispatch is validated before this helper
         raise ValueError(f"unsupported EFGP pipeline {method!r}")
@@ -972,6 +1059,18 @@ def _run_efgp_method(
         "effective_active_topk": effective_active_topk,
         "effective_active_box_size": effective_active_box_size,
         "effective_active_rank": method_row.get("rank"),
+        "reporting_family": (
+            "inverse"
+            if method == "ours-binned-inverse"
+            else (
+                "active_box_eigenpro"
+                if method in {
+                    "ours-binned-active-eig",
+                    "efgp-standard-full-eig",
+                }
+                else "comparison"
+            )
+        ),
         "capacity_adapted": "clamped_to_" in str(
             method_row.get("selection_rule", "")
         ),
@@ -1111,6 +1210,15 @@ def _base_row(
             if cfg.expected_active_box_size is None
             else int(cfg.expected_active_box_size)
         ),
+        "configured_inverse_active_topk": cfg.inverse_active_topk,
+        "configured_inverse_expected_active_box_size": (
+            cfg.inverse_expected_active_box_size
+        ),
+        "configured_active_eig_topk": cfg.active_eig_topk,
+        "configured_active_eig_expected_active_box_size": (
+            cfg.active_eig_expected_active_box_size
+        ),
+        "configured_active_eig_rank": cfg.active_eig_rank,
         "configured_allow_frozen_topk_capacity_adaptation": bool(
             cfg.allow_frozen_topk_capacity_adaptation
         ),

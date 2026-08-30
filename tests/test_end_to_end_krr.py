@@ -9,7 +9,9 @@ import numpy as np
 import pytest
 
 from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end import (
+    ALL_END_TO_END_METHODS,
     END_TO_END_METHODS,
+    FAMILY_END_TO_END_METHODS,
     PROTOCOL_FAMILY,
     STAGE2_SYSTEM_CONFIG_FIELDS,
     TIMING_SCOPE,
@@ -29,6 +31,7 @@ from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end_suite 
     build_profile_plan,
     load_suite_config,
     materialize_robustness_plan,
+    materialize_family_robustness_plan,
     require_complete_plan,
     select_target_regime,
 )
@@ -48,6 +51,27 @@ def test_protocol_methods_are_complete_krr_pipelines() -> None:
     assert "nystrom" not in END_TO_END_METHODS
     assert "rpcholesky" not in END_TO_END_METHODS
     assert EndToEndConfig().inverse_max_size == 6000
+    assert set(FAMILY_END_TO_END_METHODS) == {
+        "efgp-standard-cg",
+        "efgp-standard-full-eig",
+        "ours-binned-inverse",
+        "ours-binned-active-eig",
+    }
+    assert set(END_TO_END_METHODS).issubset(ALL_END_TO_END_METHODS)
+
+
+def test_explicit_family_route_config_is_validated() -> None:
+    cfg = EndToEndConfig(
+        methods=FAMILY_END_TO_END_METHODS,
+        inverse_active_topk=2048,
+        inverse_expected_active_box_size=2601,
+        active_eig_topk=8192,
+        active_eig_expected_active_box_size=10609,
+        active_eig_rank=320,
+    )
+    _validate_config(cfg)
+    with pytest.raises(ValueError, match="inverse_active_topk"):
+        _validate_config(EndToEndConfig(inverse_active_topk=0))
 
 
 def _synthetic_generation_dataset(noise_std: float) -> dict[str, object]:
@@ -774,6 +798,71 @@ def test_shipped_suite_freezes_archived_full_eig_and_ours_winners(
     assert suite["base"]["allow_frozen_topk_capacity_adaptation"] is False
     assert suite["stage2_fixed_ab"]["inverse_max_size"] == 16384
     assert suite["stage2_fixed_ab"]["default_inverse_max_size"] == 6000
+
+
+def test_shipped_family_profiles_separate_inverse_and_eigenpair_branches(
+    tmp_path: Path,
+) -> None:
+    suite = load_suite_config()
+    family_scale = build_profile_plan(
+        suite,
+        "family_scale_10m_300m",
+        dataset_dir=str(tmp_path / "data"),
+        output_root=tmp_path / "out",
+    )
+    assert len(family_scale) == 8
+    assert all(item["config"].methods == FAMILY_END_TO_END_METHODS for item in family_scale)
+    by_case = {item["case_id"]: item["config"] for item in family_scale}
+    assert by_case["synthetic_matern_n30m"].inverse_active_topk == 2048
+    assert by_case["synthetic_matern_n30m"].active_eig_topk == 8192
+    assert by_case["synthetic_matern_n30m"].active_eig_rank == 320
+    assert by_case["winnebago_matern_n30m"].inverse_active_topk == 512
+    assert by_case["winnebago_matern_n30m"].active_eig_topk == 35721
+    assert by_case["winnebago_matern_n30m"].active_eig_rank == 128
+
+    kernel = build_profile_plan(
+        suite,
+        "family_kernel_at_30m",
+        dataset_dir=str(tmp_path / "data"),
+        output_root=tmp_path / "out",
+    )
+    assert {(item["dataset_family"], item["config"].kernel_family) for item in kernel} == {
+        ("Synthetic", "se"),
+        ("Synthetic", "matern"),
+        ("Winnebago", "se"),
+        ("Winnebago", "matern"),
+    }
+    assert all(item["config"].methods == FAMILY_END_TO_END_METHODS for item in kernel)
+
+
+def test_family_robustness_freezes_both_family_configs(tmp_path: Path) -> None:
+    suite = load_suite_config()
+    target = select_target_regime(_target_rows(30_000_000, 4000))
+    target.update({
+        "inverse_active_topk": 2048,
+        "inverse_expected_active_box_size": 2601,
+        "active_eig_topk": 8192,
+        "active_eig_expected_active_box_size": 10609,
+        "active_eig_rank": 320,
+    })
+    plan = materialize_family_robustness_plan(
+        suite,
+        target,
+        dataset_dir=str(tmp_path / "data"),
+        output_root=tmp_path / "out",
+    )
+    assert plan
+    assert all(item["config"].methods == FAMILY_END_TO_END_METHODS for item in plan)
+    budget_rows = [
+        item for item in plan
+        if any(str(axis).startswith("box_budget_") for axis in item["robustness_axes"])
+    ]
+    frozen_rows = [item for item in plan if item not in budget_rows]
+    assert all(item["config"].inverse_active_topk is None for item in budget_rows)
+    assert all(item["config"].active_eig_topk is None for item in budget_rows)
+    assert all(item["config"].inverse_active_topk == 2048 for item in frozen_rows)
+    assert all(item["config"].active_eig_topk == 8192 for item in frozen_rows)
+    assert all(item["config"].active_eig_rank == 320 for item in plan)
 
 
 def test_robustness_uses_exact_synthetic_and_winnebago_at_selected_n(tmp_path: Path) -> None:

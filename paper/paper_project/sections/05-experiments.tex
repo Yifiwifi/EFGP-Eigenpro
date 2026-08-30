@@ -1,0 +1,670 @@
+\section{Numerical Experiments}
+\label{sec:experiments}
+
+The experiments follow the comparison hierarchy dictated by the method's
+scope.  First, we compare directly with EFGP-CG, the reference line whose
+Fourier model our method accelerates; EFGP already reports broad comparisons
+with related large-scale KRR approximations \cite{greengard2025efgp}.  We
+report the inverse and active-box EigenPro branches separately and count
+full-grid EigenPro as the limiting member of the latter.  Second, we study
+box/rank and data-set variation under this same two-family organization, then
+repeat the comparison for squared exponential and Mat\'ern kernels.  Third,
+we briefly place the best member of each proposed family beside data-space
+Nystr\"om and RPCholesky, EFGP+Jacobi, and general-purpose EigenPro baselines.
+Finally, we remove model-construction differences by giving every solver
+exactly the same hashed \(A\betavec=\bvec\).
+
+The spectral methods in these comparisons form one proposed family rather
+than mutually unrelated algorithms.  The active inverse and active-eigenpair
+routes spend a controlled budget on a score-selected Fourier box.  The
+full-grid EigenPro route is the limiting member obtained when localization is
+removed and the spectral correction is constructed on the complete Fourier
+grid.  Its stronger result is therefore evidence for the spectral
+preconditioning principle; the active default is the lower-setup,
+scalability-oriented member of the same family.
+
+The end-to-end timing unit is each method's own algorithmic setup plus solve.
+It excludes common data I/O, backend creation, host-to-device staging, and
+prediction, which is measured separately.  We report all successful
+time--accuracy outcomes rather than suppressing an algorithm because its RMSE
+differs from another method by a fixed percentage.  Fixed-system solver totals
+include active-set selection when applicable, preconditioner construction,
+and CG/PCG; their one shared Fourier construction is reported separately.
+Throughout this section, \emph{EFGP-CG} means unpreconditioned CG in the
+reference EFGP implementation of Greengard et al.\
+\cite{greengard2025efgp}.
+
+\subsection{Setup}
+\label{subsec:exp-setup}
+
+The synthetic task uses \(x_i\sim\mathrm{Unif}([0,1]^2)\) and
+\[
+f_\star(x)=\sin(2\pi x_1)+\tfrac12\cos(2\pi x_2)
++\tfrac15\sin\!\bigl(2\pi(x_1+x_2)\bigr).
+\]
+Training targets are \(y_i=f_\star(x_i)+\varepsilon_i\), where
+\(\varepsilon_i\sim\mathcal N(0,0.3^2)\).  The four exact per-size artifacts
+use the same generation procedure and seeds (20260421 for training and 1 for
+testing), so their training arrays are consistent nested prefixes.  Each file
+contains a noise-free test array of size \(N/4\); formal reporting evaluates
+the first 2.5 million test rows.  The retained original configuration sweep
+uses the same target function, noise level, and seed convention.  Its timings
+are explicitly labelled as the original regime map and are never pooled with
+the later five-repeat replay or fixed-system medians.
+
+The real-data task uses ground-class LiDAR points from the 2018 Winnebago USGS
+project \cite{usgs3dep_lpc,usgs_winnebago_2018_laz}. Horizontal coordinates
+are shifted and rescaled by a common factor and elevations are standardized
+using training-set statistics.  Exact nested train artifacts are used at all
+four sizes, and formal evaluation uses the first 2.5 million rows of the fixed
+held-out test artifact.
+
+The formal comparison uses the Mat\'ern-\(3/2\) kernel with lengthscale
+\(\ell=0.1\):
+\[
+k_{\mathrm{Mat\acute{e}rn}\text{-}3/2}(x,z)
+=\left(1+\frac{\sqrt{3}r}{\ell}\right)
+\exp\!\left(-\frac{\sqrt{3}r}{\ell}\right),
+\]
+where \(r=\|x-z\|_2\).  At Fourier-approximation tolerance \(10^{-5}\), the
+normalized support has \(M=35721\) modes
+\cite{greengard2025efgp,barnett2024uniform}.  We use unit kernel variance,
+\(\lambda=0.1\), and relative residual tolerance \(10^{-7}\).  The
+prospective broad-pipeline replay and fixed-system study run on an NVIDIA
+A100-SXM4-40GB GPU with one warm-up and five measured repetitions.  The
+original family regime map is a retained configuration sweep and is labelled
+separately rather than pooled with those medians.  Further settings and the
+older squared exponential setup are listed in
+\cref{tab:common-experiment-parameters}.
+\subsection{Primary comparison with EFGP-CG by proposed family}
+\label{subsec:end-to-end-krr}
+
+Our primary comparison does not compress the proposed method into a single
+automatic ``default'' row.  For each data set and $N$, we report three
+quantities: EFGP-CG, the fastest tested active-inverse configuration, and the
+fastest tested active-box EigenPro configuration.  The last family includes
+the full-grid limit $B=J_m$.  Thus a full-grid winner is counted as a
+success of the proposed spectral family, not as an external baseline.
+
+\Cref{tab:primary-two-family-scale} gives the retained A100 Mat\'ern sweep.
+The table shows time and test RMSE together; accuracy is not used as a binary
+filter for display.  The two daggered inverse rows are the fastest recorded
+inverse attempts but were not selected by the original operation-level
+fit/convergence screen.  We retain them to make the time--accuracy tradeoff
+visible and do not use them for a headline speed claim.  The exact historical
+screen, the resulting regime map, and every original candidate row are
+reported in \cref{app:archived-regime-map}.
+
+\begin{table}[H]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{2.5pt}
+\caption{Primary A100 comparison with EFGP-CG, separated into the inverse and
+active-box EigenPro families.  Times are complete recorded setup-plus-solve
+totals in seconds.  Each proposed-family entry gives configuration, total,
+and test RMSE.  $J_m$ denotes the full Fourier grid.  A dagger marks a raw
+inverse attempt rejected by the original screen; it is shown but not used for
+a speed claim.}
+\label{tab:primary-two-family-scale}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llrrlrrlrr}
+\toprule
+& & \multicolumn{2}{c}{EFGP-CG} &
+\multicolumn{3}{c}{Inverse family} &
+\multicolumn{3}{c}{Active-box EigenPro family} \\
+\cmidrule(lr){3-4}\cmidrule(lr){5-7}\cmidrule(lr){8-10}
+Data & $N$ & Total & RMSE & Configuration & Total & RMSE & Configuration & Total & RMSE \\
+\midrule
+\multirow{4}{*}{Synthetic}
+& $10^7$ & 4.553 & 0.008249 & $|B|=2601$ & \textbf{0.553} & 0.008280 & $|B|=5329,q=256$ & 1.255 & 0.008281 \\
+& $3{\times}10^7$ & 6.742 & 0.005238 & $|B|=2601$ & \textbf{0.792} & 0.005262 & $|B|=10609,q=320$ & 1.600 & 0.005262 \\
+& $10^8$ & 10.539 & 0.002954 & $|B|=5329$ & \textbf{1.757} & 0.002968 & $J_m,q=320$ & 2.044 & 0.002969 \\
+& $3{\times}10^8$ & 15.328 & 0.001729 & $|B|=5329$ & \textbf{2.862} & 0.001738 & $J_m,q=320$ & 3.345 & 0.001739 \\
+\addlinespace[1pt]
+\multirow{4}{*}{Winnebago}
+& $10^7$ & 5.309 & 0.115140 & $|B|=625$ & 4.550 & 0.115147 & $J_m,q=128$ & \textbf{0.979} & 0.115057 \\
+& $3{\times}10^7$ & 8.643 & 0.113434 & $|B|=625$ & 4.684 & 0.113583 & $J_m,q=128$ & \textbf{1.378} & 0.113378 \\
+& $10^8$ & 15.462 & 0.111901 & $|B|=5329^{\dagger}$ & 6.984 & 0.150677 & $J_m,q=320$ & \textbf{1.603} & 0.111862 \\
+& $3{\times}10^8$ & 27.748 & 0.110611 & $|B|=5329^{\dagger}$ & 8.038 & 0.262925 & $J_m,q=384$ & \textbf{2.901} & 0.110583 \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+The two branches are complementary.  On Synthetic, the inverse family is
+fastest at all four displayed sizes and gives $5.36\times$--$8.52\times$
+complete-pipeline speedup over EFGP-CG.  On Winnebago, the active-box
+EigenPro family is fastest and improves from $5.42\times$ at $10^7$ to
+$9.56\times$ at $3\times10^8$.  This is a data-dependent regime change,
+not an unexplained discontinuity in one fixed algorithm.  It is precisely why
+we report the two families separately instead of allowing an automatic route
+switch to appear as one continuous ``ours'' curve.
+
+\iffalse
+\subsection{Primary end-to-end comparison with EFGP-CG}
+\label{subsec:end-to-end-krr}
+
+We first compare the proposed binned EFGP default directly with EFGP-CG on
+Synthetic and Winnebago at four sizes from \(10^7\) to \(3\times10^8\).
+Both methods complete all eight cases.  The default's paired-median total-time
+speedup ranges from \(3.24\times\) to \(10.75\times\).  The gain is not
+confined to one timing component: paired setup speedups range from
+\(2.12\times\) to \(3.67\times\), and paired solve speedups range from
+\(3.28\times\) to \(17.92\times\).
+
+\begin{table}[H]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{2.4pt}
+\caption{Primary A100 comparison with EFGP-CG.  Times are in seconds;
+``total'' is the median method-owned algorithmic setup-plus-solve time, while
+its two components come from the repeat attaining that median total.  \(S\)
+is the median of repeat-wise EFGP-CG/ours total-time ratios, so it need not
+equal the ratio of the displayed totals.  Prediction is separate.}
+\label{tab:prospective-efgp-scale}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llrrrrrrrrr}
+\toprule
+& & \multicolumn{3}{c}{EFGP-CG} & \multicolumn{3}{c}{Ours} & &
+\multicolumn{2}{c}{Test RMSE} \\
+\cmidrule(lr){3-5}\cmidrule(lr){6-8}\cmidrule(lr){10-11}
+Data & \(N\) & Setup & Solve & Total & Setup & Solve & Total & \(S\) & CG & Ours \\
+\midrule
+\multirow{4}{*}{Synthetic}
+& \(10^7\)              & 0.157 & 4.447 & 4.604 & 0.070 & 1.041 & 1.111 & 4.138 & 0.008249 & 0.008280 \\
+& \(3{\times}10^7\)    & 0.489 & 6.382 & 6.871 & 0.157 & 1.456 & 1.613 & 4.317 & 0.005239 & 0.005262 \\
+& \(10^8\)              & 1.496 & 9.504 & 11.000 & 0.464 & 1.459 & 1.923 & 5.694 & 0.002954 & 0.002969 \\
+& \(3{\times}10^8\)    & 4.483 & 11.688 & 16.171 & 1.346 & 2.366 & 3.712 & 4.356 & 0.001730 & 0.001740 \\
+\addlinespace[1pt]
+\multirow{4}{*}{Winnebago}
+& \(10^7\)              & 0.166 & 5.119 & 5.285 & 0.072 & 1.553 & 1.625 & 3.238 & 0.115140 & 0.115057 \\
+& \(3{\times}10^7\)    & 0.465 & 8.412 & 8.877 & 0.163 & 2.316 & 2.479 & 3.548 & 0.113406 & 0.113351 \\
+& \(10^8\)              & 1.532 & 14.368 & 15.900 & 0.447 & 1.118 & 1.565 & 10.167 & 0.111989 & 0.111949 \\
+& \(3{\times}10^8\)    & 4.949 & 23.840 & 28.788 & 1.349 & 1.334 & 2.682 & 10.754 & 0.090216 & 0.090239 \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+The advantage remains pronounced for \(N\geq10^8\), where paired total
+speedup is \(4.36\times\)--\(10.75\times\).  At
+\(N=3\times10^8\), Synthetic setup and solve fall from \(4.483\) and
+\(11.688\) seconds to \(1.346\) and \(2.366\) seconds, respectively, for a
+\(4.36\times\) total speedup.  On Winnebago the same comparison is \(28.788\)
+versus \(2.682\) seconds, a \(10.75\times\) speedup.  All eight proposed rows
+remain within one percent of the corresponding full-grid spectral reference;
+relative RMSE changes against that reference range from \(-0.07\%\) to
+\(+0.57\%\).  Thus the large-sample acceleration retains comparably high
+predictive quality while making the small remaining accuracy differences
+explicit.
+
+\fi
+
+\subsection{Family-specific parameter and data-set variation}
+\label{subsec:formal-robustness}
+
+We next keep the two branches separate while changing their internal
+parameters and the data set.  Candidate configurations are compared by total
+time, not by iteration count.  Test RMSE is carried from the same row and is
+reported alongside time.  This distinction matters because a larger inverse
+box or a higher EigenPro rank can shorten the solve while increasing the
+one-time construction cost.
+
+\begin{table}[H]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\caption{Within-family parameter variation for Synthetic Mat\'ern at
+$N=10^7$.  Totals include the recorded binned setup, preconditioner
+construction, and PCG.  The lowest iteration count is not necessarily the
+lowest total.}
+\label{tab:two-family-parameter-variation}
+\begin{tabular}{llrrr}
+\toprule
+Family & Configuration & Iter. & Total (s) & Test RMSE \\
+\midrule
+\multirow{5}{*}{Inverse}
+& $|B|=625$  & 594 & 0.976 & 0.0082805 \\
+& $|B|=961$  & 408 & 0.711 & 0.0082805 \\
+& $|B|=1369$ & 325 & 0.617 & 0.0082805 \\
+& $|B|=2601$ & 174 & \textbf{0.553} & 0.0082805 \\
+& $|B|=5329$ &  88 & 1.127 & 0.0082805 \\
+\addlinespace[1pt]
+\multirow{4}{*}{Active-box EigenPro}
+& $|B|=2601,q=192$  & 510 & 1.274 & 0.0082804 \\
+& $|B|=5329,q=256$  & 416 & \textbf{1.255} & 0.0082805 \\
+& $|B|=10609,q=320$ & 365 & 1.289 & 0.0082804 \\
+& $J_m,q=256$       & 389 & 1.527 & 0.0082806 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The inverse optimum is the intermediate box $|B|=2601$: enlarging the box to
+5329 halves the iteration count again but doubles construction sufficiently
+to make the total slower.  The active-box EigenPro totals are flatter across
+the tested localized boxes, with $|B|=5329,q=256$ narrowly best.  Hence the
+default-setting argument is family-specific; a single top-$k$/rank pair cannot
+stand in for both operations.
+
+Data geometry can also reverse the family ordering.  At $N=3\times10^7$ with
+the same Mat\'ern kernel, Synthetic favors the inverse branch
+(0.792 versus 1.600 seconds), whereas Winnebago favors the full-grid member of
+the active-box EigenPro branch (1.378 versus 4.684 seconds).  The Fourier
+diagonal and score alone do not determine this switch: the sample-dependent
+Toeplitz term changes with the input distribution.  The revised one-click
+artifact therefore writes a separate inverse row and a separate
+active-box/full-grid minimum for every parameter and data-set case; it never
+lets an automatic route switch masquerade as stability of one method.
+
+\subsection{Kernel comparison under the same two-family definition}
+\label{subsec:kernel-family-comparison}
+
+The previous mechanism table mixed score fractions, eigenvalues, and a
+particular preconditioner without making the compared totals clear.  We
+replace it with a direct kernel experiment.  For each kernel and data set,
+\cref{tab:kernel-two-family} uses the family-optimal configuration selected by
+the procedure of \cref{subsec:end-to-end-krr}: one inverse result and the
+minimum over localized and full-grid EigenPro results.  Every numeric column
+has the same meaning as in the primary table.
+
+\begin{table}[H]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3.5pt}
+\caption{Two-family comparison at $N=3\times10^7$.  Total is complete
+recorded setup plus solve in seconds; speedup is EFGP-CG total divided by the
+displayed family total.  Full-grid EigenPro is denoted by $J_m$.}
+\label{tab:kernel-two-family}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lllrrrr}
+\toprule
+Data & Kernel & Family/configuration & Total & Test RMSE & Speedup & EFGP-CG \\
+\midrule
+\multirow{4}{*}{Synthetic}
+& SE & Inverse, $B=J_m$ & \textbf{0.211} & 0.001071 & 14.70 & 3.098 \\
+& SE & Active-box EigenPro, $J_m,q=128$ & 0.810 & 0.001073 & 3.82 & 3.098 \\
+& Mat\'ern & Inverse, $|B|=2601$ & \textbf{0.792} & 0.005262 & 8.52 & 6.742 \\
+& Mat\'ern & Active-box EigenPro, $|B|=10609,q=320$ & 1.600 & 0.005262 & 4.21 & 6.742 \\
+\addlinespace[1pt]
+\multirow{4}{*}{Winnebago}
+& SE & Inverse, $B=J_m$ & \textbf{0.212} & 0.374291 & 13.55 & 2.868 \\
+& SE & Active-box EigenPro, $J_m,q=64$ & 0.499 & 0.374291 & 5.74 & 2.868 \\
+& Mat\'ern & Inverse, $|B|=625$ & 4.684 & 0.113583 & 1.85 & 8.643 \\
+& Mat\'ern & Active-box EigenPro, $J_m,q=128$ & \textbf{1.378} & 0.113378 & 6.27 & 8.643 \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+For SE, the grid has only 1225 modes and full inversion wins on both data
+sets.  For Mat\'ern, the grid has 35721 modes: localization makes the inverse
+branch best on Synthetic, while the global eigenpair correction is much
+better on Winnebago.  The conclusion is therefore not that one
+preconditioner dominates universally, but that the proposed construction
+contains two useful computational regimes whose best member depends on
+kernel spectrum and data geometry.
+
+\iffalse
+\subsection{Parameter sensitivity and default-setting stability}
+\label{subsec:formal-robustness}
+
+The scale experiment prospectively selects the Synthetic
+\(N=3\times10^7\) Mat\'ern case as the controlled target: its EFGP-CG solve
+requires 5968 iterations, inside the predeclared 3000--6000 target window.
+Starting from this frozen case, we vary one factor at a time.  The same six
+complete KRR pipelines are rerun at every point; method parameters are not
+retuned using the new timings.  For lengthscale and data-set changes, a frozen
+score prefix may only be shortened deterministically when its enclosing box
+would exceed the unchanged budget.
+
+\begin{table}[H]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4.2pt}
+\caption{One-at-a-time robustness at the frozen \(N=3\times10^7\) target.
+Times are method-owned setup plus solve in seconds.  The last column is the
+paired-median EFGP-CG/default speedup.  All proposed rows satisfy the declared
+broad RMSE and \(R^2\) usability range.}
+\label{tab:formal-robustness}
+\begin{tabular}{llrrrr}
+\toprule
+Axis & Value & EFGP-CG & Default & Test RMSE & Speedup \\
+\midrule
+\multirow{3}{*}{\(\lambda\)}
+& 0.01 & 17.044 & 2.632 & 0.005603 & 6.48 \\
+& 0.1  &  6.919 & 1.613 & 0.005262 & 4.29 \\
+& 1.0  &  2.962 & 1.160 & 0.004196 & 2.55 \\
+\addlinespace[1pt]
+\multirow{3}{*}{\(\ell\)}
+& 0.05 & 6.853 & 2.349 & 0.009366 & 2.92 \\
+& 0.1  & 6.919 & 1.613 & 0.005262 & 4.29 \\
+& 0.2  & 4.655 & 1.195 & 0.002859 & 3.90 \\
+\addlinespace[1pt]
+\multirow{3}{*}{Box budget}
+& 4096  & 6.847 & 0.997 & 0.005262 & 6.87 \\
+& 8192  & 6.755 & 1.598 & 0.005262 & 4.23 \\
+& 16384 & 6.924 & 1.711 & 0.005262 & 4.05 \\
+\addlinespace[1pt]
+\multirow{2}{*}{Data}
+& Synthetic & 7.034 & 1.599 & 0.005262 & 4.40 \\
+& Winnebago & 8.860 & 2.341 & 0.113351 & 3.78 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The default remains faster than EFGP-CG at every declared value, by
+\(2.55\times\)--\(6.87\times\).  This supports robustness of the acceleration
+relative to the EFGP-CG line; it does not assert that the localized default is
+the fastest member of the proposed family at every point.  In particular, a
+full-grid spectral correction can be preferable when the difficult
+eigenspace is not sufficiently localized.  That outcome is a success of the
+family's extreme full-grid member, not evidence against spectral
+preconditioning.
+
+The archived box--rank scan supplies the configuration study used before the
+formal timing.  On the Winnebago Mat\'ern problem at \(N=3\times10^8\), smaller
+boxes improve steadily as rank grows but remain slower than the full-grid
+route.  On the full grid, increasing \(q\) from 192 to 448 reduces iterations
+from 794 to 272, whereas total time is minimized at the intermediate
+\(q=384\).  Thus neither the largest rank nor the smallest iteration count is
+an appropriate default by itself; the selected configuration balances box
+coverage, construction, and solve.  The complete 15-row values are retained
+in \cref{tab:box-rank-sweep}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.72\linewidth]{picture/group_c_boxeig_parameter_sweep.png}
+    \caption{Archived full-grid/active-box rank sweep used to study default
+    stability.  The formal campaign transfers only the selected box and rank;
+    it reruns all timing and does not inherit archived timing values.}
+    \label{fig:archived-box-rank-sweep}
+\end{figure}
+
+\subsection{Mechanism check}
+\label{subsec:mechanism-check}
+
+To interpret the total-time trends, we check the two observations used by the method:
+the score should identify a limited part of the Fourier grid, and EigenPro
+should reduce the large eigenvalues inside a chosen box. These checks use saved
+diagnostics at \(N=10^8\) and \(\lambda=0.1\); they are not additional timing
+runs.
+
+For each kernel, order the indices by decreasing \(\rho_j\) and measure the
+fraction of \(\sum_j\rho_j\) in the leading indices. We also examine the USGS
+Mat\'ern block with \(|B|=2601\) and \(q=256\). The first two rows of
+\cref{tab:mechanism-check} compare score concentration; the last two compare
+the measured block spectrum before and after the EigenPro operation.
+
+\begin{table}[H]
+\centering
+\small
+\caption{Two checks at \(N=10^8\). Score rows give the fraction of total
+\(\rho\); spectrum rows use the USGS Mat\'ern block with \(|B|=2601\) and
+\(q=256\). The transformed values are calculated from the measured spectrum.}
+\label{tab:mechanism-check}
+\begin{tabular}{lrr}
+\toprule
+Leading indices & SE score fraction & Mat\'ern score fraction \\
+\midrule
+256 & \(0.998\) & \(0.869\) \\
+512 & \({>}0.99999\) & \(0.942\) \\
+\addlinespace[2pt]
+USGS Mat\'ern box & Raw \(A_{BB}\) & After \(P_{\mathrm{eig}}(B,256)\) \\
+\cmidrule(lr){1-3}
+Largest eigenvalue & \(2.16\times10^7\) & \(1.00\) \\
+Condition number & \(2.16\times10^8\) & \(4.75\times10^1\) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The score is much more concentrated for the squared exponential kernel. On
+the tested Mat\'ern box, the EigenPro operation reduces the block condition
+number from \(2.16\times10^8\) to \(47.5\). This checks the operation on
+\(A_{BB}\), but not the approximation on \(T\) or the coupling \(A_{BT}\);
+the complete solves below test those remaining effects.
+
+\subsection{Additional archived EFGP-CG regime map}
+\label{subsec:exp-scalability}
+
+The original six-size sweep is retained because it extends the primary
+EFGP-CG comparison down to \(N=10^6\) and includes both squared exponential
+and Mat\'ern kernels.  \Cref{tab:se-scalability,tab:matern-scalability} report
+the EFGP-CG baseline and a representative configuration saved by that sweep.
+These archived ratios are not combined with the formal A100 ratios above.  A
+full-grid configuration is written as
+\(P_{\mathrm{inv}}(J_m)\) or \(P_{\mathrm{eig}}(J_m,q)\); it is not treated
+as a separate method. Speedup is the EFGP-CG total time divided by the
+candidate total time. It is therefore a complete-pipeline speedup, including
+the setup route used by each archived pipeline.  Both time and RMSE are shown
+so that the speed--accuracy tradeoff remains visible.
+
+\begin{table}[H]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3.5pt}
+\caption{Archived squared exponential EFGP scalability results (\(M=1225\)).
+Each pair compares EFGP-CG with the representative saved candidate.
+\(T_{\mathrm{tot}}\) is total time in seconds, RMSE uses the same test set,
+and speedup compares the recorded complete pipelines.}
+\label{tab:se-scalability}
+\begin{tabular}{lllrrrr}
+\toprule
+Data & \(N\) & Method / configuration & Iter. &
+\(T_{\mathrm{tot}}\) & Test RMSE & Speedup \\
+\midrule
+\multirow{12}{*}{Synthetic}
+& \multirow{2}{*}{\(10^6\)} & EFGP-CG & 1115 & 1.23 & \(4.90{\times}10^{-3}\) & 1.00 \\
+& & \(P_{\mathrm{inv}}(B),\ |B|=625\) & 10 & 0.05 & \(4.91{\times}10^{-3}\) & 25.35 \\
+& \multirow{2}{*}{\(3{\times}10^6\)} & EFGP-CG & 1495 & 1.64 & \(2.91{\times}10^{-3}\) & 1.00 \\
+& & \(P_{\mathrm{inv}}(B),\ |B|=625\) & 16 & 0.07 & \(2.91{\times}10^{-3}\) & 23.34 \\
+& \multirow{2}{*}{\(10^7\)} & EFGP-CG & 2051 & 2.35 & \(1.64{\times}10^{-3}\) & 1.00 \\
+& & \(P_{\mathrm{inv}}(J_m)\) & 1 & 0.11 & \(1.70{\times}10^{-3}\) & 21.99 \\
+& \multirow{2}{*}{\(3{\times}10^7\)} & EFGP-CG & 2613 & 3.10 & \(9.85{\times}10^{-4}\) & 1.00 \\
+& & \(P_{\mathrm{inv}}(J_m)\) & 1 & 0.21 & \(1.07{\times}10^{-3}\) & 14.70 \\
+& \multirow{2}{*}{\(10^8\)} & EFGP-CG & 3344 & 4.74 & \(5.72{\times}10^{-4}\) & 1.00 \\
+& & \(P_{\mathrm{inv}}(J_m)\) & 1 & 0.56 & \(6.88{\times}10^{-4}\) & 8.46 \\
+& \multirow{2}{*}{\(3{\times}10^8\)} & EFGP-CG & 2777 & 9.80 & \(3.42{\times}10^{-4}\) & 1.00 \\
+& & \(P_{\mathrm{inv}}(J_m)\) & 1 & 1.55 & \(5.65{\times}10^{-4}\) & 6.31 \\
+\addlinespace[1pt]
+\multirow{12}{*}{USGS}
+& \multirow{2}{*}{\(10^6\)} & EFGP-CG & 717 & 0.79 & \(3.95{\times}10^{-1}\) & 1.00 \\
+& & \(P_{\mathrm{inv}}(J_m)\) & 1 & 0.06 & \(3.95{\times}10^{-1}\) & 12.28 \\
+& \multirow{2}{*}{\(3{\times}10^6\)} & EFGP-CG & 1030 & 1.15 & \(3.90{\times}10^{-1}\) & 1.00 \\
+& & \(P_{\mathrm{inv}}(J_m)\) & 1 & 0.08 & \(3.90{\times}10^{-1}\) & 14.07 \\
+& \multirow{2}{*}{\(10^7\)} & EFGP-CG & 1495 & 1.70 & \(3.82{\times}10^{-1}\) & 1.00 \\
+& & \(P_{\mathrm{inv}}(J_m)\) & 1 & 0.11 & \(3.82{\times}10^{-1}\) & 15.93 \\
+& \multirow{2}{*}{\(3{\times}10^7\)} & EFGP-CG & 2371 & 2.87 & \(3.74{\times}10^{-1}\) & 1.00 \\
+& & \(P_{\mathrm{inv}}(J_m)\) & 1 & 0.21 & \(3.74{\times}10^{-1}\) & 13.55 \\
+& \multirow{2}{*}{\(10^8\)} & EFGP-CG & 3541 & 4.83 & \(3.65{\times}10^{-1}\) & 1.00 \\
+& & \(P_{\mathrm{inv}}(J_m)\) & 1 & 0.56 & \(3.65{\times}10^{-1}\) & 8.66 \\
+& \multirow{2}{*}{\(3{\times}10^8\)} & EFGP-CG & 5611 & 10.75 & \(3.56{\times}10^{-1}\) & 1.00 \\
+& & \(P_{\mathrm{inv}}(J_m)\) & 1 & 1.81 & \(3.56{\times}10^{-1}\) & 5.95 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+For the squared exponential kernel, \(M=1225\) is small enough that the
+full-grid inverse is usually fastest. It reduces PCG to one iteration, but it
+cannot by itself reduce the \(O(N)\) Fourier setup. Consequently, the speedup
+decreases at the largest \(N\), where setup forms a larger fraction of total
+time. The two smaller synthetic rows prefer \(|B|=625\), showing that a partial
+inverse can be cheaper when CG is not yet the dominant cost.
+
+On the squared exponential synthetic task, the proposed test RMSE is visibly
+higher at the two largest sizes, although its absolute value remains below
+\(6\times10^{-4}\).  We retain these rows and report both RMSE columns rather
+than hiding that tradeoff behind a binary accuracy decision.
+
+\begin{table}[H]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3.5pt}
+\caption{Archived Mat\'ern-\(3/2\) EFGP scalability results (\(M=35721\)). Each pair
+compares EFGP-CG with the representative saved candidate. Times are
+seconds, and speedup compares the recorded complete pipelines.}
+\label{tab:matern-scalability}
+\begin{tabular}{lllrrrr}
+\toprule
+Data & \(N\) & Method / configuration & Iter. &
+\(T_{\mathrm{tot}}\) & Test RMSE & Speedup \\
+\midrule
+\multirow{12}{*}{Synthetic}
+& \multirow{2}{*}{\(10^6\)} & EFGP-CG & 1806 & 1.94 & \(1.87{\times}10^{-2}\) & 1.00 \\
+& & \(P_{\mathrm{inv}}(B),\ |B|=1369\) & 130 & 0.27 & \(1.89{\times}10^{-2}\) & 7.23 \\
+& \multirow{2}{*}{\(3{\times}10^6\)} & EFGP-CG & 2791 & 6.95 & \(1.31{\times}10^{-2}\) & 1.00 \\
+& & \(P_{\mathrm{inv}}(B),\ |B|=1369\) & 188 & 0.39 & \(1.31{\times}10^{-2}\) & 17.87 \\
+& \multirow{2}{*}{\(10^7\)} & EFGP-CG & 4163 & 4.55 & \(8.25{\times}10^{-3}\) & 1.00 \\
+& & \(P_{\mathrm{inv}}(B),\ |B|=2601\) & 174 & 0.55 & \(8.28{\times}10^{-3}\) & 8.24 \\
+& \multirow{2}{*}{\(3{\times}10^7\)} & EFGP-CG & 5968 & 6.74 & \(5.24{\times}10^{-3}\) & 1.00 \\
+& & \(P_{\mathrm{inv}}(B),\ |B|=2601\) & 262 & 0.79 & \(5.26{\times}10^{-3}\) & 8.52 \\
+& \multirow{2}{*}{\(10^8\)} & EFGP-CG & 8831 & 10.54 & \(2.95{\times}10^{-3}\) & 1.00 \\
+& & \(P_{\mathrm{inv}}(B),\ |B|=5329\) & 187 & 1.76 & \(2.97{\times}10^{-3}\) & 6.00 \\
+& \multirow{2}{*}{\(3{\times}10^8\)} & EFGP-CG & 11494 & 15.33 & \(1.73{\times}10^{-3}\) & 1.00 \\
+& & \(P_{\mathrm{inv}}(B),\ |B|=5329\) & 246 & 2.86 & \(1.74{\times}10^{-3}\) & 5.36 \\
+\addlinespace[1pt]
+\multirow{12}{*}{USGS}
+& \multirow{2}{*}{\(10^6\)} & EFGP-CG & 1804 & 1.95 & \(1.24{\times}10^{-1}\) & 1.00 \\
+& & \(P_{\mathrm{eig}}(J_m,128)\) & 131 & 0.63 & \(1.23{\times}10^{-1}\) & 3.09 \\
+& \multirow{2}{*}{\(3{\times}10^6\)} & EFGP-CG & 2876 & 3.11 & \(1.18{\times}10^{-1}\) & 1.00 \\
+& & \(P_{\mathrm{eig}}(J_m,128)\) & 203 & 0.75 & \(1.18{\times}10^{-1}\) & 4.13 \\
+& \multirow{2}{*}{\(10^7\)} & EFGP-CG & 4914 & 5.31 & \(1.15{\times}10^{-1}\) & 1.00 \\
+& & \(P_{\mathrm{eig}}(J_m,128)\) & 341 & 0.98 & \(1.15{\times}10^{-1}\) & 5.42 \\
+& \multirow{2}{*}{\(3{\times}10^7\)} & EFGP-CG & 7796 & 8.64 & \(1.13{\times}10^{-1}\) & 1.00 \\
+& & \(P_{\mathrm{eig}}(J_m,128)\) & 534 & 1.38 & \(1.13{\times}10^{-1}\) & 6.27 \\
+& \multirow{2}{*}{\(10^8\)} & EFGP-CG & 13539 & 15.46 & \(1.12{\times}10^{-1}\) & 1.00 \\
+& & \(P_{\mathrm{eig}}(J_m,320)\) & 264 & 1.60 & \(1.12{\times}10^{-1}\) & 9.65 \\
+& \multirow{2}{*}{\(3{\times}10^8\)} & EFGP-CG & 22466 & 27.75 & \(1.11{\times}10^{-1}\) & 1.00 \\
+& & \(P_{\mathrm{eig}}(J_m,384)\) & 320 & 2.90 & \(1.11{\times}10^{-1}\) & 9.56 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The Mat\'ern grid is almost thirty times larger. The archived rows select
+moderate inverse boxes for the synthetic task and the full-grid spectral
+family member for the largest USGS cases. The explanation cannot come from
+\(D\) or \(\rho_j\) alone: for fixed
+kernel parameters, grid, \(N\), and \(\lambda\), these quantities agree, while
+the sample-dependent Toeplitz matrix \(G\) changes with the input points.
+
+The Mat\'ern baseline and selected test RMSE values differ by about one percent
+or less in every row.
+
+Legacy timing components and the full box--rank sweep are reported in
+\cref{tab:timing-breakdown,tab:box-rank-sweep}.
+
+\fi
+
+\subsection{Brief comparison with other complete KRR pipelines}
+\label{subsec:other-krr}
+
+We next report the other complete KRR pipelines as a secondary comparison.
+The table shows the largest scale, where scalability is most consequential;
+the complete \(10^7\)--\(3\times10^8\) matrix is retained in the experiment
+artifact.  No fixed relative-accuracy cutoff is used to remove a successful
+row: raw training total and test RMSE are reported together.  The full-grid
+spectral row is the proposed family's high-budget extreme, whereas Nystr\"om
+and RPCholesky are data-space KRR algorithms and Jacobi is an EFGP baseline.
+EFGP-CG remains the primary reference and is already reported in
+\cref{tab:primary-two-family-scale}.
+
+\begin{table}[H]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4.2pt}
+\caption{Secondary end-to-end KRR comparison at \(N=3\times10^8\).
+Training total is method-owned setup plus solve in seconds.  ``Resource
+limit'' is the prospectively declared memory outcome, not a timed failure.}
+\label{tab:other-krr-300m}
+\begin{tabular}{lrrrr}
+\toprule
+& \multicolumn{2}{c}{Synthetic} & \multicolumn{2}{c}{Winnebago} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+Method & Train total & Test RMSE & Train total & Test RMSE \\
+\midrule
+Ours (binned default) & \textbf{3.712} & 0.001740 & \textbf{2.682} & 0.090239 \\
+Full-grid spectral family member & 6.442 & 0.001730 & 6.253 & 0.090214 \\
+EFGP+Jacobi & 5.270 & 0.001730 & 31.406 & 0.090216 \\
+Nystr\"om KRR & 14.797 & 0.023004 & 14.793 & 0.275328 \\
+RPCholesky KRR & \multicolumn{2}{c}{Resource limit} & \multicolumn{2}{c}{Resource limit} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+At \(3\times10^8\), the binned default is the fastest successful route on both
+data sets.  The full-grid family member is also successful: it preserves the
+EFGP-level RMSE while substantially improving on EFGP-CG, and is
+\(1.74\times\) and \(2.34\times\) slower than the cheaper binned default on
+Synthetic and Winnebago, respectively.  Nystr\"om exposes a different
+speed--accuracy tradeoff at smaller sizes; at the largest size shown here it
+is both slower and less accurate.  RPCholesky completes the \(10^7\) cases,
+but its declared memory requirement exceeds the available budget from
+\(3\times10^7\) onward, so we make no large-\(N\) timing claim for it.
+
+\paragraph{General-purpose EigenPro line.}
+EigenPro2 and EigenPro3 attack the data-space kernel-training problem with
+GPU-oriented stochastic updates and Nystr\"om spectral information
+\cite{ma2019eigenpro,abedsoltan2023toward}.  They therefore do not share the
+EFGP Fourier system or its residual-based stopping rule.  We keep their
+comparison separate from the \(10^7\)--\(3\times10^8\) complete-pipeline
+matrix and use time to an EFGP-CG validation target.  The retained legacy
+EigenPro3 experiment uses \(9\times10^4\) training, \(10^4\) validation, and
+\(10^3\) test points.  For Mat\'ern-\(3/2\), the \(p=30000\) model does not
+reach the target within 30 epochs, whereas the proposed Fourier family reaches
+it in 0.50 seconds.  For the Gaussian kernel, EigenPro3 reaches the target in
+158.24 seconds versus 0.29 seconds for the proposed route.  EigenPro2 was also
+considered as the predecessor in this line, but no matched, reproducible
+time-to-target row is retained in the formal artifact; consequently we do not
+turn its missing row into a numerical speedup or a convergence claim.
+
+\subsection{Controlled fixed-system comparison}
+\label{subsec:matched-confirmation}
+
+To isolate the solver contribution, we select the Synthetic
+\(N=3\times10^7\) Mat\'ern case and construct the Fourier weights, Toeplitz
+generator, regularization arrays, and right-hand side exactly once.  All six
+methods receive the same zero initial iterate and immutable system, whose
+SHA-256 identifier begins \texttt{12c0a9811168}.  The common \(A,\bvec\)
+construction takes \(0.606\) seconds and is excluded from every solver total.
+After one warm-up, five shuffled measured repetitions synchronize each timing
+boundary.  For active methods the total includes fresh active-set selection,
+preconditioner construction, and solve; for CG it is the solve alone.
+
+\begin{table}[H]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3.4pt}
+\caption{Fixed-system A100 comparison at \(N=3\times10^7\).  Components and
+totals are median-total representatives in seconds; \(S_{\mathrm{CG}}\) is
+the median of matched-repeat CG/method total ratios.  All five measured
+repetitions converge with independently recomputed relative residual below
+\(10^{-7}\).}
+\label{tab:fixed-system-formal}
+\begin{tabular}{lrrrrrr}
+\toprule
+Method & Iter. & Select & Build & Solve & Total & \(S_{\mathrm{CG}}\) \\
+\midrule
+CG & 6185 & 0 & 0 & 6.525 & 6.525 & 1.000 \\
+Jacobi & 1385 & 0 & 0.0005 & 1.761 & 1.761 & 3.715 \\
+Ours (frozen default) & 495 & 0.0048 & 0.678 & 0.798 & 1.481 & 4.421 \\
+Active EigenPro & 495 & 0.0048 & 0.714 & 0.809 & 1.527 & 4.272 \\
+Full-grid spectral family member & 479 & 0 & 0.519 & 0.757 & \textbf{1.276} & \textbf{5.128} \\
+Active inverse & 54 & 0.0049 & 3.734 & 0.146 & 3.884 & 1.667 \\
+\bottomrule
+\end{tabular}%
+\end{table}
+
+The frozen default reduces the total from \(6.525\) to \(1.481\) seconds, a
+\(4.42\times\) paired-median speedup over CG, and wins all five matched
+repetitions.  Because \(A\) and \(\bvec\) are identical, this confirms that
+the gain over the EFGP-CG line is not only a faster setup effect.  More
+importantly, the full-grid family member reaches \(1.276\) seconds and a
+\(5.13\times\) speedup.  We interpret this as the high-budget limiting success
+of the proposed spectral family: removing localization spends less selection
+logic and captures the global difficult subspace more completely on this
+particular system.  The default remains the deployment-oriented route because
+its localized construction is designed to scale when a full-grid spectral
+setup becomes less attractive.  The active inverse illustrates the opposite
+tradeoff: its 54-iteration, 0.146-second solve is the shortest, but the
+3.734-second factor construction raises its total to 3.884 seconds.
+
+\FloatBarrier

@@ -37,6 +37,11 @@
     "full_eig_rank": 256,
     "active_topk": 4096,
     "expected_active_box_size": 5329,
+    "inverse_active_topk": null,
+    "inverse_expected_active_box_size": null,
+    "active_eig_topk": null,
+    "active_eig_expected_active_box_size": null,
+    "active_eig_rank": null,
     "allow_frozen_topk_capacity_adaptation": false,
     "parameter_selection_policy": "historical_selected_transfer_no_current_scan",
     "parameter_source": "tracked generated diagnostic table paper_table1_selected.csv sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA; configuration only, old timings excluded",
@@ -102,6 +107,11 @@
           "full_eig_rank": 256,
           "active_topk": 4096,
           "expected_active_box_size": 5329,
+          "inverse_active_topk": 2048,
+          "inverse_expected_active_box_size": 2601,
+          "active_eig_topk": 4096,
+          "active_eig_expected_active_box_size": 5329,
+          "active_eig_rank": 256,
           "parameter_source": "configuration from tracked generated diagnostic table paper_table1_selected.csv on the matching noise=0.3 generated-data route; configuration only, old timings excluded; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
           "accuracy_max_rmse": 0.02
         },
@@ -119,6 +129,11 @@
           "full_eig_rank": 256,
           "active_topk": 8192,
           "expected_active_box_size": 10609,
+          "inverse_active_topk": 2048,
+          "inverse_expected_active_box_size": 2601,
+          "active_eig_topk": 8192,
+          "active_eig_expected_active_box_size": 10609,
+          "active_eig_rank": 320,
           "parameter_source": "configuration from tracked generated diagnostic table paper_table1_selected.csv on the matching noise=0.3 generated-data route; configuration only, old timings excluded; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
           "accuracy_max_rmse": 0.02
         },
@@ -136,6 +151,11 @@
           "full_eig_rank": 320,
           "active_topk": 35721,
           "expected_active_box_size": 35721,
+          "inverse_active_topk": 4096,
+          "inverse_expected_active_box_size": 5329,
+          "active_eig_topk": 35721,
+          "active_eig_expected_active_box_size": 35721,
+          "active_eig_rank": 320,
           "parameter_source": "configuration from tracked generated diagnostic table paper_table1_selected.csv on the matching noise=0.3 generated-data route; configuration only, old timings excluded; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
           "accuracy_max_rmse": 0.02
         },
@@ -153,6 +173,11 @@
           "full_eig_rank": 384,
           "active_topk": 35721,
           "expected_active_box_size": 35721,
+          "inverse_active_topk": 4096,
+          "inverse_expected_active_box_size": 5329,
+          "active_eig_topk": 35721,
+          "active_eig_expected_active_box_size": 35721,
+          "active_eig_rank": 320,
           "parameter_source": "configuration from tracked generated diagnostic table paper_table1_selected.csv on the matching noise=0.3 generated-data route; configuration only, old timings excluded; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
           "accuracy_max_rmse": 0.02
         },
@@ -165,6 +190,11 @@
           "full_eig_rank": 128,
           "active_topk": 8192,
           "expected_active_box_size": 10609,
+          "inverse_active_topk": 512,
+          "inverse_expected_active_box_size": 625,
+          "active_eig_topk": 35721,
+          "active_eig_expected_active_box_size": 35721,
+          "active_eig_rank": 128,
           "parameter_source": "historical selected group_a configuration on the matching Winnebago dataset route; configuration only, old timings excluded; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
           "accuracy_max_rmse": 0.15
         },
@@ -177,6 +207,11 @@
           "full_eig_rank": 128,
           "active_topk": 4096,
           "expected_active_box_size": 5329,
+          "inverse_active_topk": 512,
+          "inverse_expected_active_box_size": 625,
+          "active_eig_topk": 35721,
+          "active_eig_expected_active_box_size": 35721,
+          "active_eig_rank": 128,
           "parameter_source": "historical selected group_a configuration on the matching Winnebago dataset route; configuration only, old timings excluded; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
           "accuracy_max_rmse": 0.15
         },
@@ -189,6 +224,11 @@
           "full_eig_rank": 256,
           "active_topk": 35721,
           "expected_active_box_size": 35721,
+          "inverse_active_topk": 4096,
+          "inverse_expected_active_box_size": 5329,
+          "active_eig_topk": 35721,
+          "active_eig_expected_active_box_size": 35721,
+          "active_eig_rank": 320,
           "parameter_source": "historical selected group_c configuration on the matching Winnebago dataset route; configuration only, old timings excluded; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
           "accuracy_max_rmse": 0.15
         },
@@ -201,7 +241,109 @@
           "full_eig_rank": 320,
           "active_topk": 35721,
           "expected_active_box_size": 35721,
+          "inverse_active_topk": 4096,
+          "inverse_expected_active_box_size": 5329,
+          "active_eig_topk": 35721,
+          "active_eig_expected_active_box_size": 35721,
+          "active_eig_rank": 384,
           "parameter_source": "historical selected group_c configuration on the matching Winnebago dataset route; configuration only, old timings excluded; source CSV sha256=0D6827265AC2DD76F854B5057FC33559408357C5BC193E2FDB2E0AE004ECD8CA",
+          "accuracy_max_rmse": 0.15
+        }
+      ]
+    },
+    "family_scale_10m_300m": {
+      "description": "Primary family-structured replay: EFGP-CG, full-grid EigenPro, the transferred fastest inverse branch, and the transferred fastest active-box EigenPro branch. Full-grid and active-box eigenpair rows are later minimized within one active-box-EigenPro family.",
+      "source_profile": "scale_10m_300m",
+      "overrides": {
+        "methods": [
+          "efgp-standard-cg",
+          "efgp-standard-full-eig",
+          "ours-binned-inverse",
+          "ours-binned-active-eig"
+        ],
+        "parameter_selection_policy": "historical_two_family_transfer_no_current_scan"
+      }
+    },
+    "family_kernel_at_30m": {
+      "description": "SE-versus-Matern family comparison at N=30M. Each kernel/data case transfers the family-optimal inverse and eigenpair settings from the primary archived configuration sweep; current timings are rerun with the family protocol.",
+      "overrides": {
+        "methods": [
+          "efgp-standard-cg",
+          "efgp-standard-full-eig",
+          "ours-binned-inverse",
+          "ours-binned-active-eig"
+        ],
+        "parameter_selection_policy": "historical_two_family_transfer_no_current_scan"
+      },
+      "cases": [
+        {
+          "id": "synthetic_se_n30m",
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_ntrain30000000",
+          "n_train": 30000000,
+          "kernel_family": "se",
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d",
+          "full_eig_rank": 128,
+          "inverse_active_topk": 1024,
+          "inverse_expected_active_box_size": 1225,
+          "active_eig_topk": 1225,
+          "active_eig_expected_active_box_size": 1225,
+          "active_eig_rank": 128,
+          "box_budget": 1225,
+          "accuracy_max_rmse": 0.02
+        },
+        {
+          "id": "winnebago_se_n30m",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain30000000",
+          "n_train": 30000000,
+          "kernel_family": "se",
+          "full_eig_rank": 64,
+          "inverse_active_topk": 1024,
+          "inverse_expected_active_box_size": 1225,
+          "active_eig_topk": 1225,
+          "active_eig_expected_active_box_size": 1225,
+          "active_eig_rank": 64,
+          "box_budget": 1225,
+          "accuracy_max_rmse": 0.45
+        },
+        {
+          "id": "synthetic_matern_n30m",
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_ntrain30000000",
+          "n_train": 30000000,
+          "kernel_family": "matern",
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d",
+          "full_eig_rank": 256,
+          "inverse_active_topk": 2048,
+          "inverse_expected_active_box_size": 2601,
+          "active_eig_topk": 8192,
+          "active_eig_expected_active_box_size": 10609,
+          "active_eig_rank": 320,
+          "box_budget": 35721,
+          "accuracy_max_rmse": 0.02
+        },
+        {
+          "id": "winnebago_matern_n30m",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain30000000",
+          "n_train": 30000000,
+          "kernel_family": "matern",
+          "full_eig_rank": 128,
+          "inverse_active_topk": 512,
+          "inverse_expected_active_box_size": 625,
+          "active_eig_topk": 35721,
+          "active_eig_expected_active_box_size": 35721,
+          "active_eig_rank": 128,
+          "box_budget": 35721,
           "accuracy_max_rmse": 0.15
         }
       ]

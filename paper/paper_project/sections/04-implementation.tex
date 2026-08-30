@@ -1,0 +1,108 @@
+\section{Algorithms and Implementation Details}
+\label{app:algorithms-implementation}
+
+This appendix gives the standard PCG iteration and the complete Fourier KRR
+solver. The main text defines the preconditioners and summarizes their costs.
+
+\begin{algorithm}[H]
+\caption{Preconditioned conjugate gradient}
+\label{alg:pcg}
+\begin{algorithmic}[1]
+\State Choose \(\betavec_0\). Set
+\(r_0=b-A\betavec_0\), \(z_0=Pr_0\), and \(p_0=z_0\).
+\For{\(t=0,1,2,\ldots\)}
+    \State \(w_t=Ap_t\)
+    \State \(\alpha_t=(r_t^*z_t)/(p_t^*w_t)\)
+    \State \(\betavec_{t+1}=\betavec_t+\alpha_t p_t\)
+    \State \(r_{t+1}=r_t-\alpha_tw_t\)
+    \If{\(\|r_{t+1}\|_2/\|b\|_2\leq\varepsilon_{\mathrm{CG}}\)}
+        \State \textbf{break}
+    \EndIf
+    \State \(z_{t+1}=Pr_{t+1}\)
+    \State \(\eta_t=(r_{t+1}^*z_{t+1})/(r_t^*z_t)\)
+    \State \(p_{t+1}=z_{t+1}+\eta_t p_t\)
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Products on the active box}
+\label{subsec:active-box-local-operators}
+
+The Toeplitz generator defined in \cref{subsec:equispaced-fourier-expansion}
+determines the block through \((G_{BB})_{j,\ell}=g_{\ell-j}\) for
+\(j,\ell\in B\).
+Thus \(A_{BB}=D_BG_{BB}D_B+\lambda I_B\) is obtained without forming \(A\)
+or revisiting the data. The reported inverse runs form \(A_{BB}^{-1}\) from a
+Cholesky factorization and two triangular solves, then store the dense inverse.
+For \(P_{\mathrm{eig}}(B,q)\), products with \(A_{BB}\) use the same Toeplitz
+structure as products with \(A\). The reported runs compute the largest
+\(q+1\) eigenpairs in complex double precision with GPU \texttt{eigsh}, using
+tolerance \(10^{-3}\) and at most \(5q\) iterations. The recorded construction
+time includes active-box construction and the inverse build or eigensolve.
+
+\subsection{Optional matrix-free spectral diagnostics}
+\label{subsec:matrix-free-spectral-diagnostics}
+
+For a chosen strict box, the two global terms in
+\cref{prop:active-block-precond} can be estimated without forming \(A\). Define
+\[
+    R_T
+    =\Delta_T^{-1/2}A_{TT}\Delta_T^{-1/2}-I_T,
+    \qquad
+    \delta_T=\|R_T\|_2.
+\]
+Applying \(R_T\) requires one product with \(A\), restriction to \(T\), and
+diagonal scaling. Because \(R_T\) is Hermitian but need not be positive
+semidefinite, a Lanczos estimate of \(\delta_T\) must approximate the
+largest-magnitude Ritz value, equivalently both spectral endpoints.
+
+The coupling can be estimated without constructing \(P_B^{1/2}\), since
+\begin{equation}
+    \gamma_{BT}^2
+    =\lambda_{\max}\!\left(
+        \Delta_T^{-1/2}A_{TB}P_BA_{BT}\Delta_T^{-1/2}
+    \right).
+    \label{eq:coupling-diagnostic-operator}
+\end{equation}
+This operator is positive semidefinite; each application follows the sequence
+\(T\to B\to B\to T\) using \(A_{BT}\), \(P_B\), and \(A_{TB}\).
+Hermitian Lanczos iterations can therefore provide both estimates using existing
+matrix-vector products \cite{lanczos1950iteration,lehoucq1998arpack}. For the
+inverse correction \(\mu_B^-=1\); for \(P_{\mathrm{eig}}(B,q)\) with exact
+eigenpairs,
+\(\mu_B^-=\theta_{|B|}/\theta_{q+1}\). Together the estimates give the lower
+endpoint
+\[
+    L_B=\min\{\mu_B^-,1-\delta_T\}-\gamma_{BT}.
+\]
+A nonpositive \(L_B\) means that the condition-number bound in
+\cref{eq:active-box-bound} is vacuous, not that PCG must fail. These optional
+diagnostics are not needed to construct the preconditioner and should be run
+outside any timed solve.
+
+\subsection{Complete solver}
+
+The complete algorithm joins Fourier setup, preconditioner construction, PCG,
+and prediction.
+
+\begin{algorithm}[H]
+\caption{Fourier KRR with active-box preconditioning}
+\begin{algorithmic}[1]
+\Require Data \(\{(x_n,y_n)\}_{n=1}^N\), kernel \(k\), regularization
+\(\lambda\), Fourier parameters \(h,m\), Fourier setup route, budget \(s\) or
+threshold \(\tau\), choice \(\mathrm{inv}\) or \(\mathrm{eig}\), tolerance
+\(\varepsilon_{\mathrm{CG}}\), and maximum iteration count \(t_{\max}\)
+\Ensure Fourier coefficients \(\betavec\) and prediction function \(\widehat f\)
+\State Using the chosen setup route, construct \(J_m\), \(D\), the Toeplitz
+generator \(g\), and \(b=DF^*\y\). The routes used in the tables are recorded
+in \cref{app:experiment-details}.
+\State Apply \(A\) by \(u\mapsto DG(Du)+\lambda u\).
+\State Construct \(P_{\mathrm{inv}}(B)\) or \(P_{\mathrm{eig}}(B,q)\) using
+\cref{alg:build-active-box-precond}.
+\State Solve \(A\betavec=b\) by \cref{alg:pcg}, stopping at
+\(t_{\max}\) if the tolerance is not reached.
+\State Evaluate
+\(\widehat f(x)=\sum_{j\in J_m}\beta_jD_{jj}
+e^{2\pi ih\langle j,x\rangle}\) at target points using a type-2 NUFFT.
+\end{algorithmic}
+\end{algorithm}

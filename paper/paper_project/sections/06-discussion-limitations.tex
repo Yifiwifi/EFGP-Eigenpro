@@ -1,0 +1,68 @@
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+The present scope is low-dimensional KRR with stationary kernels. The Fourier
+grid grows exponentially with dimension, and a nonstationary kernel does not
+give the same Toeplitz structure. A centered box is also best aligned with an
+isotropic spectrum; anisotropic or irregular spectra may require a different
+active set.
+
+Active-box effectiveness depends on spectral alignment and coupling. The
+score \(\rho_j\) uses the Fourier weights, \(N\), and \(\lambda\), but it does
+not see the sample-dependent off-diagonal entries of \(G\). A useful box must
+therefore contain the difficult directions while leaving a complement with
+small diagonal error and weak coupling. The terms \(\delta_T\) and
+\(\gamma_{BT}\) in \cref{prop:active-block-precond} retain these effects.
+
+The end-to-end evidence is strongest relative to EFGP-CG, the model line that
+the proposed pipeline directly accelerates.  Across
+\(10^7\)--\(3\times10^8\) samples, Synthetic favors the inverse family
+(\(5.36\)--\(8.52\times\) speedup), while Winnebago favors the active-box
+EigenPro family (\(5.42\)--\(9.65\times\)).  Reporting those branches
+separately avoids interpreting a data-dependent route switch as a sudden
+scaling effect.  The secondary KRR comparison is deliberately more modest:
+Nystr\"om exposes a visible speed--accuracy tradeoff at smaller scales, and
+RPCholesky reaches its declared memory limit above \(10^7\) samples.  These
+outcomes are reported rather than removed by a fixed relative-accuracy gate.
+
+Preconditioning cannot remove the \(O(N)\) Fourier setup cost. It reduces the
+number of products after the system is built, but the type-1 NUFFTs for the
+Toeplitz generator and right-hand side remain. Once setup dominates, further
+reductions in the iteration count have limited effect on total time.
+
+The two empirical levels should nevertheless not be merged.  End-to-end KRR
+timing includes each method's own algorithmic setup and solve, whereas the
+controlled comparison gives all solvers one identical Fourier system.  In the
+latter experiment the frozen default is \(4.42\times\) faster than CG, so the
+gain is not solely a setup effect.  The full-grid spectral member reaches a
+\(5.13\times\) speedup and is the fastest family member on that frozen system.
+This is the high-budget extreme of the proposed construction rather than an
+external algorithm defeating it.  Localization should therefore be viewed as
+a data-dependent construction/application tradeoff: the default limits setup
+and storage, while the full-grid member can be stronger when the difficult
+subspace is global.  The active inverse is slower in total despite its short
+solve because factor construction dominates.
+
+The reported end-to-end total is method-owned algorithmic training time, not
+process wall clock.  Common data I/O, backend creation, and host-to-device
+staging are excluded, and prediction is separate.  The fixed-system total
+similarly excludes the one \(0.606\)-second shared construction of
+\(A\) and \(\bvec\).  These accounting choices expose the setup and solver
+effects but should be preserved when reproducing or comparing the numbers.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+A fixed Fourier-discretized KRR system can be severely ill-conditioned even
+when each matrix-vector product is fast.  The proposed active inverse and
+leading-eigenpair corrections reduce the solve cost when difficult directions
+are concentrated in a Fourier box and its coupling to the complement is
+small.  Combined with the binned setup, the inverse and eigenpair branches
+give up to \(8.52\times\) and \(9.65\times\) complete-pipeline speedup over
+EFGP-CG, respectively, while their time--accuracy outcomes remain explicit.
+The identical-\(A,\bvec\) experiment confirms a \(4.42\times\)
+solver-total gain for the default and a \(5.13\times\) gain for the full-grid
+family member.  Comparisons with Jacobi, Nystr\"om, RPCholesky, and the
+different spectral-family budgets delimit the claim: the family substantially
+accelerates the EFGP-CG line, while the preferred member depends on the cost of
+localization, factorization, and global eigenspace construction.

@@ -1,0 +1,416 @@
+% \section{Numerical Experiments}
+% \label{sec:experiments}
+
+% In this section we evaluate whether the proposed active-block preconditioners accelerate the EFGP weight-space solve while maintaining comparable prediction accuracy. The experiments are organized around three questions. First, do the preconditioners reduce the number of CG iterations and the end-to-end solve time? Second, when is a small inverse active block sufficient? Third, when does the useful active region become large enough that an EigenPro-type active-box correction is preferable?
+
+% We use two translation-invariant kernels with lengthscale \(\ell=0.1\):
+% \begin{equation}
+% k_{\mathrm{SE}}(x,z)
+% =
+% \exp\left(-\frac{r^2}{2\ell^2}\right),
+% \qquad
+% k_{\mathrm{Mat\acute{e}rn}\text{-}3/2}(x,z)
+% =
+% \left(1+\frac{\sqrt{3}r}{\ell}\right)
+% \exp\left(-\frac{\sqrt{3}r}{\ell}\right),
+% \label{eq:experiment-kernels}
+% \end{equation}
+% where \(r=\|x-z\|_2\). The squared exponential kernel has rapidly decaying Fourier weights and leads to a relatively small EFGP grid in our experiments . The Mat\'ern-\(3/2\) kernel is more challenging because its Fourier weights decay algebraically, requiring a larger Fourier grid for reaching the pre-specified kernel approximation error (\(M=35721\)) and producing a more ill-conditioned weight-space system.
+
+% We report prediction accuracy using the test root-mean-square error
+% \begin{equation}
+%     \mathrm{RMSE}
+%     =
+%     \left(
+%     \frac{1}{N_{\mathrm{test}}}
+%     \sum_{i=1}^{N_{\mathrm{test}}}
+%     \bigl(\widehat f(x_i)-y_i\bigr)^2
+%     \right)^{1/2}.
+%     \label{eq:rmse}
+% \end{equation}
+% Since all methods use the same EFGP Fourier discretization within each row, the preconditioner should be interpreted as accelerating the linear solve rather than changing the model class.
+
+% \subsection{Experimental setup}
+% \label{subsec:exp-setup}
+
+% We consider two regression tasks. The first is a synthetic low-dimensional regression problem on \([0,1]^d\). The training inputs are sampled iid from the
+% unit cube,
+% \[
+%     x_i\sim \mathrm{Unif}([0,1]^d),
+% \]
+% and the labels are generated from a smooth target function with additive Gaussian noise,\cite{greengard2025efgp,barnett2024uniform}
+% \[
+%     f_\star(x)
+%     =
+%     \cos\!\left(2\pi\langle x,\omega\rangle+1.3\right),
+%     \qquad
+%     y_i=f_\star(x_i)+\varepsilon_i,
+%     \qquad
+%     \varepsilon_i\sim \mathcal N(0,\sigma^2).
+% \]
+
+% The second task is a real geospatial regression problem based on the USGS 3DEP LiDAR Point Cloud dataset~\cite{usgs3dep_lpc,usgs_winnebago_2018_laz}. We use the
+% \texttt{USGS\_LPC\_IL\_Winnebago\_2018} project and select contiguous blocks of LAS/LAZ tiles. Only ground-class points are retained, so that the task is a bare-earth elevation regression problem. The raw horizontal coordinates are shifted and rescaled with a shared spatial scale to preserve the physical aspect ratio, and the target elevations are standardized using the training-set mean and standard deviation. The resulting task is
+% \[
+%     (x,y)\mapsto z,
+% \]
+% where \((x,y)\) are normalized horizontal LiDAR coordinates and \(z\) is the standardized ground elevation.
+
+% We compare four solver families:
+% \begin{itemize}
+%     \item \textbf{EFGP-CG}: the unpreconditioned EFGP conjugate-gradient solver. This is the main baseline we want to accelerate. It uses the same Fourier weight-space matrix-vector oracle without preconditioning.
+
+%     \item \textbf{EigenPro-PCG(Global EP-PCG)}: a global EigenPro-type spectral correction applied inside the same EFGP weight-space system.
+
+%     \item \textbf{Active inverse(Active inv.)}: an inverse active-block solve. It selects high-score Fourier modes, embeds them in a Cartesian box, and applies \(A_{BB}^{-1}\).
+
+%     \item \textbf{Box-EigenPro}: an eigen-compressed active-box preconditioner. It uses a larger active box but compresses the correction to \(q\) leading local eigendirections.
+% \end{itemize}
+
+% For each preconditioner family, we select the fastest converged configuration among a fixed candidate set subject to a predictive-accuracy screen: the training RMSE must be no larger than \(1.10\) times that of the EFGP-CG baseline. The tables report test RMSE, total time, and speedup relative to EFGP-CG using the same EFGP grid. The total time includes EFGP setup, preconditioner construction when applicable, and the iterative solve, but not the final prediction evaluation unless explicitly stated. All experiments in this section were run on Google Colab with an NVIDIA A100 GPU.
+% %citation: cuNUFFT
+
+% In the numerical experiments, we report timing components separately. The EFGP setup time includes the NUFFT construction of the Toeplitz generator and the right-hand side. The preconditioner build time includes active-set selection, active-box construction, tail diagonal construction, and either the Cholesky factorization or the eigenspace computation. The solve time includes all PCG iterations, including both EFGP matrix-vector products and preconditioner applications. Prediction time is reported separately when target evaluation is included.
+
+\section{Numerical Experiments}
+\label{sec:experiments}
+
+In this section we evaluate whether the proposed active-block preconditioners accelerate the EFGP weight-space solve while maintaining comparable prediction accuracy. The experiments are organized around three questions. First, do the preconditioners reduce the end-to-end solve time? Second, when is a small inverse active block sufficient? Third, when does the useful active region become large enough that an EigenPro-type preconditioner is preferable?
+
+\subsection{Experimental setup}
+\label{subsec:exp-setup}
+
+We consider two regression tasks. The first is a synthetic low-dimensional regression problem on \([0,1]^d\). The training inputs are sampled iid from the
+unit cube,
+\[
+    x_i\sim \mathrm{Unif}([0,1]^d), i=1,...,N
+\]
+and the labels are generated from a smooth target function with additive Gaussian noise, as in \cite{greengard2025efgp,barnett2024uniform}
+\[
+    f_\star(x)
+    =
+    \cos\!\left(2\pi\langle x,\omega\rangle+1.3\right),
+    \qquad
+    y_i=f_\star(x_i)+\varepsilon_i,
+    \qquad
+    \varepsilon_i\sim \mathcal N(0,\sigma^2).
+\]
+
+The second task is a real geospatial regression problem based on the USGS 3DEP LiDAR Point Cloud dataset~\cite{usgs3dep_lpc,usgs_winnebago_2018_laz}. We used the
+\texttt{USGS\_LPC\_IL\_Winnebago\_2018} project and selected contiguous blocks of LAS/LAZ tiles. Only ground-class points are retained, so the task is a bare-earth elevation regression problem. The raw horizontal coordinates are shifted and rescaled with a shared spatial scale to preserve the physical aspect ratio, and the target elevations are standardized using the training-set mean and standard deviation. The resulting task is
+\[
+    (x,y)\mapsto z,
+\]
+where \((x,y)\) are the normalized horizontal LiDAR coordinates and \(z\) is the standardized ground elevation.
+
+
+We use two translation-invariant kernels with lengthscale \(\ell=0.1\):
+\begin{equation}
+k_{\mathrm{SE}}(x,z)
+=
+\exp\left(-\frac{r^2}{2\ell^2}\right),
+\qquad
+k_{\mathrm{Mat\acute{e}rn}\text{-}3/2}(x,z)
+=
+\left(1+\frac{\sqrt{3}r}{\ell}\right)
+\exp\left(-\frac{\sqrt{3}r}{\ell}\right),
+\label{eq:experiment-kernels}
+\end{equation}
+where \(r=\|x-z\|_2\). The squared exponential kernel has rapidly decaying Fourier weights and leads to a relatively small EFGP grid in our experiments. The Mat\'ern-\(3/2\) kernel is more challenging because its Fourier weights decay algebraically, requiring a larger Fourier grid for reaching the pre-specified kernel approximation error (\(M=35721\)) and producing a more ill-conditioned weight-space system\cite{greengard2025efgp,barnett2024uniform}.
+
+We report prediction accuracy using the test root-mean-square error
+\begin{equation}
+    \mathrm{RMSE}
+    =
+    \left(
+    \frac{1}{N_{\mathrm{test}}}
+    \sum_{i=1}^{N_{\mathrm{test}}}
+    \bigl(\widehat f(x_i)-y_i\bigr)^2
+    \right)^{1/2}.
+    \label{eq:rmse}
+\end{equation}
+Since all methods use the same EFGP Fourier discretization within each row, the preconditioner should be interpreted as accelerating the linear solve rather than changing the model class.
+
+We compare four solver families:
+\begin{itemize}
+    \item \textbf{EFGP-CG}: the unpreconditioned EFGP conjugate-gradient solver. This is the main baseline we want to accelerate in \cite{greengard2025efgp,barnett2024uniform}. It uses the EFGP matvec product without preconditioning.
+
+    \item \textbf{Global EigenPro-PCG (Global EP-PCG)}: a global EigenPro preconditioner applied inside the same EFGP weight-space system.
+
+    \item \textbf{Active inverse (Active inv.)}: an inverse active-block preconditioner. It selects high-score Fourier modes, embeds them in a Cartesian box, and applies \(A_{BB}^{-1}\).
+
+    \item \textbf{Box-EigenPro}: an EigenPro-Typed active-box preconditioner. It uses a larger active box but compresses \(q\) leading local eigendirections.
+\end{itemize}
+
+For each preconditioner family, we select the fastest converged configuration among a fixed candidate set subject to a predictive-accuracy screen: the training RMSE must be no larger than \(1.10\) times that of the EFGP-CG baseline. The tables report test RMSE, total time, and speedup relative to EFGP-CG using the same EFGP grid. The total time includes EFGP setup, preconditioner construction when applicable, and the iterative solve, but not the final prediction evaluation unless explicitly stated. All experiments in this section were run on Google Colab with an NVIDIA A100 GPU.
+%citation: cuNUFFT
+
+In the numerical experiments, we report timing components separately. The EFGP setup time includes the NUFFT construction of the Toeplitz generator and the right-hand side. The preconditioner build time includes active-set selection, active-box construction, tail diagonal construction, and either the inverse computation or the eigenspace computation. The solve time includes all PCG iterations, including both EFGP matrix-vector products and preconditioner applications. Prediction time is reported separately when target evaluation is included.
+
+
+
+
+
+\subsection{Mechanism diagnostics}
+\label{subsec:mechanism-diagnostics}
+Figure~\ref{fig:mechanism-diagnostics} shows that the squared exponential
+score is concentrated in fewer Fourier modes than the Mat\'ern-\(3/2\) score,
+and that the active-window spectrum contains a small number of dominant
+directions. Flattening these directions substantially accelerates residual
+convergence, as shown in Figure~\ref{fig:residual-convergence}, and brings the
+held-out RMSE to its stable regime earlier, as shown in
+Figure~\ref{fig::rmse-checkpoint-convergence}. Thus, Fourier-score localization and
+spectral flattening translate into faster convergence without changing the
+underlying EFGP discretization.
+
+
+% Before reporting the full timing results, we first examine why the proposed preconditioners help. Figure~\ref{fig:mechanism-diagnostics} summarizes three diagnostic quantities. Panel~(a) shows the cumulative active-score mass
+% \[
+%     \frac{\sum_{j\in S_k}\rho_j}{\sum_{j\in J_m}\rho_j},
+%     \qquad
+%     \rho_j=\frac{N|D_{j,j}|^2}{\lambda},
+% \]
+% where \(S_k\) contains the \(k\) largest-score Fourier modes. For the squared exponential kernel, the score mass is concentrated in a small number of modes. For the Mat\'ern-\(3/2\) kernel, the decay is slower, so more modes are needed to capture the same fraction of the active score.
+
+% Panels~(b) and~(c) show the active-window spectrum and the ideal spectrum after an EigenPro-type preconditioner. The raw active-window spectrum has a small number of very large directions followed by a much flatter tail. The EigenPro-type preconditioner flattens these leading directions and reduces the effective condition number of the active block. This is the regime in which a low-rank spectral correction is useful: it does not approximate the whole inverse, but it targets the directions most responsible for slow Krylov convergence.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=.98\linewidth]{paper_project/picture/figure1_mechanism_diagnostics.png}
+    \caption{Mechanism diagnostics for the active Fourier preconditioners at
+\(N=10^8\).
+Panel~(a) shows the cumulative Fourier-score mass for the squared exponential
+and Mat\'ern-\(3/2\) kernels.
+Panel~(b) shows a representative active-window spectrum.
+Panel~(c) shows the corresponding idealized spectrum after an
+EigenPro-type correction, with the leading directions flattened to the
+selected spectral level.}
+    \label{fig:mechanism-diagnostics}
+\end{figure}
+
+% Figure~\ref{fig:residual-convergence} shows the residual convergence behavior on a representative difficult Mat\'ern problem. The unpreconditioned EFGP-CG baseline decreases the residual slowly over thousands of iterations. Both spectral preconditioners reduce the residual much more rapidly. The Box-EigenPro curve is particularly informative: although it uses only a compressed active-box correction, it reaches the \(10^{-6}\) residual tolerance
+% within the first few hundred iterations.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=.98\linewidth]{paper_project/picture/fig6_residual_convergence.png}
+    \caption{Relative residual convergence for a representative Mat\'ern-\(3/2\)
+weight-space solve at \(N=10^8\).
+The left panel shows the full iteration range, and the right panel enlarges
+the first \(400\) iterations.}
+    \label{fig:residual-convergence}
+\end{figure}
+% Figure~\ref{fig:rmse-checkpoint-convergence} verifies that faster residual convergence corresponds to faster stabilization of prediction accuracy. The held-out RMSE reaches its plateau much earlier for the preconditioned solvers than for unpreconditioned EFGP-CG.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=.55\linewidth]{paper_project/picture/rmse_checkpoint_convergence.png}
+    \caption{Held-out RMSE as a function of solver iteration for the same
+EFGP-discretized problem at \(N=10^8\).}
+    \label{fig:rmse-checkpoint-convergence}
+\end{figure}
+
+\subsection{Scalability and best selected configurations}
+\label{subsec:exp-scalability}
+
+Table~\ref{tab:best-scalability} summarizes the main scalability results. To
+avoid obscuring the main trends with a very large method-by-method table, each
+row reports the EFGP-CG baseline and the fastest selected preconditioned
+configuration under the accuracy screen described above. In small-\(M\) cases,
+the selected active box may coincide with the full Fourier grid; in that case,
+the active inverse should be interpreted as a full-grid inverse preconditioner
+rather than as a small active-set correction.
+
+\begin{table*}[t]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\caption{Main scalability summary. For each kernel, dataset, and training size,
+the table reports the EFGP-CG baseline and the fastest selected preconditioned
+configuration. \(T_{\mathrm{tot}}\) is the total time in seconds. Speedup is
+computed relative to EFGP-CG using \(T_{\mathrm{tot}}\). In the method column,
+Active inv. reports \((|S|,|B|)\), Box-EigenPro reports \((|S|,|B|,q)\), and
+global EP-PCG reports \(q\). In addition, the discrepancy between full Box-EigenPro and Global EP-PCG stems from GPU execution variations, floating-point rounding errors and randomness; when $q$ is identical, this difference becomes negligible. }
+\label{tab:best-scalability}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{lllrrrrlrrrr}
+\toprule
+Kernel & Data & \(N\) & \(M\) &
+CG iter. & CG \(T_{\mathrm{tot}}\) &
+Best selected method &
+Iter. & \(T_{\mathrm{tot}}\) & Speedup & Test RMSE \\
+\midrule
+SE & Synthetic & \(10^6\) & 1225 & 1115 & 1.23 & Active inv. \((512,625)\) & 10 & 0.05 & 25.35 & \(4.91{\times}10^{-3}\) \\
+SE & Synthetic & \(3{\times}10^6\) & 1225 & 1495 & 1.64 & Active inv. \((512,625)\) & 16 & 0.07 & 23.34 & \(2.91{\times}10^{-3}\) \\
+SE & Synthetic & \(10^7\) & 1225 & 2051 & 2.35 & Active inv. \((1024,1225)\) & 1 & 0.11 & 21.99 & \(1.70{\times}10^{-3}\) \\
+SE & Synthetic & \(3{\times}10^7\) & 1225 & 2613 & 3.10 & Active inv. \((1024,1225)\) & 1 & 0.21 & 14.70 & \(1.07{\times}10^{-3}\) \\
+SE & Synthetic & \(10^8\) & 1225 & 3344 & 4.74 & Active inv. \((1024,1225)\) & 1 & 0.56 & 8.46 & \(6.88{\times}10^{-4}\) \\
+SE & Synthetic & \(3{\times}10^8\) & 1225 & 2777 & 9.80 & Active inv. \((1024,1225)\) & 1 & 1.55 & 6.31 & \(5.65{\times}10^{-4}\) \\
+\addlinespace[1pt]
+SE & USGS & \(10^6\) & 1225 & 717 & 0.79 & Active inv. \((1024,1225)\) & 1 & 0.06 & 12.28 & \(3.95{\times}10^{-1}\) \\
+SE & USGS & \(3{\times}10^6\) & 1225 & 1030 & 1.15 & Active inv. \((1024,1225)\) & 1 & 0.08 & 14.07 & \(3.90{\times}10^{-1}\) \\
+SE & USGS & \(10^7\) & 1225 & 1495 & 1.70 & Active inv. \((1024,1225)\) & 1 & 0.11 & 15.93 & \(3.82{\times}10^{-1}\) \\
+SE & USGS & \(3{\times}10^7\) & 1225 & 2371 & 2.87 & Active inv. \((1024,1225)\) & 1 & 0.21 & 13.55 & \(3.74{\times}10^{-1}\) \\
+SE & USGS & \(10^8\) & 1225 & 3541 & 4.83 & Active inv. \((1024,1225)\) & 1 & 0.56 & 8.66 & \(3.65{\times}10^{-1}\) \\
+SE & USGS & \(3{\times}10^8\) & 1225 & 5611 & 10.75 & Active inv. \((1024,1225)\) & 1 & 1.81 & 5.95 & \(3.56{\times}10^{-1}\) \\
+\addlinespace[1pt]
+Mat\'ern & Synthetic & \(10^6\) & 35721 & 1806 & 1.94 & Active inv. \((1024,1369)\) & 130 & 0.27 & 7.23 & \(1.89{\times}10^{-2}\) \\
+Mat\'ern & Synthetic & \(3{\times}10^6\) & 35721 & 2791 & 6.95 & Active inv. \((1024,1369)\) & 188 & 0.39 & 17.87 & \(1.31{\times}10^{-2}\) \\
+Mat\'ern & Synthetic & \(10^7\) & 35721 & 4163 & 4.55 & Active inv. \((2048,2601)\) & 174 & 0.55 & 8.24 & \(8.28{\times}10^{-3}\) \\
+Mat\'ern & Synthetic & \(3{\times}10^7\) & 35721 & 5968 & 6.74 & Active inv. \((2048,2601)\) & 262 & 0.79 & 8.52 & \(5.26{\times}10^{-3}\) \\
+Mat\'ern & Synthetic & \(10^8\) & 35721 & 8831 & 10.54 & Active inv. \((4096,5329)\) & 187 & 1.76 & 6.00 & \(2.97{\times}10^{-3}\) \\
+Mat\'ern & Synthetic & \(3{\times}10^8\) & 35721 & 11494 & 15.33 & Active inv. \((4096,5329)\) & 246 & 2.86 & 5.36 & \(1.74{\times}10^{-3}\) \\
+\addlinespace[1pt]
+Mat\'ern & USGS & \(10^6\) & 35721 & 1804 & 1.95 & Global EP-PCG \(q=128\) & 131 & 0.63 & 3.09 & \(1.23{\times}10^{-1}\) \\
+Mat\'ern & USGS & \(3{\times}10^6\) & 35721 & 2876 & 3.11 & Global EP-PCG \(q=128\) & 203 & 0.75 & 4.13 & \(1.18{\times}10^{-1}\) \\
+Mat\'ern & USGS & \(10^7\) & 35721 & 4914 & 5.31 & Global EP-PCG \(q=128\) & 341 & 0.98 & 5.42 & \(1.15{\times}10^{-1}\) \\
+Mat\'ern & USGS & \(3{\times}10^7\) & 35721 & 7796 & 8.64 & Global EP-PCG \(q=128\) & 534 & 1.38 & 6.27 & \(1.13{\times}10^{-1}\) \\
+Mat\'ern & USGS & \(10^8\) & 35721 & 13539 & 15.46 & Box-EigenPro \((35721,35721,320)\) & 264 & 1.60 & 9.65 & \(1.12{\times}10^{-1}\) \\
+Mat\'ern & USGS & \(3{\times}10^8\) & 35721 & 22466 & 27.75 & Box-EigenPro \((35721,35721,384)\) & 320 & 2.90 & 9.56 & \(1.11{\times}10^{-1}\) \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+The squared exponential results show a favorable small-\(M\) regime. For the
+chosen lengthscale and EFGP tolerance, the Fourier grid has only \(M=1225\)
+modes, so dense active-block solves are relatively cheap. On the synthetic
+task, the active inverse is the fastest selected method for all tested training
+sizes. For \(N=10^6\) and \(3\times10^6\), a smaller active box
+\((|S|,|B|)=(512,625)\) is already sufficient. Starting from \(N=10^7\), the
+selected box expands to \(|B|=1225=M\), and the method effectively becomes a
+full-grid inverse preconditioner for the EFGP weight-space system. In this
+small-\(M\) setting, that is still inexpensive enough to be useful: the solve is
+reduced to one PCG iteration and the total-time speedup ranges from
+\(21.99\times\) at \(N=10^7\) to \(6.31\times\) at \(N=3\times10^8\).
+
+The USGS squared exponential results show the same behavior even more clearly.
+The fastest selected configuration is the full-grid active inverse
+\((|S|,|B|)=(1024,1225)\) for every tested \(N\). This reduces the PCG solve to
+one iteration and gives \(5.95\times\)--\(15.93\times\) total-time speedup while
+maintaining essentially the same test RMSE. These rows should therefore be
+interpreted as a small-\(M\) direct-preconditioning regime rather than as the
+main evidence for a small active set. The result is still useful: when EFGP
+produces a small Fourier system, it can be better to fall back to an
+ full-grid inverse preconditioner than to use a compressed spectral correction.
+
+This also clarifies the role of the active-block framework. The method does not
+require the active box to remain small. As \(N\) increases and the EFGP
+weight-space system becomes more ill-conditioned, the active box selected by
+the sweep may expand. In the squared exponential experiments, this expansion
+reaches the full grid, but the full grid is small enough that inverse
+preconditioning remains affordable. In larger-\(M\) regimes, such as the
+Mat\'ern experiments below, the same expansion would make a dense inverse too
+expensive, and the EigenPro-type active-box correction becomes the more
+appropriate fallback.
+
+\subsection{Large-scale Mat\'ern comparison}
+\label{subsec:large-matern-comparison}
+
+Table~\ref{tab:matern-large-method-comparison} expands the large-\(N\)
+Mat\'ern rows to show all method families. This table is the clearest evidence for the division of labor between the three proposed preconditioners. On the synthetic problem, the active inverse remains best even at \(N=3\times10^8\). On the USGS problem, no active-inverse candidate passes the accuracy screen in the large-\(N\) runs, while Box-EigenPro outperforms both EFGP-CG and the EigenPro-PCG baseline.
+
+\begin{table*}[t]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{4pt}
+\caption{Method comparison in the large-scale Mat\'ern-\(3/2\) regime
+(\(M=35721\)). ``No valid candidate'' means that no active-inverse candidate in
+the sweep satisfied the RMSE requirement.}
+\label{tab:matern-large-method-comparison}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{lllrrrrr}
+\toprule
+Data & \(N\) & Method & Configuration & Iter. & \(T_{\mathrm{tot}}\) & Test RMSE & Speedup \\
+\midrule
+Synthetic & \(10^8\) & EFGP-CG & -- & 8831 & 10.54 & \(2.95{\times}10^{-3}\) & 1.00 \\
+Synthetic & \(10^8\) & EigenPro-PCG & \(q=320\) & 496 & 2.07 & \(2.97{\times}10^{-3}\) & 5.09 \\
+Synthetic & \(10^8\) & Active inverse & \(|S|=4096,\ |B|=5329\) & 187 & 1.76 & \(2.97{\times}10^{-3}\) & 6.00 \\
+Synthetic & \(10^8\) & Box-EigenPro & \(|S|=35721,\ |B|=35721,\ q=320\) & 495 & 2.04 & \(2.97{\times}10^{-3}\) & 5.16 \\
+\addlinespace[1pt]
+Synthetic & \(3{\times}10^8\) & EFGP-CG & -- & 11494 & 15.33 & \(1.73{\times}10^{-3}\) & 1.00 \\
+Synthetic & \(3{\times}10^8\) & EigenPro-PCG & \(q=384\) & 643 & 3.34 & \(1.74{\times}10^{-3}\) & 4.57 \\
+Synthetic & \(3{\times}10^8\) & Active inverse & \(|S|=4096,\ |B|=5329\) & 246 & 2.86 & \(1.74{\times}10^{-3}\) & 5.36 \\
+Synthetic & \(3{\times}10^8\) & Box-EigenPro & \(|S|=35721,\ |B|=35721,\ q=384\) & 643 & 3.34 & \(1.74{\times}10^{-3}\) & 4.58 \\
+\addlinespace[1pt]
+USGS & \(10^8\) & EFGP-CG & -- & 13539 & 15.46 & \(1.12{\times}10^{-1}\) & 1.00 \\
+USGS & \(10^8\) & EigenPro-PCG & \(q=320\) & 270 & 1.68 & \(1.12{\times}10^{-1}\) & 9.20 \\
+USGS & \(10^8\) & Active inverse & no valid candidate & -- & -- & -- & -- \\
+USGS & \(10^8\) & Box-EigenPro & \(|S|=35721,\ |B|=35721,\ q=320\) & 264 & 1.60 & \(1.12{\times}10^{-1}\) & 9.65 \\
+\addlinespace[1pt]
+USGS & \(3{\times}10^8\) & EFGP-CG & -- & 22466 & 27.75 & \(1.11{\times}10^{-1}\) & 1.00 \\
+USGS & \(3{\times}10^8\) & EigenPro-PCG & \(q=384\) & 320 & 2.90 & \(1.11{\times}10^{-1}\) & 9.56 \\
+USGS & \(3{\times}10^8\) & Active inverse & no valid candidate & -- & -- & -- & -- \\
+USGS & \(3{\times}10^8\) & Box-EigenPro & \(|S|=35721,\ |B|=35721,\ q=384\) & 320 & 2.90 & \(1.11{\times}10^{-1}\) & 9.56 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+The synthetic rows show that the active inverse can remain effective even in a
+large Fourier grid when the difficult eigendirections are still localized in a
+moderate active block. At \(N=10^8\), the active inverse reduces the
+iteration count from \(8831\) to \(187\) and gives a \(6.00\times\) speedup.
+At \(N=3\times10^8\), the same active box size \(|B|=5329\) still gives the
+best selected time, reducing the iteration count from \(11494\) to \(246\) and
+giving a \(5.36\times\) speedup. In this case, expanding to a full-grid
+Box-EigenPro correction is valid and substantially faster than EFGP-CG, but it
+does not beat the smaller inverse active solve because the active inverse already
+captures the main slow directions.
+
+The USGS rows show a different regime. For \(N=10^8\) and \(3\times10^8\), no
+active-inverse candidate in the sweep satisfies the training-RMSE screen. This
+does not mean that exact inversion is conceptually invalid; rather, it indicates
+that the small and moderate active boxes tested here no longer capture enough
+of the difficult spectrum on this real-data problem. The natural exact-inverse
+fallback would be to keep enlarging \(B\), but once \(B\) approaches the full
+Fourier grid, the inverse active-block solve becomes a dense full-matrix
+preconditioner for \(M=35721\), which is no longer attractive.
+
+This is the regime where the EigenPro-type fallback is useful. The global
+EigenPro-PCG  and Box-EigenPro variant reduces the iteration count to \(264\) and \(320\), respectively, and gives \(9.65\times\) and \(9.56\times\) total-time speedups. Thus the large-scale USGS results support the intended division of labor: small or moderate inverse active blocks are best when the bad directions are localized, while full-box EigenPro-type and Global EigenPro spectral correction are the robust choices when the active region expands toward the whole Fourier grid.
+
+\subsection{Parameter sensitivity}
+\label{subsec:parameter-sensitivity}
+
+The main tables report the fastest selected configuration in each method family. Figure~\ref{fig:boxeig-parameter-sweep} shows a representative sweep for the Mat\'ern USGS problem with \(N=3\times10^8\) and \(M=35721\). The horizontal axis is the retained spectral rank \(q\), and the curves correspond to different active-box sizes.
+
+The sweep illustrates the cost--quality tradeoff. Increasing \(q\) generally reduces the number of PCG iterations because more leading active-box directions are corrected. Increasing the active box can further reduce the iteration count because more difficult Fourier modes are included. However, these improvements increase preconditioner build and application costs. The best wall-clock time is therefore attained by balancing spectral correction against build cost, rather than by taking the largest correction available.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=.92\linewidth]{paper_project/picture/group_c_boxeig_parameter_sweep.png}
+    \caption{Parameter sweep for Box-EigenPro on the Mat\'ern USGS problem with
+    \(N=3\times10^8\) and \(M=35721\). Left: PCG iteration count as a function
+    of spectral rank \(q\). Right: total time including preconditioner build and
+    the iterative solve. Larger boxes and larger ranks reduce iteration counts,
+    but the best total time is obtained by balancing spectral correction against
+    build and application cost.}
+    \label{fig:boxeig-parameter-sweep}
+\end{figure}
+
+\subsection{Summary of findings}
+\label{subsec:exp-summary}
+
+The experiments support three conclusions. First, the remaining bottleneck in
+large-scale EFGP is often not the cost of a single matrix-vector product, but
+the number of Krylov iterations needed to solve the weight-space system.
+Preconditioning reduces this iteration count substantially while preserving
+comparable test RMSE under the same EFGP discretization.
+
+Second, the small active-block idea is highly effective in regimes where the
+ill-conditioned component is concentrated in a compact Fourier region. This is
+especially clear in the synthetic experiments and in the squared exponential
+small-\(M\) setting, where the exact active inverse gives the best end-to-end
+time.
+
+Third, as \(N\) increases and the weight-space system becomes sufficiently
+ill-conditioned, the required active region can grow. In the large-scale USGS
+Mat\'ern experiments, the small active inverse no longer provides the best
+tradeoff, and the most effective method becomes EigenPro-type spectral
+preconditioning on a large active box. This transition is consistent with the
+design of the proposed methods: exact correction on a small active block is best
+when the active block is small, while compressed spectral correction is better
+when the active box must become large.
+
+\FloatBarrier

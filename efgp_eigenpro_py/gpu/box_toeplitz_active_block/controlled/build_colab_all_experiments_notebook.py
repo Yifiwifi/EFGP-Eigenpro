@@ -49,12 +49,12 @@ def build_notebook() -> dict:
 
             | protocol | 内容 | 可以说明什么 |
             |---|---|---|
-            | `end_to_end_krr`（Stage 1） | true data-space Nyström/RPCholesky、标准 EFGP-CG/Jacobi/full-eig、以及 proposed binned full pipeline | 完整 KRR 的精度、setup、solving 和 train-total；10M–300M 规模性与 robustness |
+            | `end_to_end_krr`（Stage 1） | 主报告显式区分 EFGP-CG、inverse 族、active-box EigenPro 族（含 full-grid）；Nyström/RPCholesky/Jacobi 放在次级完整 KRR matrix | 完整 KRR 的精度、setup、solving 和 train-total；10M–300M 两族规模、robustness、SE/Matérn 与次级算法比较 |
             | `controlled_fixed_system`（Stage 2） | Stage 1 冻结选出的 target 上，所有 solver/preconditioner 共享同一个哈希 (A\beta=b) | solver-total = selection + preconditioner build + solve 的严格配对比较 |
             | `archived_complete_pipeline` | 原 `group_a/group_b/group_c`，direct CG 与 binned-C1 candidates，含 setup/solve/prediction | 原论文探索性规模图与候选筛选 |
             | `prediction_audit` | 读取 timed system 与保存的 canonical timed \(\beta\)，仅计算 test RMSE | 同一计时解的预测等价性；其中 prediction 时间不进入 speedup claim |
 
-            使用方式：选择 Colab 的 **A100 GPU + High-RAM** runtime，然后点击 **运行时 → 全部运行**。默认的 `RUN_ALL_FORMAL_EXPERIMENTS=True` 先运行 Stage 1 的 10M/30M/100M/300M 完整 KRR time–quality 比较，再按预注册的宽松 usability 范围选出 target；只有 target 成功冻结后才生成 \(\lambda\)、\(\ell\)、box budget、dataset robustness，并进入 Stage 2 的 fixed-\(A,b\) solver comparison。资源不足或没有合格 target 时 fail closed，不会事后挑选替代点。
+            使用方式：选择 Colab 的 **A100 GPU + High-RAM** runtime，然后点击 **运行时 → 全部运行**。默认的 `RUN_ALL_FORMAL_EXPERIMENTS=True` 先运行两族 10M–300M replay 和 SE/Matérn profile，再运行含 Nyström/RPCholesky/Jacobi 的次级完整 KRR matrix，并按预注册规则冻结 Stage 2 target；随后分别生成两族 robustness 与 fixed-\(A,b\) solver comparison。族内只在 `ours-binned-active-eig` 和 `efgp-standard-full-eig` 之间按当前 median total 取最小；inverse 不与 eigenpair 合并，RMSE/R² 不作为删除成功 timing 的门槛。
 
             `nystrom-krr` 与 `rpcholesky-krr` 只出现在 Stage 1；Fourier-space randomized preconditioner adaptations 不得以 Nyström/RPCholesky KRR 的名字进入正式图。参考 notebook 的 legacy 路线默认关闭。
             """
@@ -85,12 +85,21 @@ def build_notebook() -> dict:
             # 正式证据链：Stage 1 完整 KRR，Stage 2 固定 A,b solver/preconditioner。
             RUN_STAGE1_END_TO_END_KRR = RUN_ALL_FORMAL_EXPERIMENTS
             RUN_STAGE1_ROBUSTNESS = RUN_ALL_FORMAL_EXPERIMENTS
+            RUN_STAGE1_FAMILY_SCALE = RUN_ALL_FORMAL_EXPERIMENTS
+            RUN_STAGE1_FAMILY_ROBUSTNESS = RUN_ALL_FORMAL_EXPERIMENTS
+            RUN_STAGE1_FAMILY_KERNEL = RUN_ALL_FORMAL_EXPERIMENTS
             RUN_STAGE2_FIXED_AB_SOLVERS = RUN_ALL_FORMAL_EXPERIMENTS
             STAGE1_SCALE_PROFILE = "scale_10m_300m"
+            STAGE1_FAMILY_SCALE_PROFILE = "family_scale_10m_300m"
+            STAGE1_FAMILY_KERNEL_PROFILE = "family_kernel_at_30m"
             STAGE1_METHODS = [
                 "nystrom-krr", "rpcholesky-krr", "efgp-standard-cg",
                 "efgp-standard-jacobi", "efgp-standard-full-eig",
                 "ours-binned-default",
+            ]
+            STAGE1_FAMILY_METHODS = [
+                "efgp-standard-cg", "efgp-standard-full-eig",
+                "ours-binned-inverse", "ours-binned-active-eig",
             ]
             STAGE2_METHODS = [
                 "cg", "jacobi", "default", "active-inverse", "active-eig", "full-eig",
@@ -945,16 +954,16 @@ def build_notebook() -> dict:
     cells.append(
         _markdown(
             r"""
-            # Stage 1 — true end-to-end KRR（正式主结果）
+            # Stage 1 — true end-to-end KRR（两族主报告 + 次级 broad matrix）
 
-            本阶段比较的是**完整 KRR pipeline**，不是同一 Fourier 系统上的 preconditioner：`nystrom-krr`、`rpcholesky-krr`、`efgp-standard-cg`、`efgp-standard-jacobi`、`efgp-standard-full-eig`、`ours-binned-default` 各自承担自己的 setup 与 solve。正式计时字段固定为：
+            本阶段比较的是**完整 KRR pipeline**，不是同一 Fourier 系统上的 preconditioner。主报告 profile 显式运行 `efgp-standard-cg`、`ours-binned-inverse`、`ours-binned-active-eig`、`efgp-standard-full-eig`；inverse 始终单列，后两者同属 active-box EigenPro 族并按当前 median train-total 选族内最快。次级 broad matrix 才加入 `nystrom-krr`、`rpcholesky-krr` 与 `efgp-standard-jacobi`。每条 pipeline 各自承担自己的 setup 与 solve。正式计时字段固定为：
 
             - `setup_seconds`：数据空间 landmarks / RPCholesky factor 或 EFGP Fourier/precompute setup；
             - `solving_phase_seconds`：score selection（若使用）+ preconditioner build + iterative solve；
             - `train_total_seconds = setup_seconds + solving_phase_seconds`；
             - prediction 单列，用于报告 RMSE/R² 和 usability，不并入训练加速。
 
-            `ours-binned-default` 与 `efgp-standard-full-eig` 不在本次正式计时中重新扫参。每个 dataset/N 的 proposed top-k/rank 与 full-eig rank取自仓库中由旧诊断 notebook 生成的 `paper_table1_selected.csv`；它只作为预先固定配置的参考，不是原始数据或正式 timing 来源。旧 timing 明确排除，全部时间按当前 1 次预热 + 5 次 measured 协议重新测量。Synthetic 数据引入严格匹配该 notebook：每个规模为 `_ntrainN`，缺失时使用 noise=.3、seeds 20260421/1、5M chunk、`N/4` test 本地生成。
+            两族配置不在当前 timing 中扫参。每个 dataset/N 的 inverse top-k/box 与 active-eig top-k/box/rank 分别取自旧诊断 notebook 的 operation-level winners；full-grid EigenPro 也是 active-box EigenPro 族的候选。旧 timing 只导出到 appendix audit，正式 replay 全部按当前 1 次预热 + 5 次 measured 协议重新测量。Synthetic 数据引入严格匹配该 notebook：每个规模为 `_ntrainN`，缺失时使用 noise=.3、seeds 20260421/1、5M chunk、`N/4` test 本地生成。
 
             robustness 中冻结的 proposed top-k 是上界。若改变 lengthscale/dataset 后同一 score prefix 的中心闭包超过仍然冻结的 box budget，只有 robustness 配置会显式授权按同一确定性 score 顺序缩短到可容纳的最大 prefix；这不是扫参，不读取时间、迭代数、标签或精度。`configured_active_topk`、`effective_active_topk`、`effective_active_box_size`、`active_selection_rule` 与 `capacity_adapted` 都进入 canonical 表，必须披露实际运行配置。
 
@@ -1024,6 +1033,23 @@ def build_notebook() -> dict:
                 raise RuntimeError(
                     f"Stage-1 scale sizes {planned_scale_sizes} != frozen {FORMAL_SCALE_SIZES}."
                 )
+            stage1_family_scale_plan = stage1_suite.build_profile_plan(
+                stage1_config,
+                STAGE1_FAMILY_SCALE_PROFILE,
+                dataset_dir=str(LOCAL_DATA_DIR),
+                output_root=STAGE1_OUTPUT_ROOT,
+            )
+            stage1_family_kernel_plan = stage1_suite.build_profile_plan(
+                stage1_config,
+                STAGE1_FAMILY_KERNEL_PROFILE,
+                dataset_dir=str(LOCAL_DATA_DIR),
+                output_root=STAGE1_OUTPUT_ROOT,
+            )
+            if any(
+                list(item["config"].methods) != list(STAGE1_FAMILY_METHODS)
+                for item in [*stage1_family_scale_plan, *stage1_family_kernel_plan]
+            ):
+                raise RuntimeError("Family profiles differ from STAGE1_FAMILY_METHODS.")
 
             stage1_campaign_rows = []
             stage1_selected_case_records = []
@@ -1077,6 +1103,7 @@ def build_notebook() -> dict:
                     return None
                 expected_config = normalize_stage1_config_value(asdict(item["config"]))
                 observed_config = normalize_stage1_config_value(saved_config)
+                expected_methods = list(item["config"].methods)
                 required_summary_columns = {
                     *stage1_suite.STAGE2_SYSTEM_CONFIG_FIELDS,
                     *stage1_suite.DATASET_PROVENANCE_CONFIG_FIELDS,
@@ -1115,12 +1142,12 @@ def build_notebook() -> dict:
                     and completion.get("timing_scope") == stage1_suite.TIMING_SCOPE
                     and completion.get("artifact_complete") is True
                     and completion.get("all_rows_present") is True
-                    and list(completion.get("methods", [])) == list(STAGE1_METHODS)
-                    and list(saved_config.get("methods", [])) == list(STAGE1_METHODS)
+                    and list(completion.get("methods", [])) == expected_methods
+                    and list(saved_config.get("methods", [])) == expected_methods
                     and observed_config == expected_config
                     and required_summary_columns.issubset(summary.columns)
                     and set(summary.get("method", pd.Series(dtype=str)).astype(str))
-                    == set(STAGE1_METHODS)
+                    == set(expected_methods)
                 )
                 return completion if artifact_matches else None
 
@@ -1291,6 +1318,20 @@ def build_notebook() -> dict:
                     print(f"[Stage 1/{item['case_id']}] {status}: {reason or ('resumed' if reused else 'executed')}")
                 return completed_items
 
+            completed_stage1_family_scale_items = []
+            if RUN_STAGE1_FAMILY_SCALE:
+                completed_stage1_family_scale_items = run_stage1_items(
+                    stage1_family_scale_plan,
+                    profile_label=STAGE1_FAMILY_SCALE_PROFILE,
+                )
+
+            completed_stage1_family_kernel_items = []
+            if RUN_STAGE1_FAMILY_KERNEL:
+                completed_stage1_family_kernel_items = run_stage1_items(
+                    stage1_family_kernel_plan,
+                    profile_label=STAGE1_FAMILY_KERNEL_PROFILE,
+                )
+
             completed_stage1_scale_items = []
             if RUN_STAGE1_END_TO_END_KRR:
                 completed_stage1_scale_items = run_stage1_items(
@@ -1332,6 +1373,15 @@ def build_notebook() -> dict:
                     frame["configured_expected_active_box_size"] = (
                         cfg.expected_active_box_size
                     )
+                    frame["configured_inverse_active_topk"] = cfg.inverse_active_topk
+                    frame["configured_inverse_expected_active_box_size"] = (
+                        cfg.inverse_expected_active_box_size
+                    )
+                    frame["configured_active_eig_topk"] = cfg.active_eig_topk
+                    frame["configured_active_eig_expected_active_box_size"] = (
+                        cfg.active_eig_expected_active_box_size
+                    )
+                    frame["configured_active_eig_rank"] = cfg.active_eig_rank
                     frame["parameter_selection_policy"] = str(
                         cfg.parameter_selection_policy
                     )
@@ -1339,6 +1389,241 @@ def build_notebook() -> dict:
                     frame["run_dir"] = str(run_dir)
                     frames.append(frame)
                 return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+
+            def select_two_family_rows(frame):
+                # Select one explicit inverse row and one eigenpair-family row
+                # per case using the current median method-owned train total.
+                # Accuracy is never a binary selector; RMSE/R2 remain adjacent.
+                if frame.empty:
+                    return pd.DataFrame()
+                selected = []
+                for case_id, case in frame.groupby("case_id", sort=False):
+                    case = case.copy()
+                    case["train_total_seconds_median"] = pd.to_numeric(
+                        case["train_total_seconds_median"], errors="coerce"
+                    )
+                    family_specs = (
+                        ("EFGP-CG", ["efgp-standard-cg"]),
+                        ("inverse", ["ours-binned-inverse"]),
+                        (
+                            "active-box-EigenPro",
+                            ["ours-binned-active-eig", "efgp-standard-full-eig"],
+                        ),
+                    )
+                    cg_rows = case.loc[
+                        case["method"].astype(str).eq("efgp-standard-cg")
+                    ]
+                    cg_total = (
+                        float(cg_rows.iloc[0]["train_total_seconds_median"])
+                        if len(cg_rows) == 1
+                        else np.nan
+                    )
+                    for family, candidates in family_specs:
+                        pool = case.loc[
+                            case["method"].astype(str).isin(candidates)
+                            & case["status"].astype(str).eq("ok")
+                            & case["train_total_seconds_median"].notna()
+                        ].sort_values(
+                            ["train_total_seconds_median", "method"],
+                            kind="mergesort",
+                        )
+                        if pool.empty:
+                            selected.append({
+                                "case_id": case_id,
+                                "reporting_family": family,
+                                "status": "no_successful_candidate",
+                                "family_candidate_methods": ",".join(candidates),
+                                "selection_rule": "minimum current median train total among status=ok rows; no accuracy cutoff",
+                            })
+                            continue
+                        row = pool.iloc[0].to_dict()
+                        total = float(row["train_total_seconds_median"])
+                        row.update({
+                            "reporting_family": family,
+                            "selected_method": str(row["method"]),
+                            "family_candidate_methods": ",".join(candidates),
+                            "family_candidate_count": int(len(pool)),
+                            "selection_rule": "minimum current median train total among status=ok rows; no accuracy cutoff",
+                            "speedup_vs_efgp_cg_ratio_of_medians": (
+                                cg_total / total
+                                if np.isfinite(cg_total) and total > 0
+                                else np.nan
+                            ),
+                        })
+                        selected.append(row)
+                return pd.DataFrame(selected)
+
+            stage1_family_scale_all = collect_stage1_summaries(
+                completed_stage1_family_scale_items
+            )
+            stage1_family_scale_selected = select_two_family_rows(
+                stage1_family_scale_all
+            )
+            STAGE1_FAMILY_SCALE_ALL_PATH = (
+                STAGE1_OUTPUT_ROOT / "stage1_family_scale_all_methods.csv"
+            )
+            STAGE1_FAMILY_SCALE_SELECTED_PATH = (
+                STAGE1_OUTPUT_ROOT / "stage1_family_scale_selected.csv"
+            )
+            stage1_family_scale_all.to_csv(STAGE1_FAMILY_SCALE_ALL_PATH, index=False)
+            stage1_family_scale_selected.to_csv(
+                STAGE1_FAMILY_SCALE_SELECTED_PATH, index=False
+            )
+
+            stage1_family_kernel_all = collect_stage1_summaries(
+                completed_stage1_family_kernel_items
+            )
+            stage1_family_kernel_selected = select_two_family_rows(
+                stage1_family_kernel_all
+            )
+            STAGE1_FAMILY_KERNEL_ALL_PATH = (
+                STAGE1_OUTPUT_ROOT / "stage1_family_kernel_all_methods.csv"
+            )
+            STAGE1_FAMILY_KERNEL_SELECTED_PATH = (
+                STAGE1_OUTPUT_ROOT / "stage1_family_kernel_selected.csv"
+            )
+            stage1_family_kernel_all.to_csv(STAGE1_FAMILY_KERNEL_ALL_PATH, index=False)
+            stage1_family_kernel_selected.to_csv(
+                STAGE1_FAMILY_KERNEL_SELECTED_PATH, index=False
+            )
+
+            # Appendix evidence: retain the original operation-level selection,
+            # the complete candidate rows, and a transparent two-family collapse.
+            archived_matern_tables = (
+                LOCAL_REPO
+                / "efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs"
+                / "btab_group_a_group_b_group_c_20260703_053504_export_bundle"
+                / "btab_group_a_group_b_group_c_20260703_053504"
+                / "diagnostic_tables"
+            )
+            archived_se_tables = (
+                LOCAL_REPO
+                / "efgp_eigenpro_py/gpu/box_toeplitz_active_block/outputs"
+                / "btab_group_a_group_b_group_c_20260703_053504_export_bundle"
+                / "btab_group_b_20260704_081848_export_bundle"
+                / "btab_group_b_20260704_081848"
+                / "diagnostic_tables"
+            )
+            archived_table_specs = (
+                (archived_matern_tables, "matern"),
+                (archived_se_tables, "se"),
+            )
+            archived_candidate_frames = []
+            archived_selected_frames = []
+            for table_root, kernel_key in archived_table_specs:
+                candidate_path = table_root / "paper_table1_candidates.csv"
+                selected_path = table_root / "paper_table1_selected.csv"
+                if not candidate_path.is_file() or not selected_path.is_file():
+                    raise FileNotFoundError(
+                        f"Tracked archived table is missing: {table_root}"
+                    )
+                candidates = pd.read_csv(candidate_path)
+                selected = pd.read_csv(selected_path)
+                if kernel_key == "matern":
+                    candidates = candidates.loc[
+                        candidates["kernel_family"].astype(str).str.lower().eq("matern")
+                    ]
+                    selected = selected.loc[
+                        selected["kernel_family"].astype(str).str.lower().eq("matern")
+                    ]
+                else:
+                    candidates = candidates.loc[
+                        candidates["kernel_family"].astype(str).str.lower().eq("se")
+                    ]
+                    selected = selected.loc[
+                        selected["kernel_family"].astype(str).str.lower().eq("se")
+                    ]
+                candidates["archived_source_file"] = str(candidate_path)
+                selected["archived_source_file"] = str(selected_path)
+                archived_candidate_frames.append(candidates)
+                archived_selected_frames.append(selected)
+
+            archived_full_results = pd.concat(
+                archived_candidate_frames, ignore_index=True, sort=False
+            )
+            archived_operation_selected = pd.concat(
+                archived_selected_frames, ignore_index=True, sort=False
+            )
+
+            def archived_reporting_family(method_family):
+                label = str(method_family)
+                if label == "EFGP-CG":
+                    return "EFGP-CG"
+                if label == "Active inverse":
+                    return "inverse"
+                if label in {"Box-EigenPro", "EigenPro-PCG"}:
+                    return "active-box-EigenPro"
+                return "not_reported"
+
+            archived_operation_selected["reporting_family"] = (
+                archived_operation_selected["method_family"].map(
+                    archived_reporting_family
+                )
+            )
+            archived_operation_selected["time_total"] = pd.to_numeric(
+                archived_operation_selected["time_total"], errors="coerce"
+            )
+            archived_regime_map_two_family = (
+                archived_operation_selected.loc[
+                    archived_operation_selected["reporting_family"].ne("not_reported")
+                    & archived_operation_selected["time_total"].notna()
+                ]
+                .sort_values(
+                    [
+                        "dataset_stem", "kernel_family", "n_train",
+                        "reporting_family", "time_total", "method",
+                    ],
+                    kind="mergesort",
+                )
+                .drop_duplicates(
+                    ["dataset_stem", "kernel_family", "n_train", "reporting_family"],
+                    keep="first",
+                )
+                .copy()
+            )
+            archived_regime_map_two_family["family_collapse_rule"] = (
+                "after the original operation-level screen, choose minimum time_total; "
+                "Box-EigenPro and full-grid EigenPro-PCG form one family"
+            )
+            ARCHIVED_FULL_RESULTS_PATH = (
+                DRIVE_RUN_ROOT / "archived_original_full_results.csv"
+            )
+            ARCHIVED_OPERATION_SELECTED_PATH = (
+                DRIVE_RUN_ROOT / "archived_original_operation_selected.csv"
+            )
+            ARCHIVED_REGIME_MAP_PATH = (
+                DRIVE_RUN_ROOT / "archived_regime_map_two_family.csv"
+            )
+            archived_full_results.to_csv(ARCHIVED_FULL_RESULTS_PATH, index=False)
+            archived_operation_selected.to_csv(
+                ARCHIVED_OPERATION_SELECTED_PATH, index=False
+            )
+            archived_regime_map_two_family.to_csv(
+                ARCHIVED_REGIME_MAP_PATH, index=False
+            )
+            (DRIVE_RUN_ROOT / "archived_selection_protocol.json").write_text(
+                json.dumps({
+                    "operation_level_rule": (
+                        "For each dataset/kernel/N, retain converged candidates with "
+                        "train RMSE <= 1.10 times the EFGP-CG train RMSE, then choose "
+                        "minimum time_total separately for Active inverse, Box-EigenPro, "
+                        "and full-grid EigenPro-PCG. Test RMSE is not a selector."
+                    ),
+                    "family_collapse_rule": (
+                        "Keep the Active inverse winner as the inverse family; choose "
+                        "the lower-time winner of Box-EigenPro and full-grid "
+                        "EigenPro-PCG as the active-box-EigenPro family."
+                    ),
+                    "formal_replay_rule": (
+                        "Archived timings are never copied into current five-repeat "
+                        "formal tables; only the frozen configurations are transferred."
+                    ),
+                    "full_results_csv": str(ARCHIVED_FULL_RESULTS_PATH),
+                    "operation_selected_csv": str(ARCHIVED_OPERATION_SELECTED_PATH),
+                    "regime_map_csv": str(ARCHIVED_REGIME_MAP_PATH),
+                }, indent=2),
+                encoding="utf-8",
+            )
 
             stage1_scale_summary = collect_stage1_summaries(completed_stage1_scale_items)
             STAGE1_SCALE_SUMMARY_PATH = STAGE1_OUTPUT_ROOT / "stage1_scale_summary.csv"
@@ -1423,6 +1708,43 @@ def build_notebook() -> dict:
             elif RUN_STAGE1_ROBUSTNESS:
                 print("Stage 1 robustness skipped: frozen target is unavailable.")
 
+            stage1_family_robustness_plan = []
+            completed_stage1_family_robustness_items = []
+            if RUN_STAGE1_FAMILY_ROBUSTNESS and END_TO_END_TARGET is not None:
+                stage1_family_robustness_plan = (
+                    stage1_suite.materialize_family_robustness_plan(
+                        stage1_config,
+                        END_TO_END_TARGET,
+                        dataset_dir=str(LOCAL_DATA_DIR),
+                        output_root=STAGE1_OUTPUT_ROOT,
+                    )
+                )
+                completed_stage1_family_robustness_items = run_stage1_items(
+                    stage1_family_robustness_plan,
+                    profile_label="family_robustness_at_selected_target",
+                )
+            elif RUN_STAGE1_FAMILY_ROBUSTNESS:
+                print("Stage 1 family robustness skipped: frozen target is unavailable.")
+
+            stage1_family_robustness_all = collect_stage1_summaries(
+                completed_stage1_family_robustness_items
+            )
+            stage1_family_robustness_selected = select_two_family_rows(
+                stage1_family_robustness_all
+            )
+            STAGE1_FAMILY_ROBUSTNESS_ALL_PATH = (
+                STAGE1_OUTPUT_ROOT / "stage1_family_robustness_all_methods.csv"
+            )
+            STAGE1_FAMILY_ROBUSTNESS_SELECTED_PATH = (
+                STAGE1_OUTPUT_ROOT / "stage1_family_robustness_selected.csv"
+            )
+            stage1_family_robustness_all.to_csv(
+                STAGE1_FAMILY_ROBUSTNESS_ALL_PATH, index=False
+            )
+            stage1_family_robustness_selected.to_csv(
+                STAGE1_FAMILY_ROBUSTNESS_SELECTED_PATH, index=False
+            )
+
             stage1_robustness_summary = collect_stage1_summaries(
                 completed_stage1_robustness_items
             )
@@ -1487,9 +1809,9 @@ def build_notebook() -> dict:
     cells.append(
         _markdown(
             r"""
-            ## Stage 1 报告：可用精度范围、time–quality trade-off、setup / solving
+            ## Stage 1 报告：inverse 与 active-box EigenPro 分族、time–quality、setup / solving
 
-            下格只读取 `stage1_end_to_end_krr`，并对 method/protocol 做 allow-list 校验。所有成功的完整 KRR 行都保留时间与精度；宽松的 dataset-specific RMSE/R² 范围只标记 usability，1% reference equivalence 仅作描述，绝不删除 speedup。失败或 resource-limit 行仍保留在 CSV 中。Stage 2 的 fixed-system 数据不会进入这些图。
+            `stage1_family_scale_selected.csv`、`stage1_family_robustness_selected.csv` 和 `stage1_family_kernel_selected.csv` 是论文前三组表的直接输入：每个 case 固定输出 EFGP-CG、inverse 族、active-box EigenPro 族；后一族在 localized/full-grid 两条成功 current timing 中取 median total 最小者。所有成功的完整 KRR 行都保留时间与精度，RMSE/R² 不充当 speed gate。次级 broad matrix 和 Stage 2 fixed-system 数据均保持独立。
             """
         )
     )
@@ -1501,6 +1823,105 @@ def build_notebook() -> dict:
 
             STAGE1_METHOD_ORDER = list(STAGE1_METHODS)
             STAGE1_GENERATED_PLOT_PATHS = []
+
+            # Primary paper view: keep the inverse and active-box-EigenPro
+            # branches separate.  The latter includes the full-grid limit.
+            if not stage1_family_scale_selected.empty:
+                family_scale_plot = stage1_family_scale_selected.copy()
+                family_scale_plot["N"] = pd.to_numeric(
+                    family_scale_plot["n_train"], errors="coerce"
+                )
+                family_scale_plot["train_total_seconds_median"] = pd.to_numeric(
+                    family_scale_plot["train_total_seconds_median"], errors="coerce"
+                )
+                families = list(dict.fromkeys(
+                    family_scale_plot["dataset_family"].dropna().astype(str)
+                ))
+                fig, axes = plt.subplots(
+                    1, max(len(families), 1),
+                    figsize=(6.5 * max(len(families), 1), 4.8),
+                    squeeze=False,
+                )
+                for axis, dataset_family in zip(axes.ravel(), families):
+                    subset = family_scale_plot.loc[
+                        family_scale_plot["dataset_family"].astype(str).eq(dataset_family)
+                    ]
+                    for reporting_family in (
+                        "EFGP-CG", "inverse", "active-box-EigenPro"
+                    ):
+                        rows = subset.loc[
+                            subset["reporting_family"].eq(reporting_family)
+                        ].sort_values("N")
+                        if rows.empty:
+                            continue
+                        axis.plot(
+                            rows["N"], rows["train_total_seconds_median"],
+                            marker="o", label=reporting_family,
+                        )
+                    axis.set_xscale("log")
+                    axis.set_yscale("log")
+                    axis.set_title(f"{dataset_family}: two-family KRR comparison")
+                    axis.set_xlabel("training samples N")
+                    axis.set_ylabel("setup + solving, seconds")
+                    axis.grid(True, which="both", alpha=0.25)
+                if families:
+                    axes.ravel()[0].legend(frameon=False)
+                fig.tight_layout()
+                primary_family_plot = (
+                    DRIVE_RUN_ROOT / "stage1_two_family_scale_10m_300m.png"
+                )
+                fig.savefig(primary_family_plot, dpi=180, bbox_inches="tight")
+                STAGE1_GENERATED_PLOT_PATHS.append(primary_family_plot)
+                plt.show()
+                plt.close(fig)
+                display(stage1_family_scale_selected[[
+                    "dataset_family", "n_train", "reporting_family",
+                    "selected_method", "configured_inverse_active_topk",
+                    "configured_active_eig_topk", "configured_active_eig_rank",
+                    "effective_active_box_size", "effective_active_rank",
+                    "setup_seconds_at_median_total",
+                    "solving_phase_seconds_at_median_total",
+                    "train_total_seconds_median", "test_rmse_median",
+                    "test_r2_median", "speedup_vs_efgp_cg_ratio_of_medians",
+                ]])
+
+            if not stage1_family_kernel_selected.empty:
+                family_kernel_plot = stage1_family_kernel_selected.loc[
+                    stage1_family_kernel_selected["reporting_family"].isin(
+                        ["inverse", "active-box-EigenPro"]
+                    )
+                ].copy()
+                family_kernel_plot["train_total_seconds_median"] = pd.to_numeric(
+                    family_kernel_plot["train_total_seconds_median"], errors="coerce"
+                )
+                display(family_kernel_plot[[
+                    "dataset_family", "kernel_family", "reporting_family",
+                    "selected_method", "effective_active_box_size",
+                    "effective_active_rank", "train_total_seconds_median",
+                    "test_rmse_median", "test_r2_median",
+                    "speedup_vs_efgp_cg_ratio_of_medians",
+                ]].sort_values([
+                    "dataset_family", "kernel_family", "reporting_family"
+                ]))
+
+            if not stage1_family_robustness_selected.empty:
+                family_robustness_plot = stage1_family_robustness_selected.loc[
+                    stage1_family_robustness_selected["reporting_family"].isin(
+                        ["inverse", "active-box-EigenPro"]
+                    )
+                ].copy()
+                family_robustness_plot.to_csv(
+                    DRIVE_RUN_ROOT / "stage1_two_family_robustness.csv", index=False
+                )
+                display(family_robustness_plot[[
+                    "case_id", "robustness_axes", "dataset_family",
+                    "reg_lambda", "lengthscale", "box_budget",
+                    "reporting_family", "selected_method",
+                    "effective_active_box_size", "effective_active_rank",
+                    "train_total_seconds_median", "test_rmse_median",
+                    "test_r2_median", "speedup_vs_efgp_cg_ratio_of_medians",
+                ]])
+
             if not stage1_scale_verified.empty:
                 observed_protocols = set(stage1_scale_verified["protocol_family"].astype(str))
                 observed_methods = set(stage1_scale_verified["method"].astype(str))
@@ -4231,7 +4652,11 @@ def build_notebook() -> dict:
 
             def formal_campaign_job_passed(row):
                 if str(row.get("profile")) in {
-                    STAGE1_SCALE_PROFILE, "robustness_at_selected_target"
+                    STAGE1_SCALE_PROFILE,
+                    "robustness_at_selected_target",
+                    STAGE1_FAMILY_SCALE_PROFILE,
+                    STAGE1_FAMILY_KERNEL_PROFILE,
+                    "family_robustness_at_selected_target",
                 }:
                     return bool(
                         row.get("artifact_complete")
@@ -4373,6 +4798,16 @@ def build_notebook() -> dict:
                 "stage1_case_index": str(STAGE1_CASE_INDEX_PATH),
                 "stage1_scale_summary": str(STAGE1_SCALE_SUMMARY_PATH),
                 "stage1_robustness_summary": str(STAGE1_ROBUSTNESS_SUMMARY_PATH),
+                "stage1_family_methods": list(STAGE1_FAMILY_METHODS),
+                "stage1_family_scale_all_methods": str(STAGE1_FAMILY_SCALE_ALL_PATH),
+                "stage1_family_scale_selected": str(STAGE1_FAMILY_SCALE_SELECTED_PATH),
+                "stage1_family_robustness_all_methods": str(STAGE1_FAMILY_ROBUSTNESS_ALL_PATH),
+                "stage1_family_robustness_selected": str(STAGE1_FAMILY_ROBUSTNESS_SELECTED_PATH),
+                "stage1_family_kernel_all_methods": str(STAGE1_FAMILY_KERNEL_ALL_PATH),
+                "stage1_family_kernel_selected": str(STAGE1_FAMILY_KERNEL_SELECTED_PATH),
+                "archived_original_full_results": str(ARCHIVED_FULL_RESULTS_PATH),
+                "archived_original_operation_selected": str(ARCHIVED_OPERATION_SELECTED_PATH),
+                "archived_regime_map_two_family": str(ARCHIVED_REGIME_MAP_PATH),
                 "stage1_target_regime": (
                     str(STAGE1_TARGET_PATH) if END_TO_END_TARGET is not None else None
                 ),
@@ -4534,6 +4969,10 @@ def build_notebook() -> dict:
                 if not selected_controlled.empty else set()
             )
             expected_plot_paths = []
+            if RUN_STAGE1_FAMILY_SCALE and not stage1_family_scale_selected.empty:
+                expected_plot_paths.append(
+                    DRIVE_RUN_ROOT / "stage1_two_family_scale_10m_300m.png"
+                )
             if RUN_STAGE1_END_TO_END_KRR and not stage1_scale_summary.empty:
                 expected_plot_paths.extend([
                     DRIVE_RUN_ROOT / "stage1_krr_train_total_10m_300m.png",
@@ -4675,6 +5114,58 @@ def build_notebook() -> dict:
                 stage1_robustness_artifacts_complete
                 and stage1_robustness_scientifically_eligible
             )
+            family_profile_specs = (
+                (
+                    RUN_STAGE1_FAMILY_SCALE,
+                    STAGE1_FAMILY_SCALE_PROFILE,
+                    stage1_family_scale_plan,
+                    completed_stage1_family_scale_items,
+                    stage1_family_scale_all,
+                ),
+                (
+                    RUN_STAGE1_FAMILY_KERNEL,
+                    STAGE1_FAMILY_KERNEL_PROFILE,
+                    stage1_family_kernel_plan,
+                    completed_stage1_family_kernel_items,
+                    stage1_family_kernel_all,
+                ),
+                (
+                    RUN_STAGE1_FAMILY_ROBUSTNESS,
+                    "family_robustness_at_selected_target",
+                    stage1_family_robustness_plan,
+                    completed_stage1_family_robustness_items,
+                    stage1_family_robustness_all,
+                ),
+            )
+            stage1_family_profiles_complete = True
+            stage1_family_profile_audit = {}
+            for enabled, profile_name, plan, completed, summary in family_profile_specs:
+                jobs = [
+                    row for row in stage1_campaign_rows
+                    if row.get("profile") == profile_name
+                ]
+                profile_complete = bool(
+                    not enabled
+                    or (
+                        (
+                            profile_name != "family_robustness_at_selected_target"
+                            or END_TO_END_TARGET is not None
+                        )
+                        and len(plan) > 0
+                        and len(completed) == len(plan)
+                        and len(summary) == len(plan) * len(STAGE1_FAMILY_METHODS)
+                        and len(jobs) == len(plan)
+                        and all(formal_campaign_job_passed(row) for row in jobs)
+                    )
+                )
+                stage1_family_profile_audit[profile_name] = {
+                    "enabled": bool(enabled),
+                    "planned_cases": len(plan),
+                    "completed_cases": len(completed),
+                    "summary_rows": len(summary),
+                    "complete": profile_complete,
+                }
+                stage1_family_profiles_complete &= profile_complete
             stage2_formal_complete = bool(
                 not RUN_STAGE2_FIXED_AB_SOLVERS
                 or (
@@ -4700,6 +5191,8 @@ def build_notebook() -> dict:
             final_manifest["stage1_robustness_complete"] = stage1_robustness_complete
             final_manifest["stage1_robustness_artifacts_complete"] = stage1_robustness_artifacts_complete
             final_manifest["stage1_robustness_scientifically_eligible"] = stage1_robustness_scientifically_eligible
+            final_manifest["stage1_family_profiles_complete"] = stage1_family_profiles_complete
+            final_manifest["stage1_family_profile_audit"] = stage1_family_profile_audit
             final_manifest["stage2_formal_complete"] = stage2_formal_complete
             final_manifest["two_stage_report_complete"] = two_stage_report_complete
             workload_requested = bool(
@@ -4713,7 +5206,8 @@ def build_notebook() -> dict:
             )
             run_verified = bool(
                 workload_requested and stage1_scale_complete
-                and stage1_robustness_complete and stage2_formal_complete
+                and stage1_robustness_complete and stage1_family_profiles_complete
+                and stage2_formal_complete
                 and two_stage_report_complete
                 and legacy_complete and controlled_complete
                 and prediction_complete and campaign_complete and INDEX_PATH.is_file()
@@ -4760,15 +5254,16 @@ def build_notebook() -> dict:
             r"""
             ## 运行后检查清单
 
-            1. Stage 1 的 `pipeline_summary.csv` 只能含六个 true end-to-end KRR 方法；每行分别保留 setup、solving phase、train total、prediction RMSE/R²、宽松 usability 与描述性的 reference equivalence。
+            1. 两族 profiles 的每个 `pipeline_summary.csv` 必须含 EFGP-CG、standard full-eig、显式 binned inverse、显式 binned active-eig 四条；`stage1_family_*_selected.csv` 每个 case 必须留下 EFGP-CG、inverse、active-box-EigenPro 三个 reporting families。次级 broad matrix 仍严格含原六个 true end-to-end KRR 方法。
             2. 10M/30M/100M/300M 的失败/resource-limit 行原样保留，不以 pilot 或子采样算法冒充大规模结果。
             3. `selected_target_regime.json` 必须来自冻结规则；没有合格 target 时检查 `target_regime_rejections.json`，不得事后换点。
-            4. \(\lambda\)、\(\ell\)、box budget、dataset robustness 只在 target 冻结后 materialize，且仍运行完整六 pipeline。
+            4. \(\lambda\)、\(\ell\)、box budget、dataset robustness 只在 target 冻结后 materialize；两族 profile 与次级六-pipeline profile 分目录运行，不能用 default 自动路由代替两族结果。
             5. Stage 2 每个 case 的 `system_manifest.json` 必须有 `system_unchanged=true` 和完整 weights/Gf/RHS/λ 哈希；方法仅为 solver/preconditioner family。
             6. `stage2_feasibility.json` 必须在 Stage 2 timing 前生成；mandatory 五方法恒为 feasible，`active-inverse` 仅在冻结 active-box upper bound 不超过 `inverse_max_size` 时运行。
             7. Stage 2 headline 必须读取 `solver_total_seconds`（selection + preconditioner build + solve），不能用 iteration-only 或排除 build 的 solve-only 数字代替。
             8. `nystrom-krr` / `rpcholesky-krr` 只属于 Stage 1；Fourier adaptations 即使手动运行，也必须使用 `fourier-*-precond` 标签并排除在正式两阶段图外。
             9. Prediction audit 同时有 JSON、CSV 和 completion manifest，严格复用 timed system/solutions，audit solve count=0。
+            10. Appendix audit 必须同时包含 `archived_original_full_results.csv`、`archived_original_operation_selected.csv`、`archived_regime_map_two_family.csv` 与 `archived_selection_protocol.json`；旧 timing 只用于历史 regime map，不进入 current replay median。
             """
         )
     )

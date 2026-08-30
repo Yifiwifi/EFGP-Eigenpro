@@ -1,0 +1,75 @@
+\makeatletter
+\def\input@path{{../siamart_251216/}}
+\makeatother
+\documentclass[final,hidelinks]{siamart251216}
+\input{preamble}
+\hypersetup{
+  pdftitle={Active-Box Preconditioning for Equispaced-Fourier Kernel Ridge Regression},
+  pdfauthor={Anonymous Author}
+}
+
+\title{Active-Box Preconditioning for Equispaced-Fourier Kernel Ridge Regression}
+\author{Anonymous Author}
+\headers{Active-Box Preconditioning}{Anonymous}
+
+% idea not clear enough
+% 1/n sigma_i^{n} 
+% each section, conclusion in one sentence; 
+% 2.3 as example, only one conclusion;
+% 2.2
+
+% draft of syllabus in two pages; each section in one sentence.
+
+% some idea, but main conclusion(speed) first, why idea related to the conclusion(speed)
+% redo the slide, with slide
+% construction cost?   pCG: defined
+%2.3: speed AB=C  cg, idea introduce P, cite eq 19, PCG speed depend on 3 points kappa_P,...,  as a consequences of fact. concept shoundt jump to fast; only need matvec when computing;
+% slides and syllabus
+
+% Uncomment exactly one line while editing a single section.
+% After a full compile, \includeonly preserves cross-references from omitted sections via .aux files.
+% \includeonly{sections/01-introduction}
+%  sections/02-background,
+%  sections/03-main-algorithms,
+% sections/04-implementation,
+% sections/05-experiments,
+% \includeonly{sections/04-implementation}
+% \includeonly{sections/05-experiments}
+% \includeonly{sections/06-discussion-limitations}
+% \includeonly{sections/07-reproducibility}
+% \includeonly{sections/08-effectiveness-analysis}
+
+\begin{document}
+\maketitle
+\input{sections/00-abstract}
+
+\begin{keywords}
+kernel ridge regression, preconditioning, Fourier methods, Toeplitz matrices,
+EigenPro
+\end{keywords}
+
+\begin{MSCcodes}
+65F08, 65F10, 68T05
+\end{MSCcodes}
+
+\input{sections/01-introduction}
+\input{sections/02-background}
+\input{sections/03-main-algorithms}
+\input{sections/05-experiments}
+\input{sections/06-discussion-limitations}
+\input{sections/07-reproducibility}
+\appendix
+\input{sections/08-proofs}
+\input{sections/04-implementation}
+\input{sections/09-experiment-details}
+
+\section*{Acknowledgments}
+The author thanks Northeastern University for its support and Prof.\ Ruan for
+guidance and feedback, and thanks the group members for their comments.
+
+\bibliographystyle{../siamart_251216/siamplain}
+\bibliography{references}
+
+\end{document}
+ % no ambiguity, then short
+ % title too long(undefine before)
