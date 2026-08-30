@@ -181,7 +181,9 @@ def build_notebook() -> dict:
                 requested_size_hints.extend([10_000_000, 100_000_000, 300_000_000])
             MAX_REQUESTED_N = max(requested_size_hints or [0])
 
-            DISCONNECT_RUNTIME_WHEN_VERIFIED = False
+            # Release the paid Colab accelerator after every mandatory artifact
+            # has been persisted and the final campaign manifest is verified.
+            DISCONNECT_RUNTIME_WHEN_VERIFIED = True
             print("Configuration loaded. No heavy experiment has started.")
             """
         )
