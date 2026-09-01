@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import math
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled import (
+    end_to_end as end_to_end_module,
+)
 from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end import (
     ALL_END_TO_END_METHODS,
     END_TO_END_METHODS,
@@ -27,6 +30,8 @@ from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end import
     fit_restricted_krr,
     kernel_cross,
     predict_restricted_krr,
+    preflight_end_to_end_resources,
+    run_end_to_end_experiment,
     run_pipeline_once,
     summarize_pipeline_rows,
     validate_dataset_generation_provenance,
@@ -354,6 +359,7 @@ def test_original_krr_full_scale_resource_gate_is_retained_in_pipeline_row(
 
     audit = {
         "exact_matvec_pairs": 10**14,
+        "dense_kernel_matrix_bytes": 800_000_000_000_000,
         "prediction_pairs": 10**10,
         "preconditioner_factor_bytes": 10_240_000_000,
         "resource_preflight_before_backend": True,
@@ -386,8 +392,196 @@ def test_original_krr_full_scale_resource_gate_is_retained_in_pipeline_row(
     assert row["status"] == "resource_limit"
     assert row["resource_limit_reason"] == "exact_matvec_pair_cap"
     assert row["original_krr_exact_matvec_pairs"] == 10**14
+    assert row["original_krr_dense_kernel_matrix_bytes"] == 800_000_000_000_000
     assert row["original_krr_preconditioner_factor_bytes"] == 10_240_000_000
     assert row["resource_preflight_before_backend"] is True
+
+
+def test_full_scale_original_krr_is_excluded_before_dataset_or_cuda(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden(*args, **kwargs):
+        raise AssertionError("preflight exclusion must not touch data or CUDA")
+
+    monkeypatch.setattr(end_to_end_module, "load_end_to_end_dataset", forbidden)
+    monkeypatch.setattr(
+        end_to_end_module,
+        "_probe_available_device_bytes_without_allocation",
+        forbidden,
+    )
+    monkeypatch.setattr(end_to_end_module, "_release_gpu_allocator_cache", forbidden)
+    cfg = EndToEndConfig(
+        dataset_stem="unread_original_krr_n10m",
+        n_train=10_000_000,
+        max_test_rows=10_000,
+        methods=("original-krr-nystrom-pcg",),
+        warmup_repeats=0,
+        measured_repeats=1,
+        output_dir=str(tmp_path / "original"),
+    )
+
+    result = run_end_to_end_experiment(cfg)
+
+    assert result["completion"]["dataset_loaded"] is False
+    assert result["completion"]["gpu_work_launched"] is False
+    assert result["completion"]["cuda_runtime_memory_queried"] is False
+    assert result["completion"]["cuda_runtime_memory_query_attempted"] is False
+    assert result["completion"]["cuda_runtime_memory_query_succeeded"] is False
+    assert result["completion"]["resource_preflight_all_methods_excluded"] is True
+    assert len(result["rows"]) == 1
+    row = result["rows"][0]
+    assert row["status"] == "resource_limit"
+    assert row["resource_required_bytes"] is None
+    assert row["resource_preflight_before_dataset_load"] is True
+    assert row["gpu_backend_initialized_for_method"] is False
+    assert row["gpu_work_launched"] is False
+    audit = json.loads((tmp_path / "original" / "resource_preflight.json").read_text())
+    assert audit["all_methods_excluded"] is True
+    assert audit["gpu_work_required"] is False
+
+
+def test_cuda_memory_probe_failure_excludes_before_dataset_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden(*args, **kwargs):
+        raise AssertionError("failed CUDA probe must stop before data/GPU work")
+
+    monkeypatch.setattr(
+        end_to_end_module,
+        "_probe_available_device_bytes_without_allocation",
+        lambda: None,
+    )
+    monkeypatch.setattr(end_to_end_module, "load_end_to_end_dataset", forbidden)
+    monkeypatch.setattr(end_to_end_module, "_release_gpu_allocator_cache", forbidden)
+    cfg = EndToEndConfig(
+        dataset_stem="unread_cuda_probe_failure",
+        n_train=10_000_000,
+        methods=("ours-binned-inverse",),
+        inverse_active_topk=512,
+        inverse_expected_active_box_size=625,
+        warmup_repeats=0,
+        measured_repeats=1,
+        output_dir=str(tmp_path / "cuda-probe-failure"),
+    )
+
+    result = run_end_to_end_experiment(cfg)
+
+    row = result["rows"][0]
+    assert row["status"] == "resource_limit"
+    assert row["resource_limit_reason"] == "cuda_memory_probe_unavailable"
+    assert row["cuda_runtime_memory_query_attempted"] is True
+    assert row["cuda_runtime_memory_query_succeeded"] is False
+    assert result["completion"]["dataset_loaded"] is False
+    assert result["completion"]["gpu_work_launched"] is False
+    assert result["completion"]["cuda_runtime_memory_query_attempted"] is True
+    assert result["completion"]["cuda_runtime_memory_query_succeeded"] is False
+
+
+def test_full_scale_rpcholesky_is_excluded_before_full_gpu_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden(*args, **kwargs):
+        raise AssertionError("factor preflight must precede data/CUDA access")
+
+    monkeypatch.setattr(end_to_end_module, "load_end_to_end_dataset", forbidden)
+    monkeypatch.setattr(
+        end_to_end_module,
+        "_probe_available_device_bytes_without_allocation",
+        forbidden,
+    )
+    monkeypatch.setattr(end_to_end_module, "_release_gpu_allocator_cache", forbidden)
+    cfg = EndToEndConfig(
+        dataset_stem="unread_rpcholesky_n300m",
+        n_train=300_000_000,
+        methods=("rpcholesky-krr",),
+        rpcholesky_rank=256,
+        warmup_repeats=0,
+        measured_repeats=1,
+        output_dir=str(tmp_path / "rpcholesky"),
+    )
+
+    result = run_end_to_end_experiment(cfg)
+
+    row = result["rows"][0]
+    assert row["status"] == "resource_limit"
+    assert row["resource_limit_reason"] == "rpcholesky_factor_memory_cap"
+    assert row["resource_required_bytes"] == (
+        300_000_000 * 256 * 8 + 300_000_000 * 3 * 8
+    )
+    assert row["resource_audit"]["rpcholesky_factor_bytes"] == (
+        300_000_000 * 256 * 8
+    )
+    assert result["completion"]["dataset_loaded"] is False
+    assert result["completion"]["gpu_work_launched"] is False
+
+
+def test_bq_preflight_uses_conservative_peak_and_available_memory() -> None:
+    inverse = EndToEndConfig(
+        n_train=300_000_000,
+        methods=("ours-binned-inverse",),
+        inverse_active_topk=12_288,
+        inverse_expected_active_box_size=15_625,
+        inverse_max_size=16_384,
+    )
+    audit = preflight_end_to_end_resources(
+        inverse,
+        available_device_bytes=40 * 2**30,
+    )
+    assert audit["methods"]["ours-binned-inverse"]["status"] == (
+        "excluded_resource_limit"
+    )
+    assert audit["methods"]["ours-binned-inverse"]["resource_limit_reason"] == (
+        "active_inverse_peak_memory_cap"
+    )
+
+    smaller = replace(
+        inverse,
+        inverse_active_topk=8_192,
+        inverse_expected_active_box_size=10_609,
+    )
+    smaller_audit = preflight_end_to_end_resources(
+        smaller,
+        available_device_bytes=40 * 2**30,
+    )
+    assert smaller_audit["methods"]["ours-binned-inverse"]["status"] == "eligible"
+
+    eigen = EndToEndConfig(
+        n_train=300_000_000,
+        methods=("ours-binned-active-eig",),
+        active_eig_topk=35_721,
+        active_eig_expected_active_box_size=35_721,
+        active_eig_rank=448,
+    )
+    eigen_audit = preflight_end_to_end_resources(
+        eigen,
+        available_device_bytes=40 * 2**30,
+    )
+    assert eigen_audit["methods"]["ours-binned-active-eig"]["status"] == "eligible"
+
+    factor_work = EndToEndConfig(
+        n_train=10_000_000,
+        methods=("ours-binned-inverse",),
+        inverse_active_topk=19_000,
+        inverse_expected_active_box_size=20_000,
+        inverse_max_size=25_000,
+        resource_preflight_gpu_memory_cap_bytes=1024**4,
+    )
+    factor_work_audit = preflight_end_to_end_resources(factor_work)
+    factor_work_decision = factor_work_audit["methods"]["ours-binned-inverse"]
+    assert factor_work_decision["status"] == "excluded_resource_limit"
+    assert factor_work_decision["resource_limit_reason"] == "dense_inverse_work_cap"
+
+    with pytest.raises(ValueError, match="strictly smaller"):
+        preflight_end_to_end_resources(
+            EndToEndConfig(
+                methods=("ours-binned-active-eig",),
+                active_eig_expected_active_box_size=448,
+                active_eig_rank=448,
+            )
+        )
 
 
 def _synthetic_generation_dataset(noise_std: float) -> dict[str, object]:
@@ -1355,6 +1549,34 @@ def test_literature_baseline_profiles_are_executable_and_three_repeat(
     assert all(item["config"].ski_grid_spacing == 1.0 / 128.0 for item in final)
     assert all(item["config"].native_falkon_train_chunk_size == 250_000 for item in final)
     assert all(item["config"].rff_train_chunk_size == 250_000 for item in final)
+
+
+def test_original_full_scale_profile_is_single_pre_dataset_exclusion(
+    tmp_path: Path,
+) -> None:
+    plan = build_profile_plan(
+        load_suite_config(),
+        "original_krr_full_scale_resource_audit",
+        dataset_dir=str(tmp_path / "unread-data"),
+        output_root=tmp_path / "out",
+    )
+
+    assert len(plan) == 4
+    assert {
+        (item["dataset_family"], int(item["config"].n_train)) for item in plan
+    } == {
+        (family, n_train)
+        for family in ("Synthetic", "Winnebago")
+        for n_train in (10_000_000, 300_000_000)
+    }
+    assert all(
+        item["config"].methods == ("original-krr-nystrom-pcg",)
+        and item["config"].warmup_repeats == 0
+        and item["config"].measured_repeats == 1
+        and item["config"].parameter_selection_policy
+        == "single_pre_dataset_resource_exclusion_no_execution_selection"
+        for item in plan
+    )
 
 
 def test_matern_family_parameter_sweep_candidates_and_box_assertions(

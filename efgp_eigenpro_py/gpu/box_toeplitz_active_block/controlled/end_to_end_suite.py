@@ -221,10 +221,10 @@ def _expand_family_parameter_sweep(
                     f"profile {profile!r} active_eig topk={topk} ranks must "
                     "be nonempty and unique."
                 )
-            if any(rank > topk_to_box[topk] for rank in ranks):
+            if any(rank >= topk_to_box[topk] for rank in ranks):
                 raise ValueError(
-                    f"profile {profile!r} active_eig topk={topk} rank exceeds "
-                    f"the asserted |B|={topk_to_box[topk]}."
+                    f"profile {profile!r} active_eig topk={topk} rank must be "
+                    f"strictly smaller than asserted |B|={topk_to_box[topk]}."
                 )
             active_candidates.extend((topk, rank) for rank in ranks)
         if len(set(active_candidates)) != len(active_candidates):

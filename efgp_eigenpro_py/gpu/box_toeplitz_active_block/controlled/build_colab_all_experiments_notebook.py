@@ -58,7 +58,7 @@ def build_notebook() -> dict:
 
             `nystrom-krr` 与 `rpcholesky-krr` 只出现在 Stage 1；Fourier-space randomized preconditioner adaptations 不得以 Nyström/RPCholesky KRR 的名字进入正式图。参考 notebook 的 legacy 路线默认关闭。
 
-            原始 data-space KRR 的 `original-krr-nystrom-pcg` 另走隔离证据链：先跑 N={10k,25k} 的 execution proxy，再跑 10M/300M 的 backend 前资源预检。proxy 结果不得和 full-N 表混合；full-N 只接受并记录 `resource_limit`，不进入四个 scalable literature methods 的 10M gate 或 300M 时间/RMSE 表。
+            原始 data-space KRR 的 `original-krr-nystrom-pcg` 另走隔离证据链：先跑 N={10k,25k} 的 execution proxy，再对 10M/300M 各做一次 dataset/CuPy/allocator/GPU 之前的静态资源排除。proxy 结果不得和 full-N 表混合；full-N 只接受并记录 `resource_limit`，不进入四个 scalable literature methods 的 10M gate 或 300M 时间/RMSE 表。
             """
         )
     )
@@ -142,9 +142,14 @@ def build_notebook() -> dict:
             RUN_PREDICTION_AUDIT = RUN_ALL_FORMAL_EXPERIMENTS
 
             ACTIVE_SIZES = list(FORMAL_SCALE_SIZES) if RUN_ALL_FORMAL_EXPERIMENTS else [10_000_000]
-            ALLOW_100M = RUN_ALL_FORMAL_EXPERIMENTS or RUN_LITERATURE_BASELINES_300M
+            ALLOW_100M = (
+                RUN_ALL_FORMAL_EXPERIMENTS
+                or RUN_STAGE1_FAMILY_PARAMETER_SWEEP
+                or RUN_LITERATURE_BASELINES_300M
+            )
             ALLOW_300M = (
                 RUN_ALL_FORMAL_EXPERIMENTS
+                or RUN_STAGE1_FAMILY_PARAMETER_SWEEP
                 or RUN_LITERATURE_BASELINES_300M
                 or RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT
             )
@@ -161,7 +166,6 @@ def build_notebook() -> dict:
                 RUN_STAGE1_END_TO_END_KRR
                 or RUN_STAGE1_FAMILY_PARAMETER_SWEEP
                 or RUN_ORIGINAL_KRR_PROXY_FEASIBILITY
-                or RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT
                 or RUN_LITERATURE_BASELINE_PILOT
                 or RUN_LITERATURE_BASELINES_300M
             )
@@ -175,7 +179,6 @@ def build_notebook() -> dict:
                 RUN_STAGE1_END_TO_END_KRR
                 or RUN_STAGE1_FAMILY_PARAMETER_SWEEP
                 or RUN_ORIGINAL_KRR_PROXY_FEASIBILITY
-                or RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT
                 or RUN_LITERATURE_BASELINE_PILOT
                 or RUN_LITERATURE_BASELINES_300M
             ):
@@ -211,7 +214,7 @@ def build_notebook() -> dict:
                 requested_size_hints.extend([10_000_000, 100_000_000, 300_000_000])
             if RUN_LITERATURE_BASELINES_300M:
                 requested_size_hints.append(300_000_000)
-            if RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT:
+            if RUN_STAGE1_FAMILY_PARAMETER_SWEEP:
                 requested_size_hints.append(300_000_000)
             MAX_REQUESTED_N = max(requested_size_hints or [0])
 
@@ -1048,7 +1051,6 @@ def build_notebook() -> dict:
                 RUN_STAGE1_END_TO_END_KRR
                 or RUN_STAGE1_FAMILY_PARAMETER_SWEEP
                 or RUN_ORIGINAL_KRR_PROXY_FEASIBILITY
-                or RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT
                 or RUN_LITERATURE_BASELINE_PILOT
                 or RUN_LITERATURE_BASELINES_300M
             ):
@@ -1255,8 +1257,10 @@ def build_notebook() -> dict:
                     tuple(item["config"].methods)
                     != ("original-krr-nystrom-pcg",)
                     or int(item["config"].original_krr_nystrom_rank) != 128
-                    or int(item["config"].warmup_repeats) != 1
-                    or int(item["config"].measured_repeats) != 3
+                    or int(item["config"].warmup_repeats) != 0
+                    or int(item["config"].measured_repeats) != 1
+                    or str(item["config"].parameter_selection_policy)
+                    != "single_pre_dataset_resource_exclusion_no_execution_selection"
                     or int(item["config"].original_krr_max_exact_matvec_pairs)
                     != 1_000_000_000
                     or int(item["config"].original_krr_max_prediction_pairs)
@@ -1420,6 +1424,7 @@ def build_notebook() -> dict:
                     run_dir = Path(item["config"].output_dir)
                     if (
                         int(item["config"].n_train) >= 300_000_000
+                        and profile_label != ORIGINAL_KRR_RESOURCE_AUDIT_PROFILE
                         and not bool(globals().get("CAN_RUN_300M", False))
                     ):
                         record = {
@@ -1459,6 +1464,12 @@ def build_notebook() -> dict:
                     ineligible_methods = []
                     resource_limit_methods = []
                     error_methods = []
+                    dataset_loaded = None
+                    gpu_work_launched = None
+                    cuda_runtime_memory_queried = None
+                    cuda_runtime_memory_query_attempted = None
+                    cuda_runtime_memory_query_succeeded = None
+                    resource_preflight_all_methods_excluded = None
                     try:
                         if not reused:
                             runtime_base = asdict(item["config"])
@@ -1511,6 +1522,24 @@ def build_notebook() -> dict:
                             str(method)
                             for method in completion_payload.get("error_methods", [])
                         ]
+                        dataset_loaded = completion_payload.get("dataset_loaded")
+                        gpu_work_launched = completion_payload.get(
+                            "gpu_work_launched"
+                        )
+                        cuda_runtime_memory_queried = completion_payload.get(
+                            "cuda_runtime_memory_queried"
+                        )
+                        cuda_runtime_memory_query_attempted = completion_payload.get(
+                            "cuda_runtime_memory_query_attempted"
+                        )
+                        cuda_runtime_memory_query_succeeded = completion_payload.get(
+                            "cuda_runtime_memory_query_succeeded"
+                        )
+                        resource_preflight_all_methods_excluded = (
+                            completion_payload.get(
+                                "resource_preflight_all_methods_excluded"
+                            )
+                        )
                         ineligible_methods = [
                             str(method)
                             for method in completion_payload.get(
@@ -1558,6 +1587,20 @@ def build_notebook() -> dict:
                         "ineligible_methods": ",".join(ineligible_methods),
                         "resource_limit_methods": ",".join(resource_limit_methods),
                         "error_methods": ",".join(error_methods),
+                        "dataset_loaded": dataset_loaded,
+                        "gpu_work_launched": gpu_work_launched,
+                        "cuda_runtime_memory_queried": (
+                            cuda_runtime_memory_queried
+                        ),
+                        "cuda_runtime_memory_query_attempted": (
+                            cuda_runtime_memory_query_attempted
+                        ),
+                        "cuda_runtime_memory_query_succeeded": (
+                            cuda_runtime_memory_query_succeeded
+                        ),
+                        "resource_preflight_all_methods_excluded": (
+                            resource_preflight_all_methods_excluded
+                        ),
                         "case_count": 1,
                         "elapsed_seconds": elapsed,
                         "invocation_mode": "resumed_existing" if reused else "executed",
@@ -1850,6 +1893,8 @@ def build_notebook() -> dict:
                 "scientific_scope": "full_n_resource_preflight_only",
                 "comparable_to_full_n_performance_table": False,
                 "expected_method_status": "resource_limit",
+                "single_exclusion_record_per_case": True,
+                "resource_preflight_must_precede_dataset_load": True,
                 "resource_preflight_must_precede_backend": True,
                 "planned_cases": len(original_krr_resource_audit_plan),
                 "completed_cases": len(completed_original_krr_resource_audit_items),
@@ -1860,9 +1905,16 @@ def build_notebook() -> dict:
                         "dataset_family", "method", "case_id", "n_train",
                         "status", "successful_repeats", "resource_limit_reason",
                         "original_krr_exact_matvec_pairs",
+                        "original_krr_dense_kernel_matrix_bytes",
                         "original_krr_prediction_pairs",
                         "original_krr_preconditioner_factor_bytes",
+                        "resource_preflight_before_dataset_load",
                         "resource_preflight_before_backend",
+                        "training_data_loaded_for_method",
+                        "gpu_backend_initialized_for_method",
+                        "gpu_work_launched",
+                        "cuda_runtime_memory_query_attempted",
+                        "cuda_runtime_memory_query_succeeded",
                     ),
                 ),
             }
@@ -2639,6 +2691,15 @@ def build_notebook() -> dict:
 
             STAGE1_METHOD_ORDER = list(STAGE1_METHODS)
             STAGE1_GENERATED_PLOT_PATHS = []
+            stage1_family_scale_selected = globals().get(
+                "stage1_family_scale_selected", pd.DataFrame()
+            )
+            stage1_family_kernel_selected = globals().get(
+                "stage1_family_kernel_selected", pd.DataFrame()
+            )
+            stage1_family_robustness_selected = globals().get(
+                "stage1_family_robustness_selected", pd.DataFrame()
+            )
 
             # Primary paper view: keep the inverse and active-box-EigenPro
             # branches separate.  The latter includes the full-grid limit.
@@ -6004,6 +6065,23 @@ def build_notebook() -> dict:
                     else []
                 )
             }
+            stage1_family_parameter_sweep_resource_excluded_rows = [
+                row
+                for row in stage1_family_parameter_sweep_job_rows
+                if str(row.get("resource_limit_methods", "")).strip()
+            ]
+            stage1_family_parameter_sweep_selection_eligible_count = int(
+                stage1_family_parameter_sweep_manifest.get(
+                    "selection_eligible_count", 0
+                )
+                or 0
+            )
+            stage1_family_parameter_sweep_all_three_repeat_success = bool(
+                RUN_STAGE1_FAMILY_PARAMETER_SWEEP
+                and not stage1_family_parameter_sweep_resource_excluded_rows
+                and stage1_family_parameter_sweep_selection_eligible_count
+                == len(stage1_family_parameter_sweep_plan)
+            )
             stage1_family_parameter_sweep_complete = bool(
                 not RUN_STAGE1_FAMILY_PARAMETER_SWEEP
                 or (
@@ -6033,6 +6111,28 @@ def build_notebook() -> dict:
                 ),
                 "selection_eligible_count": stage1_family_parameter_sweep_manifest.get(
                     "selection_eligible_count"
+                ),
+                "resource_excluded_case_count": len(
+                    stage1_family_parameter_sweep_resource_excluded_rows
+                ),
+                "all_candidates_executed_three_repeats": (
+                    stage1_family_parameter_sweep_all_three_repeat_success
+                ),
+                "completion_semantics": (
+                    "disabled"
+                    if not RUN_STAGE1_FAMILY_PARAMETER_SWEEP
+                    else (
+                        "all_candidates_three_repeat_success"
+                        if stage1_family_parameter_sweep_all_three_repeat_success
+                        else (
+                            "resolved_with_declared_resource_exclusions"
+                            if (
+                                stage1_family_parameter_sweep_complete
+                                and stage1_family_parameter_sweep_resource_excluded_rows
+                            )
+                            else "incomplete_or_failed"
+                        )
+                    )
                 ),
                 "winner_count": stage1_family_parameter_sweep_manifest.get("winner_count"),
                 "report_paths": stage1_family_parameter_sweep_paths,
@@ -6092,13 +6192,63 @@ def build_notebook() -> dict:
                         and str(row.get("status")) == "complete_with_resource_limits"
                         and str(row.get("resource_limit_methods"))
                         == "original-krr-nystrom-pcg"
+                        and row.get("dataset_loaded") is False
+                        and row.get("gpu_work_launched") is False
+                        and row.get("cuda_runtime_memory_queried") is False
+                        and row.get("cuda_runtime_memory_query_attempted") is False
+                        and row.get("cuda_runtime_memory_query_succeeded") is False
+                        and row.get("resource_preflight_all_methods_excluded")
+                        is True
                         for row in original_krr_resource_audit_job_rows
                     )
                     and original_krr_resource_audit_summary["status"]
                     .astype(str).str.lower().eq("resource_limit").all()
+                    and pd.to_numeric(
+                        original_krr_resource_audit_summary[
+                            "original_krr_exact_matvec_pairs"
+                        ],
+                        errors="raise",
+                    ).astype("int64").eq(
+                        pd.to_numeric(
+                            original_krr_resource_audit_summary["n_train"],
+                            errors="raise",
+                        ).astype("int64") ** 2
+                    ).all()
+                    and pd.to_numeric(
+                        original_krr_resource_audit_summary[
+                            "original_krr_dense_kernel_matrix_bytes"
+                        ],
+                        errors="raise",
+                    ).astype("int64").eq(
+                        8 * pd.to_numeric(
+                            original_krr_resource_audit_summary["n_train"],
+                            errors="raise",
+                        ).astype("int64") ** 2
+                    ).all()
+                    and original_krr_resource_audit_summary[
+                        "resource_preflight_before_dataset_load"
+                    ].astype(str).str.lower().eq("true").all()
                     and original_krr_resource_audit_summary[
                         "resource_preflight_before_backend"
                     ].astype(str).str.lower().eq("true").all()
+                    and original_krr_resource_audit_summary[
+                        "training_data_loaded_for_method"
+                    ].astype(str).str.lower().eq("false").all()
+                    and original_krr_resource_audit_summary[
+                        "gpu_backend_initialized_for_method"
+                    ].astype(str).str.lower().eq("false").all()
+                    and original_krr_resource_audit_summary[
+                        "gpu_work_launched"
+                    ].astype(str).str.lower().eq("false").all()
+                    and original_krr_resource_audit_summary[
+                        "cuda_runtime_memory_queried"
+                    ].astype(str).str.lower().eq("false").all()
+                    and original_krr_resource_audit_summary[
+                        "cuda_runtime_memory_query_attempted"
+                    ].astype(str).str.lower().eq("false").all()
+                    and original_krr_resource_audit_summary[
+                        "cuda_runtime_memory_query_succeeded"
+                    ].astype(str).str.lower().eq("false").all()
                     and ORIGINAL_KRR_RESOURCE_AUDIT_SUMMARY_PATH.is_file()
                     and ORIGINAL_KRR_RESOURCE_AUDIT_MANIFEST_PATH.is_file()
                 )
@@ -6132,6 +6282,26 @@ def build_notebook() -> dict:
                     "summary_path": str(ORIGINAL_KRR_RESOURCE_AUDIT_SUMMARY_PATH),
                     "manifest_path": str(
                         ORIGINAL_KRR_RESOURCE_AUDIT_MANIFEST_PATH
+                    ),
+                    "dataset_loaded": any(
+                        row.get("dataset_loaded") is True
+                        for row in original_krr_resource_audit_job_rows
+                    ),
+                    "cuda_runtime_memory_queried": any(
+                        row.get("cuda_runtime_memory_queried") is True
+                        for row in original_krr_resource_audit_job_rows
+                    ),
+                    "cuda_runtime_memory_query_attempted": any(
+                        row.get("cuda_runtime_memory_query_attempted") is True
+                        for row in original_krr_resource_audit_job_rows
+                    ),
+                    "cuda_runtime_memory_query_succeeded": any(
+                        row.get("cuda_runtime_memory_query_succeeded") is True
+                        for row in original_krr_resource_audit_job_rows
+                    ),
+                    "gpu_work_launched": any(
+                        row.get("gpu_work_launched") is True
+                        for row in original_krr_resource_audit_job_rows
                     ),
                     "complete": original_krr_resource_audit_complete,
                 },

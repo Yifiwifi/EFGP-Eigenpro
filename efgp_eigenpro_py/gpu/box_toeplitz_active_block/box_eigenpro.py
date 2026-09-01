@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -217,7 +216,16 @@ def _compute_local_eigenpairs(
             "maxiter": int(eig_maxiter),
             "tol": float(eig_tol),
         }
-    except Exception:
+    except Exception as exc:
+        if (
+            getattr(xp, "__name__", "") == "cupy"
+            and bool(getattr(cfg, "strict_gpu_eig", False))
+        ):
+            raise RuntimeError(
+                "strict_gpu_eig is enabled: the CuPy eigensolver failed and "
+                "CPU/SciPy fallback is disabled to prevent an unbounded host "
+                "computation."
+            ) from exc
         eig_backend = "scipy"
         from scipy.sparse.linalg import LinearOperator, eigsh
 

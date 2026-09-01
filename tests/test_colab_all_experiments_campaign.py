@@ -105,8 +105,12 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
     assert '"ours-binned-default"' in source
     assert "stage1_suite.build_profile_plan(" in source
     assert "len(stage1_family_parameter_sweep_plan) != 144" in source
+    assert "or RUN_STAGE1_FAMILY_PARAMETER_SWEEP" in source
     assert "family_parameter_sweep_reporting.write_family_parameter_sweep_reports(" in source
     assert 'final_manifest["stage1_family_parameter_sweep"]' in source
+    assert '"resource_excluded_case_count"' in source
+    assert '"all_candidates_executed_three_repeats"' in source
+    assert '"completion_semantics"' in source
     assert '"randomized-nystrom-fourier-pcg": 3' in source
     assert '"ski-kissgp-krr": 2' in source
     assert "expected_literature_pilot_case_count" in source
@@ -123,6 +127,19 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
     )
     assert '"comparable_to_full_n": False' in source
     assert '"expected_method_status": "resource_limit"' in source
+    assert "single_pre_dataset_resource_exclusion_no_execution_selection" in source
+    assert "profile_label != ORIGINAL_KRR_RESOURCE_AUDIT_PROFILE" in source
+    assert (
+        "if RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT:\n"
+        "    requested_size_hints.append(300_000_000)"
+    ) not in source
+    assert 'row.get("dataset_loaded") is False' in source
+    assert 'row.get("gpu_work_launched") is False' in source
+    assert 'row.get("cuda_runtime_memory_queried") is False' in source
+    assert 'row.get("cuda_runtime_memory_query_succeeded") is False' in source
+    assert '"original_krr_dense_kernel_matrix_bytes"' in source
+    assert '"resource_preflight_before_dataset_load"' in source
+    assert '"gpu_backend_initialized_for_method"' in source
     assert "ORIGINAL_KRR_PROXY_PROFILE," in source
     assert "ORIGINAL_KRR_RESOURCE_AUDIT_PROFILE," in source
     assert source.index("completed_original_krr_proxy_items = []") < source.index(
@@ -449,8 +466,10 @@ def test_original_krr_proxy_and_resource_audit_profiles_are_isolated(
     assert all(
         item["config"].methods == ("original-krr-nystrom-pcg",)
         and item["config"].original_krr_nystrom_rank == 128
-        and item["config"].warmup_repeats == 1
-        and item["config"].measured_repeats == 3
+        and item["config"].warmup_repeats == 0
+        and item["config"].measured_repeats == 1
+        and item["config"].parameter_selection_policy
+        == "single_pre_dataset_resource_exclusion_no_execution_selection"
         and item["config"].original_krr_max_exact_matvec_pairs == 1_000_000_000
         and item["config"].original_krr_max_prediction_pairs == 1_000_000_000
         for item in resource

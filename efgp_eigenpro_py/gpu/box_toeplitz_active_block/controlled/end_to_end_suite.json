@@ -265,7 +265,7 @@
       }
     },
     "matern_family_parameter_sweep_10m_300m": {
-      "description": "Predeclared Matérn shortlist for the inverse and active-eigenpair families on Synthetic and Winnebago at 10M, 30M, 100M, and 300M. Every expanded case executes exactly one family method with one warmup and three measured repeats; the active-eigenpair B axis includes the full-grid endpoint.",
+      "description": "Predeclared Matérn shortlist for the inverse and active-eigenpair families on Synthetic and Winnebago at 10M, 30M, 100M, and 300M. Every expanded case resolves exactly one family method: a resource-eligible case executes one warmup and three measured repeats, while a provably infeasible case is excluded before data/GPU work; the active-eigenpair B axis includes the full-grid endpoint.",
       "source_profile": "scale_10m_300m",
       "overrides": {
         "kernel_family": "matern",
@@ -468,15 +468,15 @@
       ]
     },
     "original_krr_full_scale_resource_audit": {
-      "description": "Full-N resource-only audit for exact original data-space KRR with a randomized Nyström PCG preconditioner. Synthetic/Winnebago at 10M and 300M must fail closed during the declared pair/memory preflight before backend initialization. These rows report prospective resource requirements only, not runtime or RMSE comparisons.",
+      "description": "Full-N resource-only audit for exact original data-space KRR with a randomized Nyström PCG preconditioner. Synthetic/Winnebago at 10M and 300M are excluded once by the declared arithmetic/memory preflight before dataset loading, CuPy import, allocator access, or GPU work. These rows report prospective resource requirements only, not runtime or RMSE comparisons.",
       "overrides": {
         "kernel_family": "matern",
         "methods": ["original-krr-nystrom-pcg"],
         "accuracy_reference_method": "original-krr-nystrom-pcg",
         "accuracy_max_rmse": null,
         "accuracy_min_r2": null,
-        "warmup_repeats": 1,
-        "measured_repeats": 3,
+        "warmup_repeats": 0,
+        "measured_repeats": 1,
         "precision": "fp64",
         "literature_baseline_precision": "fp64",
         "original_krr_nystrom_rank": 128,
@@ -492,8 +492,8 @@
         "original_krr_max_exact_matvec_pairs": 1000000000,
         "original_krr_max_prediction_pairs": 1000000000,
         "original_krr_max_preconditioner_bytes": 4294967296,
-        "parameter_selection_policy": "resource_preflight_only_no_execution_selection",
-        "parameter_source": "full-N resource audit at N={10M,300M}; resource_limit is the expected outcome and no timing/RMSE claim is permitted"
+        "parameter_selection_policy": "single_pre_dataset_resource_exclusion_no_execution_selection",
+        "parameter_source": "full-N resource audit at N={10M,300M}; one pre-dataset resource_limit exclusion is the expected outcome and no timing/RMSE claim is permitted"
       },
       "cases": [
         {

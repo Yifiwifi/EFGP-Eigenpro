@@ -228,6 +228,7 @@ class EndToEndConfig:
     rpcholesky_rank: int = 256
     eig_tol: float = 1e-3
     eig_maxiter: int | None = 1280
+    strict_gpu_eig: bool = True
     score_tau: float = 1.0
     box_budget: int = 8192
     # A100 deployment default: use the exact active-box inverse through |B|=6000.
@@ -296,6 +297,13 @@ class EndToEndConfig:
     original_krr_max_prediction_pairs: int | None = 1_000_000_000
     original_krr_max_preconditioner_bytes: int | None = 4 * 1024**3
     literature_baseline_precision: str = "fp64"
+    # Campaign-wide fail-closed resource gate.  The declared cap makes the
+    # preflight deterministic off-device; when CUDA is available it is reduced
+    # further to ``resource_preflight_available_memory_fraction`` of currently
+    # free memory.  The query allocates no arrays and happens before dataset I/O.
+    resource_preflight_gpu_memory_cap_bytes: int = 48 * 2**30
+    resource_preflight_available_memory_fraction: float = 0.65
+    resource_preflight_max_dense_inverse_work: int = 40_000_000_000_000
     # Exact RPCholesky is never replaced by a pilot/subsampled variant.  If the
     # declared factor does not fit this cap (or current device memory), the row
     # is retained with status=resource_limit.
@@ -466,6 +474,19 @@ def _validate_config(cfg: EndToEndConfig) -> None:
         value = getattr(cfg, field_name)
         if value is not None and int(value) <= 0:
             raise ValueError(f"{field_name} must be positive or None.")
+    if int(cfg.resource_preflight_gpu_memory_cap_bytes) <= 0:
+        raise ValueError("resource_preflight_gpu_memory_cap_bytes must be positive.")
+    if int(cfg.resource_preflight_max_dense_inverse_work) <= 0:
+        raise ValueError(
+            "resource_preflight_max_dense_inverse_work must be positive."
+        )
+    if not math.isfinite(float(cfg.resource_preflight_available_memory_fraction)) or not (
+        0.0 < float(cfg.resource_preflight_available_memory_fraction) < 1.0
+    ):
+        raise ValueError(
+            "resource_preflight_available_memory_fraction must lie strictly "
+            "between zero and one."
+        )
     if (
         not math.isfinite(float(cfg.native_falkon_tolerance))
         or float(cfg.native_falkon_tolerance) <= 0.0
@@ -500,6 +521,22 @@ def _validate_config(cfg: EndToEndConfig) -> None:
         and int(cfg.expected_active_box_size) <= 0
     ):
         raise ValueError("expected_active_box_size must be positive or None.")
+    effective_eig_box_size = (
+        cfg.active_eig_expected_active_box_size
+        if cfg.active_eig_expected_active_box_size is not None
+        else cfg.expected_active_box_size
+    )
+    effective_eig_rank = (
+        cfg.active_eig_rank if cfg.active_eig_rank is not None else cfg.rank
+    )
+    if (
+        "ours-binned-active-eig" in cfg.methods
+        and effective_eig_box_size is not None
+        and int(effective_eig_rank) >= int(effective_eig_box_size)
+    ):
+        raise ValueError(
+            "active-eig rank must be strictly smaller than its asserted box size."
+        )
     if float(cfg.reg_lambda) <= 0.0:
         raise ValueError("reg_lambda must be positive.")
     convention = str(cfg.regularization_convention).strip().lower()
@@ -674,6 +711,525 @@ def _available_device_bytes(xp: Any) -> int | None:
         return int(cuda.runtime.memGetInfo()[0])
     except Exception:
         return None
+
+
+def _probe_available_device_bytes_without_allocation() -> int | None:
+    """Query free CUDA memory without constructing a backend or GPU array."""
+
+    try:
+        import cupy as cp
+
+        return int(cp.cuda.runtime.memGetInfo()[0])
+    except Exception:
+        return None
+
+
+def _make_original_krr_config(cfg: EndToEndConfig, *, backend: str) -> Any:
+    """Translate the shared campaign config without resolving an array backend."""
+
+    from .original_krr_nystrom import OriginalKRRNystromConfig
+
+    return OriginalKRRNystromConfig(
+        rank=int(cfg.original_krr_nystrom_rank),
+        seed=int(cfg.original_krr_nystrom_seed),
+        absolute_ridge=float(cfg.reg_lambda),
+        tolerance=float(cfg.original_krr_nystrom_tolerance),
+        maxiter=int(cfg.original_krr_nystrom_maxiter),
+        lengthscale=float(cfg.lengthscale),
+        kernel_variance=float(cfg.variance),
+        precision=str(cfg.literature_baseline_precision),
+        backend=str(backend),
+        matvec_row_chunk_size=int(cfg.original_krr_matvec_row_chunk_size),
+        matvec_column_chunk_size=int(cfg.original_krr_matvec_column_chunk_size),
+        nystrom_row_chunk_size=int(cfg.original_krr_nystrom_row_chunk_size),
+        prediction_row_chunk_size=int(cfg.original_krr_prediction_row_chunk_size),
+        prediction_column_chunk_size=int(
+            cfg.original_krr_prediction_column_chunk_size
+        ),
+        nystrom_rcond=float(cfg.original_krr_nystrom_rcond),
+        max_exact_matvec_pairs=cfg.original_krr_max_exact_matvec_pairs,
+        max_prediction_pairs=cfg.original_krr_max_prediction_pairs,
+        max_preconditioner_bytes=cfg.original_krr_max_preconditioner_bytes,
+    )
+
+
+def _preflight_effective_gpu_cap(
+    cfg: EndToEndConfig, available_device_bytes: int | None
+) -> int:
+    cap = int(cfg.resource_preflight_gpu_memory_cap_bytes)
+    if available_device_bytes is not None:
+        cap = min(
+            cap,
+            int(
+                float(cfg.resource_preflight_available_memory_fraction)
+                * int(available_device_bytes)
+            ),
+        )
+    return cap
+
+
+def _box_inverse_peak_bytes(box_size: int) -> int:
+    # The current inverse path can overlap the dense block, symmetrized result,
+    # identity, Cholesky factor, triangular-solve intermediate, inverse, and a
+    # solver workspace.  Eight complex128 B-by-B buffers is intentionally
+    # conservative and prevents a borderline cuSOLVER OOM from consuming a run.
+    return int(8 * int(box_size) * int(box_size) * np.dtype(np.complex128).itemsize)
+
+
+def _box_eigen_peak_bytes(box_size: int, rank: int) -> int:
+    box_size = int(box_size)
+    rank = int(rank)
+    ncv = min(box_size - 1, max(2 * (rank + 1) + 32, rank + 3))
+    itemsize = np.dtype(np.complex128).itemsize
+    # Six Krylov-basis/work arrays plus retained U/U^H and one spare q-block.
+    return int((6 * box_size * ncv + 3 * box_size * rank) * itemsize)
+
+
+def _resident_training_xy_bytes(n_train: int | None) -> int:
+    # Formal data are 2-D float64 coordinates plus one float64 target.
+    return 0 if n_train is None else int(int(n_train) * 3 * np.dtype(np.float64).itemsize)
+
+
+def _finalize_resource_preflight(audit: dict[str, Any]) -> dict[str, Any]:
+    methods = audit["methods"]
+    excluded = sorted(
+        method
+        for method, decision in methods.items()
+        if decision["status"] == "excluded_resource_limit"
+    )
+    all_excluded = bool(excluded and len(excluded) == len(methods))
+    audit.update(
+        {
+            "excluded_methods": excluded,
+            "all_methods_excluded": all_excluded,
+            "dataset_load_required": not all_excluded,
+            "gpu_work_required": not all_excluded,
+        }
+    )
+    return audit
+
+
+def preflight_end_to_end_resources(
+    cfg: EndToEndConfig,
+    *,
+    available_device_bytes: int | None = None,
+    cuda_runtime_memory_query_attempted: bool = False,
+) -> dict[str, Any]:
+    """Diagnose obviously impossible methods before dataset I/O or GPU work.
+
+    The result is deliberately conservative.  Only cases with a proof from the
+    declared dimensions/caps are excluded; methods whose exact grid is resolved
+    during setup remain eligible and retain their existing runtime checks.
+    """
+
+    _validate_config(cfg)
+    n_train = None if cfg.n_train is None else int(cfg.n_train)
+    n_test_upper_bound = int(cfg.max_test_rows)
+    effective_gpu_cap = _preflight_effective_gpu_cap(cfg, available_device_bytes)
+    cuda_query_attempted = bool(
+        cuda_runtime_memory_query_attempted or available_device_bytes is not None
+    )
+    cuda_query_succeeded = available_device_bytes is not None
+    methods: dict[str, dict[str, Any]] = {}
+
+    for method in cfg.methods:
+        decision: dict[str, Any] = {
+            "method": str(method),
+            "status": "eligible",
+            "resource_limit_reason": None,
+            "n_train": n_train,
+            "n_test_upper_bound": n_test_upper_bound,
+            "declared_gpu_cap_bytes": int(
+                cfg.resource_preflight_gpu_memory_cap_bytes
+            ),
+            "available_device_bytes": available_device_bytes,
+            "effective_gpu_cap_bytes": int(effective_gpu_cap),
+            "resource_preflight_before_dataset_load": True,
+            "resource_preflight_before_backend": True,
+            "training_data_loaded": False,
+            "gpu_backend_initialized": False,
+            "gpu_work_launched": False,
+            "cuda_runtime_memory_query_attempted": cuda_query_attempted,
+            "cuda_runtime_memory_query_succeeded": cuda_query_succeeded,
+            # Backward-compatible alias: queried means attempted, not successful.
+            "cuda_runtime_memory_queried": cuda_query_attempted,
+        }
+
+        if method == "original-krr-nystrom-pcg" and n_train is not None:
+            from .original_krr_nystrom import (
+                OriginalKRRResourceLimit,
+                preflight_original_krr_resources,
+            )
+
+            original_cfg = _make_original_krr_config(cfg, backend="cupy")
+            try:
+                audit = preflight_original_krr_resources(
+                    n_train,
+                    n_test_upper_bound,
+                    original_cfg,
+                )
+            except OriginalKRRResourceLimit as exc:
+                audit = dict(exc.audit)
+                decision.update(
+                    {
+                        "status": "excluded_resource_limit",
+                        "resource_limit_reason": str(exc.reason),
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                    }
+                )
+            decision.update(audit)
+
+        elif method == "nystrom-krr" and n_train is not None:
+            dtype_name = str(cfg.low_rank_dtype).strip().lower()
+            itemsize = 4 if dtype_name in {"fp32", "float32"} else 8
+            requested_rank = min(int(cfg.nystrom_rank), n_train)
+            chunk_rows = min(int(cfg.low_rank_chunk_size), n_train)
+            resident_bytes = _resident_training_xy_bytes(n_train)
+            streamed_workspace_bytes = int(
+                chunk_rows * requested_rank * itemsize
+                + 6 * requested_rank * requested_rank * itemsize
+            )
+            peak_bytes = resident_bytes + streamed_workspace_bytes
+            decision.update(
+                {
+                    "requested_rank": requested_rank,
+                    "factor_dtype_itemsize": itemsize,
+                    "resident_training_xy_bytes": resident_bytes,
+                    "streamed_low_rank_workspace_bytes": streamed_workspace_bytes,
+                    "resource_required_bytes": peak_bytes,
+                    "resource_effective_cap_bytes": effective_gpu_cap,
+                    "complexity_class": (
+                        "resident x/y plus streamed chunk-by-rank Nyström workspace"
+                    ),
+                }
+            )
+            if peak_bytes > effective_gpu_cap:
+                decision.update(
+                    {
+                        "status": "excluded_resource_limit",
+                        "resource_limit_reason": "nystrom_streaming_peak_memory_cap",
+                        "error_type": "StaticResourceLimit",
+                        "error_message": (
+                            "Uniform Nyström streamed workspace plus resident x/y "
+                            "exceeds the pre-dataset effective GPU memory cap."
+                        ),
+                    }
+                )
+
+        elif method == "rpcholesky-krr" and n_train is not None:
+            dtype_name = str(cfg.low_rank_dtype).strip().lower()
+            itemsize = 4 if dtype_name in {"fp32", "float32"} else 8
+            requested_rank = min(int(cfg.rpcholesky_rank), n_train)
+            factor_bytes = int(requested_rank * n_train * itemsize)
+            resident_bytes = _resident_training_xy_bytes(n_train)
+            peak_bytes = factor_bytes + resident_bytes
+            rp_cap = min(int(cfg.rpcholesky_max_factor_bytes), effective_gpu_cap)
+            decision.update(
+                {
+                    "requested_rank": requested_rank,
+                    "factor_dtype_itemsize": itemsize,
+                    "rpcholesky_factor_bytes": factor_bytes,
+                    "resident_training_xy_bytes": resident_bytes,
+                    "resource_required_bytes": peak_bytes,
+                    "resource_effective_cap_bytes": rp_cap,
+                    "complexity_class": (
+                        "exact RPCholesky rank-by-N factor plus resident x/y"
+                    ),
+                }
+            )
+            if peak_bytes > rp_cap:
+                decision.update(
+                    {
+                        "status": "excluded_resource_limit",
+                        "resource_limit_reason": "rpcholesky_factor_memory_cap",
+                        "error_type": "RPCholeskyResourceLimit",
+                        "error_message": (
+                            "Exact RPCholesky rank-by-N factor exceeds the "
+                            "pre-dataset effective GPU memory cap."
+                        ),
+                    }
+                )
+
+        elif method == "ours-binned-inverse":
+            box_size = (
+                cfg.inverse_expected_active_box_size
+                if cfg.inverse_expected_active_box_size is not None
+                else cfg.expected_active_box_size
+            )
+            if box_size is not None:
+                dense_peak_bytes = _box_inverse_peak_bytes(int(box_size))
+                resident_bytes = _resident_training_xy_bytes(n_train)
+                peak_bytes = dense_peak_bytes + resident_bytes
+                # Whole explicit inverse construction: one Cholesky followed
+                # by two triangular solves with B right-hand sides.
+                inverse_work = int(28 * int(box_size) ** 3 // 3)
+                decision.update(
+                    {
+                        "configured_box_size": int(box_size),
+                        "preconditioner_peak_bytes": dense_peak_bytes,
+                        "resident_training_xy_bytes": resident_bytes,
+                        "resource_required_bytes": peak_bytes,
+                        "resource_effective_cap_bytes": effective_gpu_cap,
+                        "estimated_dense_inverse_work": inverse_work,
+                        "max_dense_inverse_work": int(
+                            cfg.resource_preflight_max_dense_inverse_work
+                        ),
+                        "complexity_class": "dense complex128 B-by-B inverse",
+                        "peak_model": (
+                            "resident_float64_x_y + 8*|B|^2*sizeof(complex128)"
+                        ),
+                    }
+                )
+                if peak_bytes > effective_gpu_cap:
+                    decision.update(
+                        {
+                            "status": "excluded_resource_limit",
+                            "resource_limit_reason": "active_inverse_peak_memory_cap",
+                            "error_type": "StaticResourceLimit",
+                            "error_message": (
+                                "Conservative active-inverse dense peak exceeds "
+                                "the pre-dataset effective GPU memory cap."
+                            ),
+                        }
+                    )
+                elif inverse_work > int(
+                    cfg.resource_preflight_max_dense_inverse_work
+                ):
+                    decision.update(
+                        {
+                            "status": "excluded_resource_limit",
+                            "resource_limit_reason": "dense_inverse_work_cap",
+                            "error_type": "StaticResourceLimit",
+                            "error_message": (
+                                "Declared dense active-inverse construction work "
+                                "exceeds the pre-dataset operation cap."
+                            ),
+                        }
+                    )
+
+        elif method == "ours-binned-active-eig":
+            box_size = (
+                cfg.active_eig_expected_active_box_size
+                if cfg.active_eig_expected_active_box_size is not None
+                else cfg.expected_active_box_size
+            )
+            rank = cfg.active_eig_rank if cfg.active_eig_rank is not None else cfg.rank
+            if box_size is not None:
+                eig_peak_bytes = _box_eigen_peak_bytes(int(box_size), int(rank))
+                resident_bytes = _resident_training_xy_bytes(n_train)
+                peak_bytes = eig_peak_bytes + resident_bytes
+                decision.update(
+                    {
+                        "configured_box_size": int(box_size),
+                        "configured_rank": int(rank),
+                        "preconditioner_peak_bytes": eig_peak_bytes,
+                        "resident_training_xy_bytes": resident_bytes,
+                        "resource_required_bytes": peak_bytes,
+                        "resource_effective_cap_bytes": effective_gpu_cap,
+                        "complexity_class": "matrix-free complex128 eigenspace",
+                    }
+                )
+                if peak_bytes > effective_gpu_cap:
+                    decision.update(
+                        {
+                            "status": "excluded_resource_limit",
+                            "resource_limit_reason": "active_eigen_peak_memory_cap",
+                            "error_type": "StaticResourceLimit",
+                            "error_message": (
+                                "Conservative active-eigen Krylov peak exceeds "
+                                "the pre-dataset effective GPU memory cap."
+                            ),
+                        }
+                    )
+
+        elif method == "native-falkon-krr":
+            itemsize = 8 if cfg.literature_baseline_precision == "fp64" else 4
+            centers = (
+                int(cfg.native_falkon_nystrom_centers)
+                if n_train is None
+                else min(int(cfg.native_falkon_nystrom_centers), n_train)
+            )
+            train_chunk = (
+                int(cfg.native_falkon_train_chunk_size)
+                if n_train is None
+                else min(int(cfg.native_falkon_train_chunk_size), n_train)
+            )
+            prediction_chunk = min(
+                int(cfg.native_falkon_prediction_chunk_size),
+                n_test_upper_bound,
+            )
+            chunk = max(train_chunk, prediction_chunk)
+            peak_bytes = int(
+                (chunk * centers + 8 * centers * centers) * itemsize
+            )
+            decision.update(
+                {
+                    "resource_required_bytes": peak_bytes,
+                    "resource_effective_cap_bytes": effective_gpu_cap,
+                    "complexity_class": "streamed O(Nm), O(chunk*m+m^2) memory",
+                }
+            )
+            if peak_bytes > effective_gpu_cap:
+                decision.update(
+                    {
+                        "status": "excluded_resource_limit",
+                        "resource_limit_reason": "falkon_streaming_peak_memory_cap",
+                        "error_type": "StaticResourceLimit",
+                        "error_message": (
+                            "FALKON chunk/center workspace exceeds the pre-dataset "
+                            "effective GPU memory cap."
+                        ),
+                    }
+                )
+
+        elif method == "matern-rff-ridge":
+            itemsize = 8 if cfg.literature_baseline_precision == "fp64" else 4
+            train_chunk = (
+                int(cfg.rff_train_chunk_size)
+                if n_train is None
+                else min(int(cfg.rff_train_chunk_size), n_train)
+            )
+            prediction_chunk = min(
+                int(cfg.rff_prediction_chunk_size),
+                n_test_upper_bound,
+            )
+            chunk = max(train_chunk, prediction_chunk)
+            features = int(cfg.rff_num_features)
+            peak_bytes = int(
+                (chunk * features + 4 * features * features) * itemsize
+            )
+            decision.update(
+                {
+                    "resource_required_bytes": peak_bytes,
+                    "resource_effective_cap_bytes": effective_gpu_cap,
+                    "complexity_class": "streamed O(ND), O(chunk*D+D^2) memory",
+                }
+            )
+            if peak_bytes > effective_gpu_cap:
+                decision.update(
+                    {
+                        "status": "excluded_resource_limit",
+                        "resource_limit_reason": "rff_streaming_peak_memory_cap",
+                        "error_type": "StaticResourceLimit",
+                        "error_message": (
+                            "RFF feature/normal-equation workspace exceeds the "
+                            "pre-dataset effective GPU memory cap."
+                        ),
+                    }
+                )
+
+        elif method == "ski-kissgp-krr":
+            h = float(cfg.ski_grid_spacing)
+            padding = int(cfg.ski_grid_padding_points)
+            nx = int(
+                math.ceil(
+                    (float(cfg.ski_grid_x_max) - float(cfg.ski_grid_x_min)) / h
+                    + 2 * padding
+                    - 1e-12
+                )
+                + 1
+            )
+            ny = int(
+                math.ceil(
+                    (float(cfg.ski_grid_y_max) - float(cfg.ski_grid_y_min)) / h
+                    + 2 * padding
+                    - 1e-12
+                )
+                + 1
+            )
+            grid_size = int(nx * ny)
+            chunk_rows = (
+                int(cfg.ski_train_chunk_size)
+                if n_train is None
+                else min(int(cfg.ski_train_chunk_size), n_train)
+            )
+            itemsize = np.dtype(np.float64).itemsize
+            peak_bytes = int(
+                (64 * grid_size + 32 * chunk_rows) * itemsize
+            )
+            decision.update(
+                {
+                    "grid_shape": [nx, ny],
+                    "grid_size": grid_size,
+                    "resource_required_bytes": peak_bytes,
+                    "resource_effective_cap_bytes": effective_gpu_cap,
+                    "peak_model": (
+                        "64*grid_size + 32*streamed_chunk_rows fp64 equivalents"
+                    ),
+                    "complexity_class": (
+                        "streamed moment reduction; no N-sized interpolation/CG storage"
+                    ),
+                }
+            )
+            if peak_bytes > effective_gpu_cap:
+                decision.update(
+                    {
+                        "status": "excluded_resource_limit",
+                        "resource_limit_reason": "ski_streaming_peak_memory_cap",
+                        "error_type": "StaticResourceLimit",
+                        "error_message": (
+                            "SKI grid/chunk workspace exceeds the pre-dataset "
+                            "effective GPU memory cap."
+                        ),
+                    }
+                )
+
+        elif method == "randomized-nystrom-fourier-pcg":
+            decision.update(
+                {
+                    "configured_rank": int(cfg.fourier_nystrom_rank),
+                    "complexity_class": "Fourier-grid Nyström; no N-by-rank factor",
+                }
+            )
+
+        if (
+            method.startswith("efgp-")
+            or method.startswith("ours-")
+            or method
+            in {
+                "randomized-nystrom-fourier-pcg",
+                "nystrom-krr",
+                "rpcholesky-krr",
+                "original-krr-nystrom-pcg",
+            }
+        ):
+            resident_bytes = _resident_training_xy_bytes(n_train)
+            decision.setdefault("resident_training_xy_bytes", resident_bytes)
+            decision.setdefault("resource_effective_cap_bytes", effective_gpu_cap)
+            if decision["status"] == "eligible":
+                required_bytes = decision.setdefault(
+                    "resource_required_bytes", resident_bytes
+                )
+                if required_bytes > effective_gpu_cap:
+                    decision.update(
+                        {
+                            "status": "excluded_resource_limit",
+                            "resource_limit_reason": (
+                                "resident_training_data_memory_cap"
+                            ),
+                            "error_type": "StaticResourceLimit",
+                            "error_message": (
+                                "Resident float64 training x/y alone exceed the "
+                                "pre-dataset effective GPU memory cap."
+                            ),
+                        }
+                    )
+
+        methods[str(method)] = decision
+
+    return _finalize_resource_preflight({
+        "schema_version": 1,
+        "dataset_stem": str(cfg.dataset_stem),
+        "n_train": n_train,
+        "n_test_upper_bound": n_test_upper_bound,
+        "available_device_bytes": available_device_bytes,
+        "cuda_runtime_memory_query_attempted": cuda_query_attempted,
+        "cuda_runtime_memory_query_succeeded": cuda_query_succeeded,
+        "cuda_runtime_memory_queried": cuda_query_attempted,
+        "effective_gpu_cap_bytes": int(effective_gpu_cap),
+        "methods": methods,
+    })
 
 
 def choose_rpcholesky_landmarks(
@@ -1082,6 +1638,7 @@ def _fixed_config(
         parameter_source=cfg.parameter_source,
         eig_tol=cfg.eig_tol,
         eig_maxiter=cfg.eig_maxiter,
+        strict_gpu_eig=bool(cfg.strict_gpu_eig),
         measured_repeats=max(5, cfg.measured_repeats),
         warmup_repeats=cfg.warmup_repeats,
         method_order_seed=cfg.method_order_seed,
@@ -1422,7 +1979,6 @@ def _run_literature_method(
         run_structured_kernel_interpolation,
     )
     from .original_krr_nystrom import (
-        OriginalKRRNystromConfig,
         run_original_krr_nystrom_pcg,
     )
 
@@ -1555,32 +2111,7 @@ def _run_literature_method(
             "implementation": str(result["implementation"]),
         }
     elif method == "original-krr-nystrom-pcg":
-        baseline_cfg = OriginalKRRNystromConfig(
-            rank=int(cfg.original_krr_nystrom_rank),
-            seed=int(cfg.original_krr_nystrom_seed),
-            absolute_ridge=float(cfg.reg_lambda),
-            tolerance=float(cfg.original_krr_nystrom_tolerance),
-            maxiter=int(cfg.original_krr_nystrom_maxiter),
-            lengthscale=float(cfg.lengthscale),
-            kernel_variance=float(cfg.variance),
-            precision=str(cfg.literature_baseline_precision),
-            backend="cupy",
-            matvec_row_chunk_size=int(cfg.original_krr_matvec_row_chunk_size),
-            matvec_column_chunk_size=int(
-                cfg.original_krr_matvec_column_chunk_size
-            ),
-            nystrom_row_chunk_size=int(cfg.original_krr_nystrom_row_chunk_size),
-            prediction_row_chunk_size=int(
-                cfg.original_krr_prediction_row_chunk_size
-            ),
-            prediction_column_chunk_size=int(
-                cfg.original_krr_prediction_column_chunk_size
-            ),
-            nystrom_rcond=float(cfg.original_krr_nystrom_rcond),
-            max_exact_matvec_pairs=cfg.original_krr_max_exact_matvec_pairs,
-            max_prediction_pairs=cfg.original_krr_max_prediction_pairs,
-            max_preconditioner_bytes=cfg.original_krr_max_preconditioner_bytes,
-        )
+        baseline_cfg = _make_original_krr_config(cfg, backend="cupy")
         result = run_original_krr_nystrom_pcg(
             dataset["x"],
             dataset["y"],
@@ -1685,19 +2216,56 @@ def _run_literature_method(
 
 
 def _base_row(
-    cfg: EndToEndConfig, dataset: dict[str, Any], method: str
+    cfg: EndToEndConfig, dataset: dict[str, Any] | None, method: str
 ) -> dict[str, Any]:
+    if dataset is None:
+        if cfg.n_train is None:
+            raise ValueError(
+                "A pre-dataset resource row requires a declared n_train."
+            )
+        n_train = int(cfg.n_train)
+        n_test = int(cfg.max_test_rows)
+        dim = 2
+        dataset_family = str(cfg.dataset_stem)
+        source_n_train = n_train
+        content_index_sha256 = None
+        metadata_sha256 = None
+        observed_provenance = {
+            "observed_dataset_noise_std": None,
+            "observed_dataset_seed_train": None,
+            "observed_dataset_seed_test": None,
+            "observed_dataset_generation_chunk_rows": None,
+            "observed_dataset_target_function": None,
+        }
+    else:
+        n_train = int(dataset["x"].shape[0])
+        n_test = int(dataset["n_test"])
+        dim = int(dataset["x"].shape[1])
+        dataset_family = dataset.get("metadata", {}).get(
+            "dataset_name", cfg.dataset_stem
+        )
+        source_n_train = int(dataset["source_n_train"])
+        content_index_sha256 = dataset.get("content_index_sha256")
+        metadata_sha256 = dataset.get("metadata_sha256")
+        observed_provenance = {
+            key: dataset.get(key)
+            for key in (
+                "observed_dataset_noise_std",
+                "observed_dataset_seed_train",
+                "observed_dataset_seed_test",
+                "observed_dataset_generation_chunk_rows",
+                "observed_dataset_target_function",
+            )
+        }
     return {
         "protocol_family": PROTOCOL_FAMILY,
         "timing_scope": TIMING_SCOPE,
         "method": method,
         "dataset_stem": cfg.dataset_stem,
-        "dataset_family": dataset.get("metadata", {}).get(
-            "dataset_name", cfg.dataset_stem
-        ),
-        "n_train": int(dataset["x"].shape[0]),
-        "n_test": int(dataset["n_test"]),
-        "dim": int(dataset["x"].shape[1]),
+        "dataset_family": dataset_family,
+        "n_train": n_train,
+        "n_test": n_test,
+        "dim": dim,
         "subset_seed": int(cfg.subset_seed),
         "subset_mode": str(cfg.subset_mode),
         "expected_dataset_noise_std": cfg.expected_dataset_noise_std,
@@ -1707,18 +2275,10 @@ def _base_row(
             cfg.expected_dataset_generation_chunk_rows
         ),
         "expected_dataset_target_function": cfg.expected_dataset_target_function,
-        "observed_dataset_noise_std": dataset.get("observed_dataset_noise_std"),
-        "observed_dataset_seed_train": dataset.get("observed_dataset_seed_train"),
-        "observed_dataset_seed_test": dataset.get("observed_dataset_seed_test"),
-        "observed_dataset_generation_chunk_rows": dataset.get(
-            "observed_dataset_generation_chunk_rows"
-        ),
-        "observed_dataset_target_function": dataset.get(
-            "observed_dataset_target_function"
-        ),
-        "dataset_source_n_train": int(dataset["source_n_train"]),
-        "dataset_content_index_sha256": dataset.get("content_index_sha256"),
-        "dataset_metadata_sha256": dataset.get("metadata_sha256"),
+        **observed_provenance,
+        "dataset_source_n_train": source_n_train,
+        "dataset_content_index_sha256": content_index_sha256,
+        "dataset_metadata_sha256": metadata_sha256,
         "kernel_family": str(cfg.kernel_family),
         "lengthscale": float(cfg.lengthscale),
         "nu": float(cfg.nu),
@@ -1735,6 +2295,7 @@ def _base_row(
         "box_budget": int(cfg.box_budget),
         "configured_active_rank": int(cfg.rank),
         "configured_full_eig_rank": int(cfg.full_eig_rank or cfg.rank),
+        "configured_strict_gpu_eig": bool(cfg.strict_gpu_eig),
         "configured_active_topk": (
             None if cfg.active_topk is None else int(cfg.active_topk)
         ),
@@ -1804,12 +2365,97 @@ def _base_row(
         "configured_original_krr_max_preconditioner_bytes": (
             cfg.original_krr_max_preconditioner_bytes
         ),
+        "configured_resource_preflight_gpu_memory_cap_bytes": int(
+            cfg.resource_preflight_gpu_memory_cap_bytes
+        ),
+        "configured_resource_preflight_available_memory_fraction": float(
+            cfg.resource_preflight_available_memory_fraction
+        ),
+        "configured_resource_preflight_max_dense_inverse_work": int(
+            cfg.resource_preflight_max_dense_inverse_work
+        ),
         "configured_literature_baseline_precision": str(
             cfg.literature_baseline_precision
         ),
         "accuracy_max_rmse": cfg.accuracy_max_rmse,
         "accuracy_min_r2": cfg.accuracy_min_r2,
         "gpu_allocator_cache_reset_between_pipelines": True,
+    }
+
+
+def _preflight_resource_limit_row(
+    cfg: EndToEndConfig,
+    dataset: dict[str, Any] | None,
+    method: str,
+    decision: dict[str, Any],
+    *,
+    repeat_idx: int,
+    is_warmup: bool,
+) -> dict[str, Any]:
+    """Materialize one excluded row without invoking a method or allocator."""
+
+    base = _base_row(cfg, dataset, method)
+    resource_audit = dict(decision)
+    required_bytes = decision.get("resource_required_bytes")
+    if (
+        required_bytes is None
+        and "memory" in str(decision.get("resource_limit_reason", ""))
+    ):
+        required_bytes = decision.get("preconditioner_factor_bytes")
+    return {
+        **base,
+        "repeat_idx": int(repeat_idx),
+        "is_warmup": bool(is_warmup),
+        "status": "resource_limit",
+        "error_type": str(decision.get("error_type") or "StaticResourceLimit"),
+        "error_message": str(
+            decision.get("error_message")
+            or "Method excluded by the pre-dataset resource preflight."
+        ),
+        "resource_required_bytes": required_bytes,
+        "resource_effective_cap_bytes": decision.get(
+            "resource_effective_cap_bytes",
+            decision.get("effective_gpu_cap_bytes"),
+        ),
+        "resource_declared_cap_bytes": decision.get(
+            "declared_gpu_cap_bytes"
+        ),
+        "resource_available_device_bytes": decision.get(
+            "available_device_bytes"
+        ),
+        "resource_limit_reason": decision.get("resource_limit_reason"),
+        "resource_audit": resource_audit,
+        "original_krr_exact_matvec_pairs": decision.get("exact_matvec_pairs"),
+        "original_krr_dense_kernel_matrix_bytes": decision.get(
+            "dense_kernel_matrix_bytes"
+        ),
+        "original_krr_prediction_pairs": decision.get("prediction_pairs"),
+        "original_krr_preconditioner_factor_bytes": decision.get(
+            "preconditioner_factor_bytes"
+        ),
+        "resource_preflight_before_dataset_load": True,
+        "resource_preflight_before_backend": True,
+        "training_data_loaded_for_method": False,
+        "campaign_dataset_loaded_for_other_methods": dataset is not None,
+        "gpu_backend_initialized_for_method": False,
+        "gpu_work_launched": False,
+        "cuda_runtime_memory_queried": bool(
+            decision.get("cuda_runtime_memory_queried", False)
+        ),
+        "cuda_runtime_memory_query_attempted": bool(
+            decision.get("cuda_runtime_memory_query_attempted", False)
+        ),
+        "cuda_runtime_memory_query_succeeded": bool(
+            decision.get("cuda_runtime_memory_query_succeeded", False)
+        ),
+        "setup_seconds": math.nan,
+        "solving_phase_seconds": math.nan,
+        "train_total_seconds": math.nan,
+        "prediction_seconds": math.nan,
+        "test_rmse": math.nan,
+        "test_mae": math.nan,
+        "test_r2": math.nan,
+        "iterations": None,
     }
 
 
@@ -1855,6 +2501,9 @@ def run_pipeline_once(
             "resource_audit": resource_audit,
             "original_krr_exact_matvec_pairs": resource_audit.get(
                 "exact_matvec_pairs"
+            ),
+            "original_krr_dense_kernel_matrix_bytes": resource_audit.get(
+                "dense_kernel_matrix_bytes"
             ),
             "original_krr_prediction_pairs": resource_audit.get(
                 "prediction_pairs"
@@ -2030,6 +2679,10 @@ def summarize_pipeline_rows(
                     "configured_original_krr_max_exact_matvec_pairs",
                     "configured_original_krr_max_prediction_pairs",
                     "configured_original_krr_max_preconditioner_bytes",
+                    "configured_resource_preflight_gpu_memory_cap_bytes",
+                    "configured_resource_preflight_available_memory_fraction",
+                    "configured_resource_preflight_max_dense_inverse_work",
+                    "configured_strict_gpu_eig",
                     "configured_literature_baseline_precision",
                     "effective_nystrom_centers",
                     "native_falkon_penalty",
@@ -2061,9 +2714,18 @@ def summarize_pipeline_rows(
                     "resource_limit_reason",
                     "resource_audit",
                     "original_krr_exact_matvec_pairs",
+                    "original_krr_dense_kernel_matrix_bytes",
                     "original_krr_prediction_pairs",
                     "original_krr_preconditioner_factor_bytes",
+                    "resource_preflight_before_dataset_load",
                     "resource_preflight_before_backend",
+                    "training_data_loaded_for_method",
+                    "campaign_dataset_loaded_for_other_methods",
+                    "gpu_backend_initialized_for_method",
+                    "gpu_work_launched",
+                    "cuda_runtime_memory_queried",
+                    "cuda_runtime_memory_query_attempted",
+                    "cuda_runtime_memory_query_succeeded",
                 )
             },
             "method": method,
@@ -2393,13 +3055,56 @@ def _write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
 
 def run_end_to_end_experiment(cfg: EndToEndConfig) -> dict[str, Any]:
     _validate_config(cfg)
-    dataset = load_end_to_end_dataset(cfg)
     output = (
         Path(cfg.output_dir).expanduser().resolve()
         if cfg.output_dir
         else (Path.cwd() / "end_to_end_krr_results" / cfg.dataset_stem).resolve()
     )
     output.mkdir(parents=True, exist_ok=True)
+    cpu_preflight = preflight_end_to_end_resources(cfg)
+    if cpu_preflight["all_methods_excluded"]:
+        # Most importantly, exact full-N original KRR stops here: no CuPy
+        # import, dataset read, allocator reset, or timing repeat is attempted.
+        resource_preflight = cpu_preflight
+    else:
+        available_device_bytes = _probe_available_device_bytes_without_allocation()
+        resource_preflight = preflight_end_to_end_resources(
+            cfg,
+            available_device_bytes=available_device_bytes,
+            cuda_runtime_memory_query_attempted=True,
+        )
+        if available_device_bytes is None:
+            # A formal GPU run cannot safely use the static 48-GiB ceiling when
+            # the actual free-memory query failed. Exclude before data I/O.
+            for decision in resource_preflight["methods"].values():
+                if decision["status"] != "eligible":
+                    continue
+                decision.update(
+                    {
+                        "status": "excluded_resource_limit",
+                        "resource_limit_reason": "cuda_memory_probe_unavailable",
+                        "error_type": "CudaMemoryProbeUnavailable",
+                        "error_message": (
+                            "CUDA free-memory query failed; formal GPU execution "
+                            "is disabled before dataset loading."
+                        ),
+                    }
+                )
+            resource_preflight = _finalize_resource_preflight(resource_preflight)
+    (output / "resource_preflight.json").write_text(
+        json.dumps(
+            resource_preflight,
+            indent=2,
+            ensure_ascii=False,
+            default=_json_default,
+        ),
+        encoding="utf-8",
+    )
+    dataset = (
+        None
+        if resource_preflight["all_methods_excluded"]
+        else load_end_to_end_dataset(cfg)
+    )
     rows: list[dict[str, Any]] = []
     total_repeats = int(cfg.warmup_repeats) + int(cfg.measured_repeats)
     for repeat in range(total_repeats):
@@ -2408,18 +3113,34 @@ def run_end_to_end_experiment(cfg: EndToEndConfig) -> dict[str, Any]:
         order = list(cfg.methods)
         np.random.default_rng(int(cfg.method_order_seed) + repeat).shuffle(order)
         for method in order:
-            _release_gpu_allocator_cache()
-            row = run_pipeline_once(
-                method,
-                cfg,
-                dataset,
-                repeat_idx=repeat_idx,
-                is_warmup=is_warmup,
-            )
+            resource_decision = resource_preflight["methods"][method]
+            if resource_decision["status"] == "excluded_resource_limit":
+                row = _preflight_resource_limit_row(
+                    cfg,
+                    dataset,
+                    method,
+                    resource_decision,
+                    repeat_idx=repeat_idx,
+                    is_warmup=is_warmup,
+                )
+            else:
+                if dataset is None:  # pragma: no cover - guarded by preflight
+                    raise RuntimeError(
+                        "Resource preflight marked a method runnable without a dataset."
+                    )
+                _release_gpu_allocator_cache()
+                row = run_pipeline_once(
+                    method,
+                    cfg,
+                    dataset,
+                    repeat_idx=repeat_idx,
+                    is_warmup=is_warmup,
+                )
             rows.append(row)
             _write_rows(output / "pipeline_runs.json", rows)
             _write_rows(output / "pipeline_runs.csv", rows)
-            _release_gpu_allocator_cache()
+            if resource_decision["status"] != "excluded_resource_limit":
+                _release_gpu_allocator_cache()
     summary = summarize_pipeline_rows(rows, cfg)
     _write_rows(output / "pipeline_summary.json", summary)
     _write_rows(output / "pipeline_summary.csv", summary)
@@ -2480,32 +3201,83 @@ def run_end_to_end_experiment(cfg: EndToEndConfig) -> dict[str, Any]:
         formal_result_status = "complete_with_usability_ineligible_methods"
     else:
         formal_result_status = "claim_eligible_complete"
+    if dataset is None:
+        completion_n_train = int(cfg.n_train or 0)
+        completion_n_test = int(cfg.max_test_rows)
+        source_n_train = completion_n_train
+        content_index_sha256 = None
+        metadata_sha256 = None
+        observed_provenance = {
+            key: None
+            for key in (
+                "observed_dataset_noise_std",
+                "observed_dataset_seed_train",
+                "observed_dataset_seed_test",
+                "observed_dataset_generation_chunk_rows",
+                "observed_dataset_target_function",
+            )
+        }
+    else:
+        completion_n_train = int(dataset["x"].shape[0])
+        completion_n_test = int(dataset["n_test"])
+        source_n_train = int(dataset["source_n_train"])
+        content_index_sha256 = dataset.get("content_index_sha256")
+        metadata_sha256 = dataset.get("metadata_sha256")
+        observed_provenance = {
+            key: dataset.get(key)
+            for key in (
+                "observed_dataset_noise_std",
+                "observed_dataset_seed_train",
+                "observed_dataset_seed_test",
+                "observed_dataset_generation_chunk_rows",
+                "observed_dataset_target_function",
+            )
+        }
     completion = {
         "protocol_family": PROTOCOL_FAMILY,
         "timing_scope": TIMING_SCOPE,
         "methods": list(cfg.methods),
-        "n_train": int(dataset["x"].shape[0]),
-        "n_test": int(dataset["n_test"]),
+        "n_train": completion_n_train,
+        "n_test": completion_n_test,
         "dataset_provenance": {
             "dataset_stem": cfg.dataset_stem,
-            "source_n_train": int(dataset["source_n_train"]),
-            "content_index_sha256": dataset.get("content_index_sha256"),
-            "metadata_sha256": dataset.get("metadata_sha256"),
+            "source_n_train": source_n_train,
+            "content_index_sha256": content_index_sha256,
+            "metadata_sha256": metadata_sha256,
             **{
                 key: getattr(cfg, key)
                 for key in DATASET_PROVENANCE_CONFIG_FIELDS
             },
-            **{
-                key: dataset.get(key)
-                for key in (
-                    "observed_dataset_noise_std",
-                    "observed_dataset_seed_train",
-                    "observed_dataset_seed_test",
-                    "observed_dataset_generation_chunk_rows",
-                    "observed_dataset_target_function",
-                )
-            },
+            **observed_provenance,
         },
+        "resource_preflight_path": str(output / "resource_preflight.json"),
+        "resource_preflight_excluded_methods": list(
+            resource_preflight["excluded_methods"]
+        ),
+        "resource_preflight_all_methods_excluded": bool(
+            resource_preflight["all_methods_excluded"]
+        ),
+        "cuda_runtime_memory_queried": bool(
+            resource_preflight.get("cuda_runtime_memory_queried", False)
+        ),
+        "cuda_runtime_memory_query_attempted": bool(
+            resource_preflight.get(
+                "cuda_runtime_memory_query_attempted", False
+            )
+        ),
+        "cuda_runtime_memory_query_succeeded": bool(
+            resource_preflight.get(
+                "cuda_runtime_memory_query_succeeded", False
+            )
+        ),
+        "dataset_loaded": dataset is not None,
+        "gpu_work_launched": bool(
+            dataset is not None
+            and any(
+                decision["status"] != "excluded_resource_limit"
+                for decision in resource_preflight["methods"].values()
+            )
+        ),
         "expected_row_count": len(expected_row_keys),
         "observed_row_count": len(rows),
         "all_rows_present": all_rows_present,

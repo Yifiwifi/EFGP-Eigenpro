@@ -80,6 +80,15 @@ three measured repeats. The companion reporter writes `all_candidates` and
 successful repeats and minimizes median training total. RMSE is retained but
 is never used to filter or rank sweep candidates.
 
+The exact shortlist is size-stratified. At N={10M,30M}, the inverse family
+uses |B|={625,961,1369,2601,5329}; the eigen family uses
+(|B|,q)={(2601,192),(5329,192),(5329,256),
+(10609,192/256/320),(21025,192/256/320),
+(35721,128/192/256/320)}. At N={100M,300M}, the inverse family uses
+|B|={5329,10609,15625}; the eigen family uses
+|B|={25921,32761,35721} crossed with q={192,256,320,384,448}.
+The same declared list is used for Synthetic and Winnebago.
+
 Section 4.4 adds four independently constructed literature comparisons:
 `native-falkon-krr`, the published two-Cholesky FALKON preconditioner;
 `matern-rff-ridge`, a Matérn random-Fourier-feature ridge model;
@@ -116,10 +125,24 @@ mixed with a 10M/300M comparison table.
 
 `original_krr_full_scale_resource_audit` contains only the two dataset families
 at N={10M,300M}, rank 128. A 1e9 exact-matvec/prediction-pair cap causes these
-full-N configurations to record the expected `resource_limit` before backend
-initialization. This phase reports prospective pair counts and preconditioner
-memory, not timing or accuracy. It neither participates in the 10M quality gate
-nor supplies a 300M performance row.
+full-N configurations to write one expected preflight exclusion before dataset
+loading, CuPy import, allocator access, or GPU work. This phase reports
+prospective pair counts and preconditioner memory, not timing or accuracy. It
+neither participates in the 10M quality gate nor supplies a 300M performance
+row. The same campaign-wide preflight rejects an exact RPCholesky rank-by-N
+factor before full x/y staging and estimates dense inverse and matrix-free
+eigenspace peaks from B/q; every case writes `resource_preflight.json`.
+The effective GPU cap is `min(48 GiB, 0.65 * currently-free-memory)`. Its
+fail-closed models include `24N` bytes for resident float64 2-D x/y, an
+additional `8 * |B|^2 * sizeof(complex128)` for the dense inverse path, and a
+`28|B|^3/3 <= 4e13` full inverse-construction work gate (Cholesky plus both
+triangular solves). Exact RPCholesky additionally
+requires `N * rank * itemsize`; original KRR is rejected from its declared
+`N^2` pair count before any CUDA query. Strict GPU eigensolver mode also turns
+a CuPy eigensolver failure into an error instead of silently starting SciPy.
+If the lightweight CUDA free-memory query itself fails, every otherwise
+eligible GPU method is excluded before dataset loading; the audit records the
+query as attempted but not succeeded.
 
 ```bash
 python -m efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end_suite \

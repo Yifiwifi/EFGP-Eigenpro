@@ -235,6 +235,9 @@ def preflight_original_krr_resources(
 
     exact_matvec_pairs = n_train * n_train
     prediction_pairs = n_train * n_test
+    dense_kernel_matrix_bytes = (
+        exact_matvec_pairs * np.dtype(np.float64).itemsize
+    )
     factor_bytes = n_train * int(cfg.rank) * np.dtype(np.float64).itemsize
     nystrom_workspace_bytes = (
         min(n_train, int(cfg.nystrom_row_chunk_size))
@@ -252,6 +255,7 @@ def preflight_original_krr_resources(
         "requested_rank": int(cfg.rank),
         "precision": "fp64",
         "exact_matvec_pairs": exact_matvec_pairs,
+        "dense_kernel_matrix_bytes": dense_kernel_matrix_bytes,
         "max_exact_matvec_pairs": cfg.max_exact_matvec_pairs,
         "prediction_pairs": prediction_pairs,
         "max_prediction_pairs": cfg.max_prediction_pairs,
@@ -259,6 +263,7 @@ def preflight_original_krr_resources(
         "max_preconditioner_bytes": cfg.max_preconditioner_bytes,
         "nystrom_row_workspace_bytes": nystrom_workspace_bytes,
         "matvec_kernel_block_bytes": matvec_kernel_block_bytes,
+        "resource_preflight_before_dataset_load": True,
         "resource_preflight_before_backend": True,
     }
     if (

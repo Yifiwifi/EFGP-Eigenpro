@@ -59,6 +59,40 @@ def _fake_problem(mtot: int = 7):
     return backend, data_ctx, cfg
 
 
+def test_strict_gpu_eig_disables_scipy_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from efgp_eigenpro_py.gpu import cupy_eigenspace_methods
+
+    def fail_gpu_eigensolver(*args, **kwargs):
+        raise RuntimeError("synthetic GPU eigensolver failure")
+
+    monkeypatch.setattr(
+        cupy_eigenspace_methods,
+        "cupy_eigsh",
+        fail_gpu_eigensolver,
+    )
+
+    backend = SimpleNamespace(xp=SimpleNamespace(__name__="cupy"))
+    preconditioner = SimpleNamespace(box_shape=(10,))
+    cfg = SimpleNamespace(
+        eig_tol=1e-3,
+        eig_maxiter=10,
+        eig_ncv=None,
+        strict_gpu_eig=True,
+    )
+
+    with pytest.raises(RuntimeError, match="CPU/SciPy fallback is disabled"):
+        box_eigenpro_module._compute_local_eigenpairs(
+            backend,
+            preconditioner,
+            reg_lambda=0.1,
+            q=2,
+            cfg=cfg,
+            counter={},
+        )
+
+
 def test_toeplitz_submatrix_matches_apply_A_v1_full_grid():
     backend, data_ctx, _ = _fake_problem()
     reg_lambda = 0.1
