@@ -1019,7 +1019,7 @@ def test_literature_baseline_profiles_are_executable_and_three_repeat(
         output_root=tmp_path / "out",
     )
     assert len(pilot) == 8
-    assert len(final) == 2
+    assert len(final) == 4
     assert {item["dataset_family"] for item in pilot} == {
         "Synthetic",
         "Winnebago",
@@ -1028,14 +1028,34 @@ def test_literature_baseline_profiles_are_executable_and_three_repeat(
     assert all(len(item["config"].methods) == 1 for item in pilot)
     assert all(item["config"].warmup_repeats == 1 for item in pilot)
     assert all(item["config"].measured_repeats == 3 for item in pilot)
+    assert {
+        item["config"].native_falkon_nystrom_centers
+        for item in pilot
+        if item["config"].methods == ("native-falkon-krr",)
+    } == {64, 128}
+    assert {
+        item["config"].rff_num_features
+        for item in pilot
+        if item["config"].methods == ("matern-rff-ridge",)
+    } == {128, 256}
+    assert all(
+        item["config"].native_falkon_maxiter == 8
+        and item["config"].native_falkon_tolerance == 1e-3
+        for item in pilot
+        if item["config"].methods == ("native-falkon-krr",)
+    )
     assert all(item["config"].n_train == 300_000_000 for item in final)
     assert all(
-        item["config"].methods == LITERATURE_END_TO_END_METHODS for item in final
+        len(item["config"].methods) == 1
+        and item["config"].methods[0] in LITERATURE_END_TO_END_METHODS
+        for item in final
     )
     assert all(item["config"].warmup_repeats == 1 for item in final)
     assert all(item["config"].measured_repeats == 3 for item in final)
-    assert all(item["config"].native_falkon_nystrom_centers == 512 for item in final)
-    assert all(item["config"].rff_num_features == 512 for item in final)
+    assert all(item["config"].native_falkon_nystrom_centers == 128 for item in final)
+    assert all(item["config"].rff_num_features == 256 for item in final)
+    assert all(item["config"].native_falkon_train_chunk_size == 250_000 for item in final)
+    assert all(item["config"].rff_train_chunk_size == 250_000 for item in final)
 
 
 def test_matern_family_parameter_sweep_candidates_and_box_assertions(

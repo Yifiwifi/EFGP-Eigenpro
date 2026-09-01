@@ -1001,7 +1001,7 @@ def build_notebook() -> dict:
             from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end import (
                 LITERATURE_END_TO_END_METHODS,
             )
-            from dataclasses import asdict
+            from dataclasses import asdict, replace
 
             STAGE1_SUITE_CONFIG = (
                 LOCAL_REPO
@@ -1127,9 +1127,11 @@ def build_notebook() -> dict:
                     not in LITERATURE_END_TO_END_METHODS
                     for item in literature_baseline_pilot_plan
                 )
-                or len(literature_baselines_300m_plan) != 2
+                or len(literature_baselines_300m_plan) != 4
                 or any(
-                    tuple(item["config"].methods) != LITERATURE_END_TO_END_METHODS
+                    len(item["config"].methods) != 1
+                    or str(item["config"].methods[0])
+                    not in LITERATURE_END_TO_END_METHODS
                     or int(item["config"].warmup_repeats) != 1
                     or int(item["config"].measured_repeats) != 3
                     for item in literature_baselines_300m_plan
@@ -1137,7 +1139,7 @@ def build_notebook() -> dict:
             ):
                 raise RuntimeError(
                     "Literature baseline profiles must be eight single-method 10M "
-                    "pilot cases and two 300M cases with both literature methods, "
+                    "pilot cases and four single-method 300M cases, "
                     "all using one warmup and three measured repeats."
                 )
 
@@ -1254,7 +1256,7 @@ def build_notebook() -> dict:
                     and "proposed_performance_claim_eligible" in completion
                 )
 
-            def run_stage1_items(items, *, profile_label):
+            def run_stage1_items(items, *, profile_label, mandatory=True):
                 completed_items = []
                 for item in items:
                     started = time.perf_counter()
@@ -1276,7 +1278,7 @@ def build_notebook() -> dict:
                             "profile": profile_label,
                             "dataset_family": declared_stage1_dataset_family(item),
                             "n_train": int(item["config"].n_train),
-                            "mandatory": True,
+                            "mandatory": bool(mandatory),
                             "status": "SKIPPED_HARDWARE",
                             "reason": "300M hardware preflight failed",
                             "artifact_complete": False,
@@ -1391,7 +1393,7 @@ def build_notebook() -> dict:
                         "profile": profile_label,
                         "dataset_family": declared_stage1_dataset_family(item),
                         "n_train": int(item["config"].n_train),
-                        "mandatory": True,
+                        "mandatory": bool(mandatory),
                         "status": status,
                         "reason": reason,
                         "artifact_complete": artifact_complete,
@@ -1408,25 +1410,223 @@ def build_notebook() -> dict:
                     print(f"[Stage 1/{item['case_id']}] {status}: {reason or ('resumed' if reused else 'executed')}")
                 return completed_items
 
+            def collect_literature_baseline_summaries(items):
+                frames = []
+                for item in items:
+                    path = Path(item["config"].output_dir) / "pipeline_summary.csv"
+                    if not path.is_file():
+                        continue
+                    frame = pd.read_csv(path)
+                    cfg = item["config"]
+                    frame["suite_profile"] = item["profile"]
+                    frame["case_id"] = item["case_id"]
+                    frame["dataset_family"] = declared_stage1_dataset_family(item)
+                    frame["configured_native_falkon_nystrom_centers"] = (
+                        int(cfg.native_falkon_nystrom_centers)
+                    )
+                    frame["configured_native_falkon_maxiter"] = int(
+                        cfg.native_falkon_maxiter
+                    )
+                    frame["configured_native_falkon_tolerance"] = float(
+                        cfg.native_falkon_tolerance
+                    )
+                    frame["configured_rff_num_features"] = int(cfg.rff_num_features)
+                    frame["configured_native_falkon_train_chunk_size"] = int(
+                        cfg.native_falkon_train_chunk_size
+                    )
+                    frame["configured_native_falkon_prediction_chunk_size"] = int(
+                        cfg.native_falkon_prediction_chunk_size
+                    )
+                    frame["configured_rff_train_chunk_size"] = int(
+                        cfg.rff_train_chunk_size
+                    )
+                    frames.append(frame)
+                return (
+                    pd.concat(frames, ignore_index=True, sort=False)
+                    if frames else pd.DataFrame()
+                )
+
+            def select_literature_pilot_candidates(frame, expected_groups):
+                columns = [
+                    "dataset_family", "method", "case_id",
+                    "train_total_seconds_median", "test_rmse_median",
+                    "successful_repeats", "configured_native_falkon_nystrom_centers",
+                    "configured_rff_num_features", "selection_rule",
+                ]
+                selection_rows = []
+                if not frame.empty:
+                    candidates = frame.copy()
+                    candidates["successful_repeats"] = pd.to_numeric(
+                        candidates.get("successful_repeats"), errors="coerce"
+                    )
+                    candidates["train_total_seconds_median"] = pd.to_numeric(
+                        candidates.get("train_total_seconds_median"), errors="coerce"
+                    )
+                    candidates["test_rmse_median"] = pd.to_numeric(
+                        candidates.get("test_rmse_median"), errors="coerce"
+                    )
+                    candidates = candidates.loc[
+                        candidates["status"].astype(str).str.lower().eq("ok")
+                        & candidates["successful_repeats"].eq(3)
+                        & candidates["train_total_seconds_median"].notna()
+                        & candidates["test_rmse_median"].notna()
+                        & np.isfinite(candidates["train_total_seconds_median"])
+                        & np.isfinite(candidates["test_rmse_median"])
+                    ].copy()
+                    for dataset_family, method in sorted(expected_groups):
+                        group = candidates.loc[
+                            candidates["dataset_family"].astype(str).eq(dataset_family)
+                            & candidates["method"].astype(str).eq(method)
+                        ].copy()
+                        if group.empty:
+                            continue
+                        best_rmse = float(group["test_rmse_median"].min())
+                        eligible = group.loc[
+                            group["test_rmse_median"].le(best_rmse * 1.05)
+                        ].sort_values(
+                            ["train_total_seconds_median", "case_id"], kind="mergesort"
+                        )
+                        selected = eligible.iloc[0].to_dict()
+                        selected["best_rmse_median"] = best_rmse
+                        selected["rmse_threshold"] = best_rmse * 1.05
+                        selected["selection_rule"] = (
+                            "status=ok and successful_repeats=3; retain RMSE <= "
+                            "group-best RMSE * 1.05; then minimize train-total median"
+                        )
+                        selection_rows.append(selected)
+                selection = pd.DataFrame(selection_rows)
+                if selection.empty:
+                    selection = pd.DataFrame(columns=columns)
+                return selection
+
+            LITERATURE_BASELINE_PILOT_SUMMARY_PATH = (
+                STAGE1_OUTPUT_ROOT / "literature_baseline_pilot_10m.csv"
+            )
+            LITERATURE_BASELINE_SELECTION_PATH = (
+                STAGE1_OUTPUT_ROOT / "literature_baseline_pilot_selection.csv"
+            )
+            LITERATURE_BASELINE_SELECTION_MANIFEST_PATH = (
+                STAGE1_OUTPUT_ROOT / "literature_baseline_pilot_selection_manifest.json"
+            )
             completed_literature_baseline_pilot_items = []
             if RUN_LITERATURE_BASELINE_PILOT:
                 completed_literature_baseline_pilot_items = run_stage1_items(
                     literature_baseline_pilot_plan,
                     profile_label=LITERATURE_BASELINE_PILOT_PROFILE,
+                    mandatory=False,
                 )
-
-            completed_literature_baselines_300m_items = []
-            if RUN_LITERATURE_BASELINES_300M:
-                completed_literature_baselines_300m_items = run_stage1_items(
-                    literature_baselines_300m_plan,
-                    profile_label=LITERATURE_BASELINES_300M_PROFILE,
+            literature_baseline_pilot_summary = collect_literature_baseline_summaries(
+                completed_literature_baseline_pilot_items
+            )
+            literature_baseline_pilot_summary.to_csv(
+                LITERATURE_BASELINE_PILOT_SUMMARY_PATH, index=False
+            )
+            literature_final_groups = {
+                (
+                    declared_stage1_dataset_family(item),
+                    str(item["config"].methods[0]),
                 )
-
-            completed_stage1_family_scale_items = []
-            if RUN_STAGE1_FAMILY_SCALE:
-                completed_stage1_family_scale_items = run_stage1_items(
-                    stage1_family_scale_plan,
-                    profile_label=STAGE1_FAMILY_SCALE_PROFILE,
+                for item in literature_baselines_300m_plan
+            }
+            literature_pilot_selection = select_literature_pilot_candidates(
+                literature_baseline_pilot_summary, literature_final_groups
+            )
+            literature_pilot_selection.to_csv(
+                LITERATURE_BASELINE_SELECTION_PATH, index=False
+            )
+            selected_groups = {
+                (str(row["dataset_family"]), str(row["method"]))
+                for row in literature_pilot_selection.to_dict("records")
+            }
+            missing_literature_pilot_groups = sorted(
+                literature_final_groups - selected_groups
+            )
+            literature_pilot_gate_ready = not missing_literature_pilot_groups
+            literature_pilot_selection_manifest = {
+                "schema_version": 1,
+                "selection_rule": (
+                    "status=ok and successful_repeats=3; retain RMSE <= group-best "
+                    "RMSE * 1.05; then minimize train-total median"
+                ),
+                "expected_groups": [list(group) for group in sorted(literature_final_groups)],
+                "selected_groups": [list(group) for group in sorted(selected_groups)],
+                "missing_groups": [list(group) for group in missing_literature_pilot_groups],
+                "pilot_summary_path": str(LITERATURE_BASELINE_PILOT_SUMMARY_PATH),
+                "selection_csv_path": str(LITERATURE_BASELINE_SELECTION_PATH),
+                "gate_ready": bool(literature_pilot_gate_ready),
+                "selection_count": int(len(literature_pilot_selection)),
+                "selected_candidates": [
+                    {
+                        "dataset_family": str(row["dataset_family"]),
+                        "method": str(row["method"]),
+                        "case_id": str(row["case_id"]),
+                        "train_total_seconds_median": float(
+                            row["train_total_seconds_median"]
+                        ),
+                        "test_rmse_median": float(row["test_rmse_median"]),
+                        "native_falkon_nystrom_centers": int(
+                            row["configured_native_falkon_nystrom_centers"]
+                        ),
+                        "rff_num_features": int(
+                            row["configured_rff_num_features"]
+                        ),
+                    }
+                    for row in literature_pilot_selection.to_dict("records")
+                ],
+            }
+            LITERATURE_BASELINE_SELECTION_MANIFEST_PATH.write_text(
+                json.dumps(literature_pilot_selection_manifest, indent=2),
+                encoding="utf-8",
+            )
+            literature_baselines_300m_selected_plan = []
+            if literature_pilot_gate_ready:
+                selected_by_group = {
+                    (str(row["dataset_family"]), str(row["method"])): row
+                    for row in literature_pilot_selection.to_dict("records")
+                }
+                pilot_config_by_case = {
+                    str(item["case_id"]): item["config"]
+                    for item in literature_baseline_pilot_plan
+                }
+                for item in literature_baselines_300m_plan:
+                    method = str(item["config"].methods[0])
+                    key = (declared_stage1_dataset_family(item), method)
+                    selected = selected_by_group[key]
+                    pilot_cfg = pilot_config_by_case[str(selected["case_id"])]
+                    updates = {
+                        "parameter_selection_policy": "pilot_gated_5pct_rmse_then_fastest_median",
+                        "parameter_source": (
+                            f"10M pilot selection: {selected['case_id']} under the "
+                            "predeclared 5% RMSE-then-fastest-median rule"
+                        ),
+                    }
+                    if method == "native-falkon-krr":
+                        updates.update({
+                            "native_falkon_nystrom_centers": int(
+                                pilot_cfg.native_falkon_nystrom_centers
+                            ),
+                            "native_falkon_maxiter": int(pilot_cfg.native_falkon_maxiter),
+                            "native_falkon_tolerance": float(pilot_cfg.native_falkon_tolerance),
+                            "native_falkon_train_chunk_size": int(
+                                pilot_cfg.native_falkon_train_chunk_size
+                            ),
+                            "native_falkon_prediction_chunk_size": int(
+                                pilot_cfg.native_falkon_prediction_chunk_size
+                            ),
+                        })
+                    else:
+                        updates.update({
+                            "rff_num_features": int(pilot_cfg.rff_num_features),
+                            "rff_train_chunk_size": int(pilot_cfg.rff_train_chunk_size),
+                        })
+                    selected_item = dict(item)
+                    selected_item["config"] = replace(item["config"], **updates)
+                    selected_item["pilot_selection"] = selected
+                    literature_baselines_300m_selected_plan.append(selected_item)
+            elif RUN_LITERATURE_BASELINES_300M:
+                print(
+                    "LITERATURE 300M FAIL-CLOSED: no qualifying 10M pilot candidate for "
+                    f"{missing_literature_pilot_groups}; 300M baseline cases will not start."
                 )
 
             completed_stage1_family_parameter_sweep_items = []
@@ -1442,14 +1642,40 @@ def build_notebook() -> dict:
                         STAGE1_FAMILY_PARAMETER_SWEEP_REPORT_ROOT,
                     )
                 )
-                print(
-                    "Wrote Matérn B/q sweep reports:",
-                    {
-                        key: str(path)
-                        for key, path in STAGE1_FAMILY_PARAMETER_SWEEP_REPORT_RESULT[
-                            "paths"
-                        ].items()
-                    },
+
+            completed_literature_baselines_300m_items = []
+            if RUN_LITERATURE_BASELINES_300M and literature_pilot_gate_ready:
+                completed_literature_baselines_300m_items = run_stage1_items(
+                    literature_baselines_300m_selected_plan,
+                    profile_label=LITERATURE_BASELINES_300M_PROFILE,
+                )
+            elif RUN_LITERATURE_BASELINES_300M:
+                for item in literature_baselines_300m_plan:
+                    stage1_campaign_rows.append({
+                        "job_id": f"stage1_{LITERATURE_BASELINES_300M_PROFILE}_{item['case_id']}",
+                        "profile": LITERATURE_BASELINES_300M_PROFILE,
+                        "dataset_family": declared_stage1_dataset_family(item),
+                        "n_train": int(item["config"].n_train),
+                        "mandatory": True,
+                        "status": "SKIPPED_PILOT_GATE",
+                        "reason": "no qualifying 10M pilot candidate",
+                        "artifact_complete": False,
+                        "scientific_eligible": False,
+                        "ineligible_methods": "",
+                        "resource_limit_methods": "",
+                        "error_methods": "",
+                        "case_count": 0,
+                        "elapsed_seconds": 0.0,
+                        "invocation_mode": "skipped",
+                        "resumed_case_count": 0,
+                        "executed_case_count": 0,
+                    })
+
+            completed_stage1_family_scale_items = []
+            if RUN_STAGE1_FAMILY_SCALE:
+                completed_stage1_family_scale_items = run_stage1_items(
+                    stage1_family_scale_plan,
+                    profile_label=STAGE1_FAMILY_SCALE_PROFILE,
                 )
 
             completed_stage1_family_kernel_items = []
@@ -1580,15 +1806,6 @@ def build_notebook() -> dict:
                         selected.append(row)
                 return pd.DataFrame(selected)
 
-            literature_baseline_pilot_summary = collect_stage1_summaries(
-                completed_literature_baseline_pilot_items
-            )
-            LITERATURE_BASELINE_PILOT_SUMMARY_PATH = (
-                STAGE1_OUTPUT_ROOT / "literature_baseline_pilot_10m.csv"
-            )
-            literature_baseline_pilot_summary.to_csv(
-                LITERATURE_BASELINE_PILOT_SUMMARY_PATH, index=False
-            )
             literature_baselines_300m_summary = collect_stage1_summaries(
                 completed_literature_baselines_300m_items
             )
@@ -5379,30 +5596,24 @@ def build_notebook() -> dict:
                 not RUN_LITERATURE_BASELINE_PILOT
                 or (
                     len(literature_baseline_pilot_plan) == 8
-                    and len(completed_literature_baseline_pilot_items)
-                    == len(literature_baseline_pilot_plan)
-                    and len(literature_baseline_pilot_summary)
-                    == len(literature_baseline_pilot_plan)
                     and len(literature_baseline_pilot_job_rows)
                     == len(literature_baseline_pilot_plan)
-                    and all(
-                        formal_campaign_job_passed(row)
-                        for row in literature_baseline_pilot_job_rows
-                    )
+                    and literature_pilot_gate_ready
+                    and int(literature_pilot_selection_manifest.get("selection_count", 0))
+                    == 4
                     and LITERATURE_BASELINE_PILOT_SUMMARY_PATH.is_file()
+                    and LITERATURE_BASELINE_SELECTION_PATH.is_file()
+                    and LITERATURE_BASELINE_SELECTION_MANIFEST_PATH.is_file()
                 )
             )
             literature_baselines_300m_complete = bool(
                 not RUN_LITERATURE_BASELINES_300M
                 or (
-                    len(literature_baselines_300m_plan) == 2
+                    len(literature_baselines_300m_plan) == 4
                     and len(completed_literature_baselines_300m_items)
                     == len(literature_baselines_300m_plan)
                     and len(literature_baselines_300m_summary)
-                    == (
-                        len(literature_baselines_300m_plan)
-                        * len(LITERATURE_END_TO_END_METHODS)
-                    )
+                    == len(literature_baselines_300m_plan)
                     and len(literature_baselines_300m_job_rows)
                     == len(literature_baselines_300m_plan)
                     and all(
@@ -5420,6 +5631,11 @@ def build_notebook() -> dict:
                     "completed_cases": len(completed_literature_baseline_pilot_items),
                     "summary_rows": len(literature_baseline_pilot_summary),
                     "summary_path": str(LITERATURE_BASELINE_PILOT_SUMMARY_PATH),
+                    "selection_csv_path": str(LITERATURE_BASELINE_SELECTION_PATH),
+                    "selection_manifest_path": str(
+                        LITERATURE_BASELINE_SELECTION_MANIFEST_PATH
+                    ),
+                    "selection_gate_ready": bool(literature_pilot_gate_ready),
                     "complete": literature_baseline_pilot_complete,
                 },
                 "final_300m": {
@@ -5430,6 +5646,8 @@ def build_notebook() -> dict:
                     "summary_rows": len(literature_baselines_300m_summary),
                     "summary_path": str(LITERATURE_BASELINES_300M_SUMMARY_PATH),
                     "methods": list(LITERATURE_END_TO_END_METHODS),
+                    "single_method_cases": True,
+                    "pilot_selection_gate_ready": bool(literature_pilot_gate_ready),
                     "complete": literature_baselines_300m_complete,
                 },
             }

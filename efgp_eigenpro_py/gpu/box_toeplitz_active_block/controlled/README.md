@@ -86,10 +86,17 @@ published two-Cholesky FALKON preconditioner, and `matern-rff-ridge`, a Matérn
 random-Fourier-feature ridge model. Both use the repository's absolute ridge
 convention. The FALKON conversion is
 `penalty = absolute_ridge / n_train`; RFF accumulates only
-`Phi.T @ Phi` and `Phi.T @ y`. `literature_baseline_pilot_10m` checks the
-M/D configurations, and `literature_baselines_300m` freezes the memory-safe
-M=512 and D=512 rows before the 300M timing. Both profiles use one warm-up and
-three measured repeats and report prediction time separately from training.
+`Phi.T @ Phi` and `Phi.T @ y`. `literature_baseline_pilot_10m` checks native
+FALKON M={64,128} (8 CG iterations, tolerance 1e-3) and Matérn-RFF D={128,256}
+with 250k-row streamed training chunks. For each dataset/method,
+`literature_baselines_300m` starts from M=128/D=256 placeholders but is
+**fail-closed**: it runs only after its matching 10M candidate completed three
+successful repeats. It first retains pilot rows within 5% of that
+dataset/method's best median RMSE, then freezes the fastest median training-time
+candidate through the recorded selection CSV/manifest. The final 300M comparison
+uses four isolated single-method cases (Synthetic/Winnebago × FALKON/RFF), so a
+failure can resume independently. Both profiles use one warm-up and three
+measured repeats and report prediction time separately from training.
 
 ```bash
 python -m efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end_suite \

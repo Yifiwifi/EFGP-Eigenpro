@@ -367,12 +367,15 @@
         "measured_repeats": 3,
         "accuracy_max_rmse": null,
         "accuracy_min_r2": null,
+        "native_falkon_train_chunk_size": 250000,
+        "native_falkon_prediction_chunk_size": 250000,
+        "rff_train_chunk_size": 250000,
         "literature_baseline_precision": "fp64",
         "parameter_selection_policy": "predeclared_literature_baseline_execution_pilot"
       },
       "cases": [
         {
-          "id": "synthetic_matern_n10m_native_falkon_m256",
+          "id": "synthetic_matern_n10m_native_falkon_m64",
           "dataset_family": "Synthetic",
           "dataset_stem": "synthetic_true_func_2d_ntrain10000000",
           "n_train": 10000000,
@@ -383,13 +386,13 @@
           "expected_dataset_target_function": "true_func_2d",
           "methods": ["native-falkon-krr"],
           "accuracy_reference_method": "native-falkon-krr",
-          "native_falkon_nystrom_centers": 256,
-          "native_falkon_maxiter": 30,
-          "native_falkon_tolerance": 1e-5,
-          "parameter_source": "predeclared 10M native-FALKON M=256 execution pilot"
+          "native_falkon_nystrom_centers": 64,
+          "native_falkon_maxiter": 8,
+          "native_falkon_tolerance": 1e-3,
+          "parameter_source": "predeclared 10M native-FALKON M=64 execution pilot"
         },
         {
-          "id": "synthetic_matern_n10m_native_falkon_m512",
+          "id": "synthetic_matern_n10m_native_falkon_m128",
           "dataset_family": "Synthetic",
           "dataset_stem": "synthetic_true_func_2d_ntrain10000000",
           "n_train": 10000000,
@@ -400,10 +403,25 @@
           "expected_dataset_target_function": "true_func_2d",
           "methods": ["native-falkon-krr"],
           "accuracy_reference_method": "native-falkon-krr",
-          "native_falkon_nystrom_centers": 512,
-          "native_falkon_maxiter": 30,
-          "native_falkon_tolerance": 1e-5,
-          "parameter_source": "predeclared 10M native-FALKON M=512 execution pilot"
+          "native_falkon_nystrom_centers": 128,
+          "native_falkon_maxiter": 8,
+          "native_falkon_tolerance": 1e-3,
+          "parameter_source": "predeclared 10M native-FALKON M=128 execution pilot"
+        },
+        {
+          "id": "synthetic_matern_n10m_rff_d128",
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_ntrain10000000",
+          "n_train": 10000000,
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d",
+          "methods": ["matern-rff-ridge"],
+          "accuracy_reference_method": "matern-rff-ridge",
+          "rff_num_features": 128,
+          "parameter_source": "predeclared 10M Matérn-RFF D=128 execution pilot"
         },
         {
           "id": "synthetic_matern_n10m_rff_d256",
@@ -421,43 +439,38 @@
           "parameter_source": "predeclared 10M Matérn-RFF D=256 execution pilot"
         },
         {
-          "id": "synthetic_matern_n10m_rff_d512",
-          "dataset_family": "Synthetic",
-          "dataset_stem": "synthetic_true_func_2d_ntrain10000000",
+          "id": "winnebago_matern_n10m_native_falkon_m64",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
           "n_train": 10000000,
-          "expected_dataset_noise_std": 0.3,
-          "expected_dataset_seed_train": 20260421,
-          "expected_dataset_seed_test": 1,
-          "expected_dataset_generation_chunk_rows": 5000000,
-          "expected_dataset_target_function": "true_func_2d",
+          "methods": ["native-falkon-krr"],
+          "accuracy_reference_method": "native-falkon-krr",
+          "native_falkon_nystrom_centers": 64,
+          "native_falkon_maxiter": 8,
+          "native_falkon_tolerance": 1e-3,
+          "parameter_source": "predeclared 10M native-FALKON M=64 execution pilot"
+        },
+        {
+          "id": "winnebago_matern_n10m_native_falkon_m128",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "n_train": 10000000,
+          "methods": ["native-falkon-krr"],
+          "accuracy_reference_method": "native-falkon-krr",
+          "native_falkon_nystrom_centers": 128,
+          "native_falkon_maxiter": 8,
+          "native_falkon_tolerance": 1e-3,
+          "parameter_source": "predeclared 10M native-FALKON M=128 execution pilot"
+        },
+        {
+          "id": "winnebago_matern_n10m_rff_d128",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "n_train": 10000000,
           "methods": ["matern-rff-ridge"],
           "accuracy_reference_method": "matern-rff-ridge",
-          "rff_num_features": 512,
-          "parameter_source": "predeclared 10M Matérn-RFF D=512 execution pilot"
-        },
-        {
-          "id": "winnebago_matern_n10m_native_falkon_m256",
-          "dataset_family": "Winnebago",
-          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
-          "n_train": 10000000,
-          "methods": ["native-falkon-krr"],
-          "accuracy_reference_method": "native-falkon-krr",
-          "native_falkon_nystrom_centers": 256,
-          "native_falkon_maxiter": 30,
-          "native_falkon_tolerance": 1e-5,
-          "parameter_source": "predeclared 10M native-FALKON M=256 execution pilot"
-        },
-        {
-          "id": "winnebago_matern_n10m_native_falkon_m512",
-          "dataset_family": "Winnebago",
-          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
-          "n_train": 10000000,
-          "methods": ["native-falkon-krr"],
-          "accuracy_reference_method": "native-falkon-krr",
-          "native_falkon_nystrom_centers": 512,
-          "native_falkon_maxiter": 30,
-          "native_falkon_tolerance": 1e-5,
-          "parameter_source": "predeclared 10M native-FALKON M=512 execution pilot"
+          "rff_num_features": 128,
+          "parameter_source": "predeclared 10M Matérn-RFF D=128 execution pilot"
         },
         {
           "id": "winnebago_matern_n10m_rff_d256",
@@ -468,40 +481,31 @@
           "accuracy_reference_method": "matern-rff-ridge",
           "rff_num_features": 256,
           "parameter_source": "predeclared 10M Matérn-RFF D=256 execution pilot"
-        },
-        {
-          "id": "winnebago_matern_n10m_rff_d512",
-          "dataset_family": "Winnebago",
-          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
-          "n_train": 10000000,
-          "methods": ["matern-rff-ridge"],
-          "accuracy_reference_method": "matern-rff-ridge",
-          "rff_num_features": 512,
-          "parameter_source": "predeclared 10M Matérn-RFF D=512 execution pilot"
         }
       ]
     },
     "literature_baselines_300m": {
-      "description": "Section 4.4 additional complete-pipeline comparison. Memory-safe M=512 native FALKON and D=512 Matérn RFF configurations are frozen before 300M timing; one warmup and three measured repeats are reported by median.",
+      "description": "Section 4.4 additional complete-pipeline comparison. Four single-method cases (Synthetic/Winnebago × native FALKON/Matérn RFF) begin from M=128/D=256 placeholders, then receive the matching successful 10M pilot configuration before 300M timing. One warmup and three measured repeats are reported by median.",
       "overrides": {
         "kernel_family": "matern",
-        "methods": ["native-falkon-krr", "matern-rff-ridge"],
         "warmup_repeats": 1,
         "measured_repeats": 3,
-        "accuracy_reference_method": "native-falkon-krr",
         "accuracy_max_rmse": null,
         "accuracy_min_r2": null,
-        "native_falkon_nystrom_centers": 512,
-        "native_falkon_maxiter": 30,
-        "native_falkon_tolerance": 1e-5,
-        "rff_num_features": 512,
+        "native_falkon_nystrom_centers": 128,
+        "native_falkon_maxiter": 8,
+        "native_falkon_tolerance": 1e-3,
+        "native_falkon_train_chunk_size": 250000,
+        "native_falkon_prediction_chunk_size": 250000,
+        "rff_num_features": 256,
+        "rff_train_chunk_size": 250000,
         "literature_baseline_precision": "fp64",
-        "parameter_selection_policy": "predeclared_memory_safe_literature_baselines_300m",
-        "parameter_source": "M=512 and D=512 frozen before 300M timing; 10M profile is an execution/quality pilot, not a post-hoc 300M selector"
+        "parameter_selection_policy": "pilot_gated_5pct_rmse_then_fastest_median",
+        "parameter_source": "M=128/D=256 placeholders; notebook replaces each dataset/method configuration only from its matching successful 10M pilot candidate"
       },
       "cases": [
         {
-          "id": "synthetic_matern_n300m_literature_baselines",
+          "id": "synthetic_matern_n300m_native_falkon",
           "dataset_family": "Synthetic",
           "dataset_stem": "synthetic_true_func_2d_ntrain300000000",
           "n_train": 300000000,
@@ -509,13 +513,38 @@
           "expected_dataset_seed_train": 20260421,
           "expected_dataset_seed_test": 1,
           "expected_dataset_generation_chunk_rows": 5000000,
-          "expected_dataset_target_function": "true_func_2d"
+          "expected_dataset_target_function": "true_func_2d",
+          "methods": ["native-falkon-krr"],
+          "accuracy_reference_method": "native-falkon-krr"
         },
         {
-          "id": "winnebago_matern_n300m_literature_baselines",
+          "id": "synthetic_matern_n300m_rff",
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_ntrain300000000",
+          "n_train": 300000000,
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d",
+          "methods": ["matern-rff-ridge"],
+          "accuracy_reference_method": "matern-rff-ridge"
+        },
+        {
+          "id": "winnebago_matern_n300m_native_falkon",
           "dataset_family": "Winnebago",
           "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain300000000",
-          "n_train": 300000000
+          "n_train": 300000000,
+          "methods": ["native-falkon-krr"],
+          "accuracy_reference_method": "native-falkon-krr"
+        },
+        {
+          "id": "winnebago_matern_n300m_rff",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain300000000",
+          "n_train": 300000000,
+          "methods": ["matern-rff-ridge"],
+          "accuracy_reference_method": "matern-rff-ridge"
         }
       ]
     },

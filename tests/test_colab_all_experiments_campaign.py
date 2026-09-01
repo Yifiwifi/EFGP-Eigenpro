@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import ast
 import json
 import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -96,11 +98,19 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
     assert "family_parameter_sweep_reporting.write_family_parameter_sweep_reports(" in source
     assert 'final_manifest["stage1_family_parameter_sweep"]' in source
     assert "len(literature_baseline_pilot_plan) != 8" in source
-    assert "len(literature_baselines_300m_plan) != 2" in source
+    assert "len(literature_baselines_300m_plan) != 4" in source
     assert "LITERATURE_END_TO_END_METHODS" in source
     assert 'STAGE1_OUTPUT_ROOT / "literature_baseline_pilot_10m.csv"' in source
     assert 'STAGE1_OUTPUT_ROOT / "literature_baselines_300m.csv"' in source
     assert 'final_manifest["literature_baselines"]' in source
+    assert "select_literature_pilot_candidates" in source
+    assert "SKIPPED_PILOT_GATE" in source
+    assert "np.isfinite(candidates[\"train_total_seconds_median\"])" in source
+    assert "np.isfinite(candidates[\"test_rmse_median\"])" in source
+    assert "profile_label=LITERATURE_BASELINE_PILOT_PROFILE," in source
+    assert "mandatory=False," in source
+    assert "and literature_pilot_gate_ready" in source
+    assert 'literature_pilot_selection_manifest.get("selection_count", 0)' in source
     assert "stage1_suite.select_target_regime(" in source
     assert "canonical_reporting.load_stage1_summaries(" in source
     assert source.index("canonical_reporting.load_stage1_summaries(") < source.index(
@@ -293,14 +303,82 @@ def test_literature_baseline_profiles_have_frozen_pilot_and_300m_protocols(
     assert all(len(item["config"].methods) == 1 for item in pilot)
     assert all(int(item["config"].warmup_repeats) == 1 for item in pilot)
     assert all(int(item["config"].measured_repeats) == 3 for item in pilot)
-    assert len(final) == 2
+    assert len(final) == 4
     assert all(int(item["config"].n_train) == 300_000_000 for item in final)
     assert all(
-        tuple(item["config"].methods) == LITERATURE_END_TO_END_METHODS
+        len(item["config"].methods) == 1
+        and item["config"].methods[0] in LITERATURE_END_TO_END_METHODS
         for item in final
     )
     assert all(int(item["config"].warmup_repeats) == 1 for item in final)
     assert all(int(item["config"].measured_repeats) == 3 for item in final)
+    assert {
+        item["config"].native_falkon_nystrom_centers
+        for item in pilot
+        if item["config"].methods == ("native-falkon-krr",)
+    } == {64, 128}
+    assert {
+        item["config"].rff_num_features
+        for item in pilot
+        if item["config"].methods == ("matern-rff-ridge",)
+    } == {128, 256}
+    assert all(item["config"].native_falkon_nystrom_centers == 128 for item in final)
+    assert all(item["config"].rff_num_features == 256 for item in final)
+
+
+def test_literature_pilot_selector_rejects_nonfinite_rows_and_fails_closed() -> None:
+    notebook = notebook_builder.build_notebook()
+    source = _cell_source_containing(
+        notebook, "def select_literature_pilot_candidates"
+    )
+    function = next(
+        node
+        for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "select_literature_pilot_candidates"
+    )
+    namespace = {"np": np, "pd": pd}
+    exec(compile(ast.fix_missing_locations(ast.Module(
+        body=[function], type_ignores=[]
+    )), "<pilot-selector>", "exec"), namespace)
+    selector = namespace["select_literature_pilot_candidates"]
+    expected_groups = {
+        ("Synthetic", "native-falkon-krr"),
+        ("Winnebago", "matern-rff-ridge"),
+    }
+    candidates = pd.DataFrame([
+        {
+            "dataset_family": "Synthetic", "method": "native-falkon-krr",
+            "case_id": "m64", "status": "ok", "successful_repeats": 3,
+            "train_total_seconds_median": 10.0, "test_rmse_median": 0.10,
+            "configured_native_falkon_nystrom_centers": 64,
+            "configured_rff_num_features": 256,
+        },
+        {
+            "dataset_family": "Synthetic", "method": "native-falkon-krr",
+            "case_id": "m128", "status": "ok", "successful_repeats": 3,
+            "train_total_seconds_median": 5.0, "test_rmse_median": 0.104,
+            "configured_native_falkon_nystrom_centers": 128,
+            "configured_rff_num_features": 256,
+        },
+        {
+            "dataset_family": "Winnebago", "method": "matern-rff-ridge",
+            "case_id": "nonfinite", "status": "ok", "successful_repeats": 3,
+            "train_total_seconds_median": np.inf, "test_rmse_median": 0.1,
+            "configured_native_falkon_nystrom_centers": 128,
+            "configured_rff_num_features": 256,
+        },
+    ])
+
+    selected = selector(candidates, expected_groups)
+    assert selected["case_id"].tolist() == ["m128"]
+    selected_groups = {
+        (str(row["dataset_family"]), str(row["method"]))
+        for row in selected.to_dict("records")
+    }
+    assert expected_groups - selected_groups == {
+        ("Winnebago", "matern-rff-ridge")
+    }
 
 
 def test_committed_notebook_matches_generator() -> None:
