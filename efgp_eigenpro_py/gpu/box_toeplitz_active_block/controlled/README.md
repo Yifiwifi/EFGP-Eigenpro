@@ -80,23 +80,46 @@ three measured repeats. The companion reporter writes `all_candidates` and
 successful repeats and minimizes median training total. RMSE is retained but
 is never used to filter or rank sweep candidates.
 
-Section 4.4 adds two independently constructed, row-streamed literature
-baselines: `native-falkon-krr`, an explicitly labelled implementation of the
-published two-Cholesky FALKON preconditioner, and `matern-rff-ridge`, a Matérn
-random-Fourier-feature ridge model. Both use the repository's absolute ridge
-convention. The FALKON conversion is
-`penalty = absolute_ridge / n_train`; RFF accumulates only
-`Phi.T @ Phi` and `Phi.T @ y`. `literature_baseline_pilot_10m` checks native
-FALKON M={64,128} (8 CG iterations, tolerance 1e-3) and Matérn-RFF D={128,256}
-with 250k-row streamed training chunks. For each dataset/method,
-`literature_baselines_300m` starts from M=128/D=256 placeholders but is
-**fail-closed**: it runs only after its matching 10M candidate completed three
-successful repeats. It first retains pilot rows within 5% of that
+Section 4.4 adds four independently constructed literature comparisons:
+`native-falkon-krr`, the published two-Cholesky FALKON preconditioner;
+`matern-rff-ridge`, a Matérn random-Fourier-feature ridge model;
+`randomized-nystrom-fourier-pcg`, a randomized Nyström preconditioner applied
+to the Fourier normal system; and `ski-kissgp-krr`, a native structured-kernel
+interpolation KRR path. The SKI path preserves the isotropic two-dimensional
+Matérn kernel through a BTTB inducing-grid matvec; it does not replace it with a
+product of one-dimensional kernels. Linear and cubic interpolation are
+implemented, while the formal execution pilot conservatively uses linear
+interpolation only. All methods use the repository's absolute-ridge convention.
+FALKON converts this to `penalty = absolute_ridge / n_train`; RFF accumulates
+only `Phi.T @ Phi` and `Phi.T @ y`.
+
+`literature_baseline_pilot_10m` retains FALKON M={64,128} (8 CG iterations,
+tolerance 1e-3) and Matérn-RFF D={128,256}, adds Fourier-system randomized
+Nyström ranks {128,256,512}, and adds SKI linear grid spacings {1/64,1/128}.
+For each dataset/method, `literature_baselines_300m` is **fail-closed**: it runs
+only after a matching 10M candidate completed three successful repeats with
+finite median time and RMSE. The gate retains pilot rows within 5% of that
 dataset/method's best median RMSE, then freezes the fastest median training-time
-candidate through the recorded selection CSV/manifest. The final 300M comparison
-uses four isolated single-method cases (Synthetic/Winnebago × FALKON/RFF), so a
-failure can resume independently. Both profiles use one warm-up and three
-measured repeats and report prediction time separately from training.
+candidate through the recorded selection CSV/manifest. The final 300M
+comparison uses eight isolated single-method cases (Synthetic/Winnebago × four
+methods), so a failure can resume independently. Both profiles use one warm-up
+and three measured repeats and report prediction time separately from training.
+
+`original-krr-nystrom-pcg` is kept outside that scalable four-method gate. It
+applies randomized column Nyström only as a PCG preconditioner while every
+operator application remains the exact blocked original data-space Matérn KRR
+matrix. `original_krr_proxy_feasibility` runs prefix subsets at N={10k,25k}
+and ranks {64,128}, with at most 10k test rows, tolerance 1e-3, 250 iterations,
+CuPy fp64, one warm-up, and three measured repeats. Its CSV and manifest are
+explicitly labelled **small-N proxy only**; their times and RMSE must never be
+mixed with a 10M/300M comparison table.
+
+`original_krr_full_scale_resource_audit` contains only the two dataset families
+at N={10M,300M}, rank 128. A 1e9 exact-matvec/prediction-pair cap causes these
+full-N configurations to record the expected `resource_limit` before backend
+initialization. This phase reports prospective pair counts and preconditioner
+memory, not timing or accuracy. It neither participates in the 10M quality gate
+nor supplies a 300M performance row.
 
 ```bash
 python -m efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end_suite \

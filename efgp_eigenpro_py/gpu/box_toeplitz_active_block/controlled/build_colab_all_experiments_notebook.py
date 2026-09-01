@@ -57,6 +57,8 @@ def build_notebook() -> dict:
             使用方式：选择 Colab 的 **A100 GPU + High-RAM** runtime，然后点击 **运行时 → 全部运行**。默认的 `RUN_ALL_FORMAL_EXPERIMENTS=True` 先运行两族 10M–300M replay 和 SE/Matérn profile，再运行含 Nyström/RPCholesky/Jacobi 的次级完整 KRR matrix，并按预注册规则冻结 Stage 2 target；随后分别生成两族 robustness 与 fixed-\(A,b\) solver comparison。族内只在 `ours-binned-active-eig` 和 `efgp-standard-full-eig` 之间按当前 median total 取最小；inverse 不与 eigenpair 合并，RMSE/R² 不作为删除成功 timing 的门槛。
 
             `nystrom-krr` 与 `rpcholesky-krr` 只出现在 Stage 1；Fourier-space randomized preconditioner adaptations 不得以 Nyström/RPCholesky KRR 的名字进入正式图。参考 notebook 的 legacy 路线默认关闭。
+
+            原始 data-space KRR 的 `original-krr-nystrom-pcg` 另走隔离证据链：先跑 N={10k,25k} 的 execution proxy，再跑 10M/300M 的 backend 前资源预检。proxy 结果不得和 full-N 表混合；full-N 只接受并记录 `resource_limit`，不进入四个 scalable literature methods 的 10M gate 或 300M 时间/RMSE 表。
             """
         )
     )
@@ -87,6 +89,8 @@ def build_notebook() -> dict:
             RUN_STAGE1_ROBUSTNESS = RUN_ALL_FORMAL_EXPERIMENTS
             RUN_STAGE1_FAMILY_SCALE = RUN_ALL_FORMAL_EXPERIMENTS
             RUN_STAGE1_FAMILY_PARAMETER_SWEEP = RUN_ALL_FORMAL_EXPERIMENTS
+            RUN_ORIGINAL_KRR_PROXY_FEASIBILITY = RUN_ALL_FORMAL_EXPERIMENTS
+            RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT = RUN_ALL_FORMAL_EXPERIMENTS
             RUN_LITERATURE_BASELINE_PILOT = RUN_ALL_FORMAL_EXPERIMENTS
             RUN_LITERATURE_BASELINES_300M = RUN_ALL_FORMAL_EXPERIMENTS
             RUN_STAGE1_FAMILY_ROBUSTNESS = RUN_ALL_FORMAL_EXPERIMENTS
@@ -95,6 +99,8 @@ def build_notebook() -> dict:
             STAGE1_SCALE_PROFILE = "scale_10m_300m"
             STAGE1_FAMILY_SCALE_PROFILE = "family_scale_10m_300m"
             STAGE1_FAMILY_PARAMETER_SWEEP_PROFILE = "matern_family_parameter_sweep_10m_300m"
+            ORIGINAL_KRR_PROXY_PROFILE = "original_krr_proxy_feasibility"
+            ORIGINAL_KRR_RESOURCE_AUDIT_PROFILE = "original_krr_full_scale_resource_audit"
             LITERATURE_BASELINE_PILOT_PROFILE = "literature_baseline_pilot_10m"
             LITERATURE_BASELINES_300M_PROFILE = "literature_baselines_300m"
             STAGE1_FAMILY_KERNEL_PROFILE = "family_kernel_at_30m"
@@ -137,7 +143,11 @@ def build_notebook() -> dict:
 
             ACTIVE_SIZES = list(FORMAL_SCALE_SIZES) if RUN_ALL_FORMAL_EXPERIMENTS else [10_000_000]
             ALLOW_100M = RUN_ALL_FORMAL_EXPERIMENTS or RUN_LITERATURE_BASELINES_300M
-            ALLOW_300M = RUN_ALL_FORMAL_EXPERIMENTS or RUN_LITERATURE_BASELINES_300M
+            ALLOW_300M = (
+                RUN_ALL_FORMAL_EXPERIMENTS
+                or RUN_LITERATURE_BASELINES_300M
+                or RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT
+            )
             PREDICTION_AUDIT_MAX_TEST_N = 2_500_000
             PREDICTION_AUDIT_PROFILES = ["fixed_ab_selected_target"]
 
@@ -150,6 +160,8 @@ def build_notebook() -> dict:
             GENERATE_FORMAL_SYNTHETIC_IF_MISSING = (
                 RUN_STAGE1_END_TO_END_KRR
                 or RUN_STAGE1_FAMILY_PARAMETER_SWEEP
+                or RUN_ORIGINAL_KRR_PROXY_FEASIBILITY
+                or RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT
                 or RUN_LITERATURE_BASELINE_PILOT
                 or RUN_LITERATURE_BASELINES_300M
             )
@@ -162,6 +174,8 @@ def build_notebook() -> dict:
             if (
                 RUN_STAGE1_END_TO_END_KRR
                 or RUN_STAGE1_FAMILY_PARAMETER_SWEEP
+                or RUN_ORIGINAL_KRR_PROXY_FEASIBILITY
+                or RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT
                 or RUN_LITERATURE_BASELINE_PILOT
                 or RUN_LITERATURE_BASELINES_300M
             ):
@@ -196,6 +210,8 @@ def build_notebook() -> dict:
             if RUN_PREDICTION_AUDIT:
                 requested_size_hints.extend([10_000_000, 100_000_000, 300_000_000])
             if RUN_LITERATURE_BASELINES_300M:
+                requested_size_hints.append(300_000_000)
+            if RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT:
                 requested_size_hints.append(300_000_000)
             MAX_REQUESTED_N = max(requested_size_hints or [0])
 
@@ -1000,6 +1016,7 @@ def build_notebook() -> dict:
             )
             from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end import (
                 LITERATURE_END_TO_END_METHODS,
+                SCALABLE_LITERATURE_END_TO_END_METHODS,
             )
             from dataclasses import asdict, replace
 
@@ -1030,6 +1047,8 @@ def build_notebook() -> dict:
             if (
                 RUN_STAGE1_END_TO_END_KRR
                 or RUN_STAGE1_FAMILY_PARAMETER_SWEEP
+                or RUN_ORIGINAL_KRR_PROXY_FEASIBILITY
+                or RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT
                 or RUN_LITERATURE_BASELINE_PILOT
                 or RUN_LITERATURE_BASELINES_300M
             ):
@@ -1077,6 +1096,18 @@ def build_notebook() -> dict:
                 dataset_dir=str(LOCAL_DATA_DIR),
                 output_root=STAGE1_OUTPUT_ROOT,
             )
+            original_krr_proxy_plan = stage1_suite.build_profile_plan(
+                stage1_config,
+                ORIGINAL_KRR_PROXY_PROFILE,
+                dataset_dir=str(LOCAL_DATA_DIR),
+                output_root=STAGE1_OUTPUT_ROOT,
+            )
+            original_krr_resource_audit_plan = stage1_suite.build_profile_plan(
+                stage1_config,
+                ORIGINAL_KRR_RESOURCE_AUDIT_PROFILE,
+                dataset_dir=str(LOCAL_DATA_DIR),
+                output_root=STAGE1_OUTPUT_ROOT,
+            )
             literature_baseline_pilot_plan = stage1_suite.build_profile_plan(
                 stage1_config,
                 LITERATURE_BASELINE_PILOT_PROFILE,
@@ -1089,6 +1120,62 @@ def build_notebook() -> dict:
                 dataset_dir=str(LOCAL_DATA_DIR),
                 output_root=STAGE1_OUTPUT_ROOT,
             )
+            literature_expected_dataset_families = ("Synthetic", "Winnebago")
+            literature_pilot_candidates_per_method = {
+                "native-falkon-krr": 2,
+                "matern-rff-ridge": 2,
+                "randomized-nystrom-fourier-pcg": 3,
+                "ski-kissgp-krr": 2,
+            }
+            if set(literature_pilot_candidates_per_method) != set(
+                SCALABLE_LITERATURE_END_TO_END_METHODS
+            ):
+                raise RuntimeError(
+                    "Scalable literature method registry differs from the pilot map."
+                )
+            if (
+                "original-krr-nystrom-pcg" not in LITERATURE_END_TO_END_METHODS
+                or "original-krr-nystrom-pcg"
+                in SCALABLE_LITERATURE_END_TO_END_METHODS
+            ):
+                raise RuntimeError(
+                    "Original data-space KRR must remain outside the scalable "
+                    "literature pilot/final registry."
+                )
+            expected_literature_pilot_case_count = (
+                len(literature_expected_dataset_families)
+                * sum(literature_pilot_candidates_per_method.values())
+            )
+            expected_literature_final_case_count = (
+                len(literature_expected_dataset_families)
+                * len(SCALABLE_LITERATURE_END_TO_END_METHODS)
+            )
+            expected_literature_selection_count = expected_literature_final_case_count
+            expected_literature_pilot_group_counts = {
+                (dataset_family, method): int(candidate_count)
+                for dataset_family in literature_expected_dataset_families
+                for method, candidate_count
+                in literature_pilot_candidates_per_method.items()
+            }
+            observed_literature_pilot_group_counts = {
+                key: sum(
+                    1
+                    for item in literature_baseline_pilot_plan
+                    if str(item.get("dataset_family")) == key[0]
+                    and tuple(item["config"].methods) == (key[1],)
+                )
+                for key in expected_literature_pilot_group_counts
+            }
+            expected_literature_final_groups = {
+                (dataset_family, method)
+                for dataset_family in literature_expected_dataset_families
+                for method in SCALABLE_LITERATURE_END_TO_END_METHODS
+            }
+            observed_literature_final_groups = {
+                (str(item.get("dataset_family")), str(item["config"].methods[0]))
+                for item in literature_baselines_300m_plan
+                if len(item["config"].methods) == 1
+            }
             stage1_family_kernel_plan = stage1_suite.build_profile_plan(
                 stage1_config,
                 STAGE1_FAMILY_KERNEL_PROFILE,
@@ -1117,29 +1204,99 @@ def build_notebook() -> dict:
                     "The Matérn family parameter sweep must contain exactly 144 "
                     "single-method cases with one warmup and three measured repeats."
                 )
+            expected_original_krr_proxy_groups = {
+                (dataset_family, n_train, rank)
+                for dataset_family in literature_expected_dataset_families
+                for n_train in (10_000, 25_000)
+                for rank in (64, 128)
+            }
+            observed_original_krr_proxy_groups = {
+                (
+                    str(item.get("dataset_family")),
+                    int(item["config"].n_train),
+                    int(item["config"].original_krr_nystrom_rank),
+                )
+                for item in original_krr_proxy_plan
+            }
+            expected_original_krr_resource_groups = {
+                (dataset_family, n_train)
+                for dataset_family in literature_expected_dataset_families
+                for n_train in (10_000_000, 300_000_000)
+            }
+            observed_original_krr_resource_groups = {
+                (str(item.get("dataset_family")), int(item["config"].n_train))
+                for item in original_krr_resource_audit_plan
+            }
             if (
-                len(literature_baseline_pilot_plan) != 8
+                len(original_krr_proxy_plan) != 8
+                or observed_original_krr_proxy_groups
+                != expected_original_krr_proxy_groups
+                or any(
+                    tuple(item["config"].methods)
+                    != ("original-krr-nystrom-pcg",)
+                    or str(item["config"].subset_mode) != "prefix"
+                    or int(item["config"].max_test_rows) != 10_000
+                    or int(item["config"].warmup_repeats) != 1
+                    or int(item["config"].measured_repeats) != 3
+                    or float(item["config"].original_krr_nystrom_tolerance)
+                    != 1e-3
+                    or int(item["config"].original_krr_nystrom_maxiter) != 250
+                    or str(item["config"].literature_baseline_precision) != "fp64"
+                    or int(item["config"].original_krr_max_exact_matvec_pairs)
+                    != 1_000_000_000
+                    or int(item["config"].original_krr_max_prediction_pairs)
+                    != 1_000_000_000
+                    for item in original_krr_proxy_plan
+                )
+                or len(original_krr_resource_audit_plan) != 4
+                or observed_original_krr_resource_groups
+                != expected_original_krr_resource_groups
+                or any(
+                    tuple(item["config"].methods)
+                    != ("original-krr-nystrom-pcg",)
+                    or int(item["config"].original_krr_nystrom_rank) != 128
+                    or int(item["config"].warmup_repeats) != 1
+                    or int(item["config"].measured_repeats) != 3
+                    or int(item["config"].original_krr_max_exact_matvec_pairs)
+                    != 1_000_000_000
+                    or int(item["config"].original_krr_max_prediction_pairs)
+                    != 1_000_000_000
+                    for item in original_krr_resource_audit_plan
+                )
+            ):
+                raise RuntimeError(
+                    "Original-KRR proxy/resource profiles differ from the frozen "
+                    "proxy-only and full-scale resource-audit protocols."
+                )
+            if (
+                len(literature_baseline_pilot_plan)
+                != expected_literature_pilot_case_count
+                or observed_literature_pilot_group_counts
+                != expected_literature_pilot_group_counts
                 or any(
                     int(item["config"].warmup_repeats) != 1
                     or int(item["config"].measured_repeats) != 3
                     or len(item["config"].methods) != 1
                     or str(item["config"].methods[0])
-                    not in LITERATURE_END_TO_END_METHODS
+                    not in SCALABLE_LITERATURE_END_TO_END_METHODS
                     for item in literature_baseline_pilot_plan
                 )
-                or len(literature_baselines_300m_plan) != 4
+                or len(literature_baselines_300m_plan)
+                != expected_literature_final_case_count
+                or observed_literature_final_groups
+                != expected_literature_final_groups
                 or any(
                     len(item["config"].methods) != 1
                     or str(item["config"].methods[0])
-                    not in LITERATURE_END_TO_END_METHODS
+                    not in SCALABLE_LITERATURE_END_TO_END_METHODS
                     or int(item["config"].warmup_repeats) != 1
                     or int(item["config"].measured_repeats) != 3
                     for item in literature_baselines_300m_plan
                 )
             ):
                 raise RuntimeError(
-                    "Literature baseline profiles must be eight single-method 10M "
-                    "pilot cases and four single-method 300M cases, "
+                    "Literature baseline profiles do not match the predeclared "
+                    "per-method 10M pilot counts and dataset×method 300M cases; "
                     "all using one warmup and three measured repeats."
                 )
 
@@ -1440,6 +1597,83 @@ def build_notebook() -> dict:
                     frame["configured_rff_train_chunk_size"] = int(
                         cfg.rff_train_chunk_size
                     )
+                    frame["configured_fourier_nystrom_rank"] = int(
+                        cfg.fourier_nystrom_rank
+                    )
+                    frame["configured_fourier_nystrom_seed"] = int(
+                        cfg.fourier_nystrom_seed
+                    )
+                    frame["configured_ski_interpolation"] = str(
+                        cfg.ski_interpolation
+                    )
+                    frame["configured_ski_grid_spacing"] = float(
+                        cfg.ski_grid_spacing
+                    )
+                    frame["configured_ski_grid_x_min"] = float(cfg.ski_grid_x_min)
+                    frame["configured_ski_grid_x_max"] = float(cfg.ski_grid_x_max)
+                    frame["configured_ski_grid_y_min"] = float(cfg.ski_grid_y_min)
+                    frame["configured_ski_grid_y_max"] = float(cfg.ski_grid_y_max)
+                    frame["configured_ski_grid_padding_points"] = int(
+                        cfg.ski_grid_padding_points
+                    )
+                    frame["configured_ski_train_chunk_size"] = int(
+                        cfg.ski_train_chunk_size
+                    )
+                    frame["configured_ski_prediction_chunk_size"] = int(
+                        cfg.ski_prediction_chunk_size
+                    )
+                    frame["configured_ski_cg_tolerance"] = float(
+                        cfg.ski_cg_tolerance
+                    )
+                    frame["configured_ski_cg_maxiter"] = int(cfg.ski_cg_maxiter)
+                    frame["configured_ski_cg_preconditioner"] = str(
+                        cfg.ski_cg_preconditioner
+                    )
+                    frame["configured_ski_circulant_spectral_floor_relative"] = float(
+                        cfg.ski_circulant_spectral_floor_relative
+                    )
+                    frame["configured_ski_require_convergence"] = bool(
+                        cfg.ski_require_convergence
+                    )
+                    frame["configured_original_krr_nystrom_rank"] = int(
+                        cfg.original_krr_nystrom_rank
+                    )
+                    frame["configured_original_krr_nystrom_seed"] = int(
+                        cfg.original_krr_nystrom_seed
+                    )
+                    frame["configured_original_krr_nystrom_tolerance"] = float(
+                        cfg.original_krr_nystrom_tolerance
+                    )
+                    frame["configured_original_krr_nystrom_maxiter"] = int(
+                        cfg.original_krr_nystrom_maxiter
+                    )
+                    frame["configured_original_krr_matvec_row_chunk_size"] = int(
+                        cfg.original_krr_matvec_row_chunk_size
+                    )
+                    frame["configured_original_krr_matvec_column_chunk_size"] = int(
+                        cfg.original_krr_matvec_column_chunk_size
+                    )
+                    frame["configured_original_krr_nystrom_row_chunk_size"] = int(
+                        cfg.original_krr_nystrom_row_chunk_size
+                    )
+                    frame["configured_original_krr_prediction_row_chunk_size"] = int(
+                        cfg.original_krr_prediction_row_chunk_size
+                    )
+                    frame[
+                        "configured_original_krr_prediction_column_chunk_size"
+                    ] = int(cfg.original_krr_prediction_column_chunk_size)
+                    frame["configured_original_krr_nystrom_rcond"] = float(
+                        cfg.original_krr_nystrom_rcond
+                    )
+                    frame["configured_original_krr_max_exact_matvec_pairs"] = (
+                        cfg.original_krr_max_exact_matvec_pairs
+                    )
+                    frame["configured_original_krr_max_prediction_pairs"] = (
+                        cfg.original_krr_max_prediction_pairs
+                    )
+                    frame["configured_original_krr_max_preconditioner_bytes"] = (
+                        cfg.original_krr_max_preconditioner_bytes
+                    )
                     frames.append(frame)
                 return (
                     pd.concat(frames, ignore_index=True, sort=False)
@@ -1451,7 +1685,17 @@ def build_notebook() -> dict:
                     "dataset_family", "method", "case_id",
                     "train_total_seconds_median", "test_rmse_median",
                     "successful_repeats", "configured_native_falkon_nystrom_centers",
-                    "configured_rff_num_features", "selection_rule",
+                    "configured_rff_num_features", "configured_fourier_nystrom_rank",
+                    "configured_fourier_nystrom_seed", "configured_ski_interpolation",
+                    "configured_ski_grid_spacing", "configured_ski_grid_x_min",
+                    "configured_ski_grid_x_max", "configured_ski_grid_y_min",
+                    "configured_ski_grid_y_max", "configured_ski_grid_padding_points",
+                    "configured_ski_train_chunk_size",
+                    "configured_ski_prediction_chunk_size",
+                    "configured_ski_cg_tolerance", "configured_ski_cg_maxiter",
+                    "configured_ski_cg_preconditioner",
+                    "configured_ski_circulant_spectral_floor_relative",
+                    "configured_ski_require_convergence", "selection_rule",
                 ]
                 selection_rows = []
                 if not frame.empty:
@@ -1508,6 +1752,125 @@ def build_notebook() -> dict:
             LITERATURE_BASELINE_SELECTION_MANIFEST_PATH = (
                 STAGE1_OUTPUT_ROOT / "literature_baseline_pilot_selection_manifest.json"
             )
+            ORIGINAL_KRR_PROXY_SUMMARY_PATH = (
+                STAGE1_OUTPUT_ROOT / "original_krr_proxy_feasibility.csv"
+            )
+            ORIGINAL_KRR_PROXY_MANIFEST_PATH = (
+                STAGE1_OUTPUT_ROOT / "original_krr_proxy_feasibility_manifest.json"
+            )
+            ORIGINAL_KRR_RESOURCE_AUDIT_SUMMARY_PATH = (
+                STAGE1_OUTPUT_ROOT / "original_krr_full_scale_resource_audit.csv"
+            )
+            ORIGINAL_KRR_RESOURCE_AUDIT_MANIFEST_PATH = (
+                STAGE1_OUTPUT_ROOT
+                / "original_krr_full_scale_resource_audit_manifest.json"
+            )
+
+            # Original data-space KRR is deliberately isolated from the scalable
+            # literature gate. Run the small-N proxy first, then the full-N
+            # preflight-only audit; neither phase can select a 300M comparison row.
+            completed_original_krr_proxy_items = []
+            if RUN_ORIGINAL_KRR_PROXY_FEASIBILITY:
+                completed_original_krr_proxy_items = run_stage1_items(
+                    original_krr_proxy_plan,
+                    profile_label=ORIGINAL_KRR_PROXY_PROFILE,
+                )
+            original_krr_proxy_summary = collect_literature_baseline_summaries(
+                completed_original_krr_proxy_items
+            )
+            original_krr_proxy_summary.to_csv(
+                ORIGINAL_KRR_PROXY_SUMMARY_PATH, index=False
+            )
+
+            completed_original_krr_resource_audit_items = []
+            if RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT:
+                completed_original_krr_resource_audit_items = run_stage1_items(
+                    original_krr_resource_audit_plan,
+                    profile_label=ORIGINAL_KRR_RESOURCE_AUDIT_PROFILE,
+                    mandatory=False,
+                )
+            original_krr_resource_audit_summary = (
+                collect_literature_baseline_summaries(
+                    completed_original_krr_resource_audit_items
+                )
+            )
+            original_krr_resource_audit_summary.to_csv(
+                ORIGINAL_KRR_RESOURCE_AUDIT_SUMMARY_PATH, index=False
+            )
+
+            def json_safe_original_krr_value(value):
+                if value is None:
+                    return None
+                try:
+                    if pd.isna(value):
+                        return None
+                except (TypeError, ValueError):
+                    pass
+                item = getattr(value, "item", None)
+                return item() if callable(item) else value
+
+            def original_krr_evidence_records(frame, fields):
+                return [
+                    {
+                        field: json_safe_original_krr_value(row.get(field))
+                        for field in fields
+                    }
+                    for row in frame.to_dict("records")
+                ]
+
+            original_krr_proxy_manifest = {
+                "schema_version": 1,
+                "profile": ORIGINAL_KRR_PROXY_PROFILE,
+                "scientific_scope": "small_n_execution_proxy_feasibility_only",
+                "comparable_to_full_n": False,
+                "allowed_comparison": (
+                    "within this proxy profile only; never mix with 10M/300M rows"
+                ),
+                "planned_cases": len(original_krr_proxy_plan),
+                "completed_cases": len(completed_original_krr_proxy_items),
+                "summary_path": str(ORIGINAL_KRR_PROXY_SUMMARY_PATH),
+                "results": original_krr_evidence_records(
+                    original_krr_proxy_summary,
+                    (
+                        "dataset_family", "method", "case_id", "n_train",
+                        "status", "successful_repeats",
+                        "configured_original_krr_nystrom_rank",
+                        "train_total_seconds_median", "test_rmse_median",
+                        "original_krr_true_relative_residual",
+                    ),
+                ),
+            }
+            ORIGINAL_KRR_PROXY_MANIFEST_PATH.write_text(
+                json.dumps(original_krr_proxy_manifest, indent=2),
+                encoding="utf-8",
+            )
+            original_krr_resource_audit_manifest = {
+                "schema_version": 1,
+                "profile": ORIGINAL_KRR_RESOURCE_AUDIT_PROFILE,
+                "scientific_scope": "full_n_resource_preflight_only",
+                "comparable_to_full_n_performance_table": False,
+                "expected_method_status": "resource_limit",
+                "resource_preflight_must_precede_backend": True,
+                "planned_cases": len(original_krr_resource_audit_plan),
+                "completed_cases": len(completed_original_krr_resource_audit_items),
+                "summary_path": str(ORIGINAL_KRR_RESOURCE_AUDIT_SUMMARY_PATH),
+                "results": original_krr_evidence_records(
+                    original_krr_resource_audit_summary,
+                    (
+                        "dataset_family", "method", "case_id", "n_train",
+                        "status", "successful_repeats", "resource_limit_reason",
+                        "original_krr_exact_matvec_pairs",
+                        "original_krr_prediction_pairs",
+                        "original_krr_preconditioner_factor_bytes",
+                        "resource_preflight_before_backend",
+                    ),
+                ),
+            }
+            ORIGINAL_KRR_RESOURCE_AUDIT_MANIFEST_PATH.write_text(
+                json.dumps(original_krr_resource_audit_manifest, indent=2),
+                encoding="utf-8",
+            )
+
             completed_literature_baseline_pilot_items = []
             if RUN_LITERATURE_BASELINE_PILOT:
                 completed_literature_baseline_pilot_items = run_stage1_items(
@@ -1570,6 +1933,54 @@ def build_notebook() -> dict:
                         "rff_num_features": int(
                             row["configured_rff_num_features"]
                         ),
+                        "fourier_nystrom_rank": int(
+                            row["configured_fourier_nystrom_rank"]
+                        ),
+                        "fourier_nystrom_seed": int(
+                            row["configured_fourier_nystrom_seed"]
+                        ),
+                        "ski_interpolation": str(
+                            row["configured_ski_interpolation"]
+                        ),
+                        "ski_grid_spacing": float(
+                            row["configured_ski_grid_spacing"]
+                        ),
+                        "ski_grid_bounds": [
+                            [
+                                float(row["configured_ski_grid_x_min"]),
+                                float(row["configured_ski_grid_x_max"]),
+                            ],
+                            [
+                                float(row["configured_ski_grid_y_min"]),
+                                float(row["configured_ski_grid_y_max"]),
+                            ],
+                        ],
+                        "ski_grid_padding_points": int(
+                            row["configured_ski_grid_padding_points"]
+                        ),
+                        "ski_train_chunk_size": int(
+                            row["configured_ski_train_chunk_size"]
+                        ),
+                        "ski_prediction_chunk_size": int(
+                            row["configured_ski_prediction_chunk_size"]
+                        ),
+                        "ski_cg_tolerance": float(
+                            row["configured_ski_cg_tolerance"]
+                        ),
+                        "ski_cg_maxiter": int(
+                            row["configured_ski_cg_maxiter"]
+                        ),
+                        "ski_cg_preconditioner": str(
+                            row["configured_ski_cg_preconditioner"]
+                        ),
+                        "ski_circulant_spectral_floor_relative": float(
+                            row[
+                                "configured_ski_circulant_spectral_floor_relative"
+                            ]
+                        ),
+                        "ski_require_convergence": bool(
+                            row["configured_ski_require_convergence"]
+                        ),
                     }
                     for row in literature_pilot_selection.to_dict("records")
                 ],
@@ -1614,11 +2025,53 @@ def build_notebook() -> dict:
                                 pilot_cfg.native_falkon_prediction_chunk_size
                             ),
                         })
-                    else:
+                    elif method == "matern-rff-ridge":
                         updates.update({
                             "rff_num_features": int(pilot_cfg.rff_num_features),
                             "rff_train_chunk_size": int(pilot_cfg.rff_train_chunk_size),
                         })
+                    elif method == "randomized-nystrom-fourier-pcg":
+                        updates.update({
+                            "fourier_nystrom_rank": int(
+                                pilot_cfg.fourier_nystrom_rank
+                            ),
+                            "fourier_nystrom_seed": int(
+                                pilot_cfg.fourier_nystrom_seed
+                            ),
+                        })
+                    elif method == "ski-kissgp-krr":
+                        updates.update({
+                            "ski_interpolation": str(pilot_cfg.ski_interpolation),
+                            "ski_grid_spacing": float(pilot_cfg.ski_grid_spacing),
+                            "ski_grid_x_min": float(pilot_cfg.ski_grid_x_min),
+                            "ski_grid_x_max": float(pilot_cfg.ski_grid_x_max),
+                            "ski_grid_y_min": float(pilot_cfg.ski_grid_y_min),
+                            "ski_grid_y_max": float(pilot_cfg.ski_grid_y_max),
+                            "ski_grid_padding_points": int(
+                                pilot_cfg.ski_grid_padding_points
+                            ),
+                            "ski_train_chunk_size": int(
+                                pilot_cfg.ski_train_chunk_size
+                            ),
+                            "ski_prediction_chunk_size": int(
+                                pilot_cfg.ski_prediction_chunk_size
+                            ),
+                            "ski_cg_tolerance": float(pilot_cfg.ski_cg_tolerance),
+                            "ski_cg_maxiter": int(pilot_cfg.ski_cg_maxiter),
+                            "ski_cg_preconditioner": str(
+                                pilot_cfg.ski_cg_preconditioner
+                            ),
+                            "ski_circulant_spectral_floor_relative": float(
+                                pilot_cfg.ski_circulant_spectral_floor_relative
+                            ),
+                            "ski_require_convergence": bool(
+                                pilot_cfg.ski_require_convergence
+                            ),
+                        })
+                    else:
+                        raise RuntimeError(
+                            f"Unsupported literature pilot method: {method}"
+                        )
                     selected_item = dict(item)
                     selected_item["config"] = replace(item["config"], **updates)
                     selected_item["pilot_selection"] = selected
@@ -5019,6 +5472,8 @@ def build_notebook() -> dict:
                     "robustness_at_selected_target",
                     STAGE1_FAMILY_SCALE_PROFILE,
                     STAGE1_FAMILY_PARAMETER_SWEEP_PROFILE,
+                    ORIGINAL_KRR_PROXY_PROFILE,
+                    ORIGINAL_KRR_RESOURCE_AUDIT_PROFILE,
                     LITERATURE_BASELINE_PILOT_PROFILE,
                     LITERATURE_BASELINES_300M_PROFILE,
                     STAGE1_FAMILY_KERNEL_PROFILE,
@@ -5584,6 +6039,103 @@ def build_notebook() -> dict:
                 "complete": stage1_family_parameter_sweep_complete,
             }
             stage1_family_profiles_complete &= stage1_family_parameter_sweep_complete
+            original_krr_proxy_job_rows = [
+                row for row in stage1_campaign_rows
+                if row.get("profile") == ORIGINAL_KRR_PROXY_PROFILE
+            ]
+            original_krr_resource_audit_job_rows = [
+                row for row in stage1_campaign_rows
+                if row.get("profile") == ORIGINAL_KRR_RESOURCE_AUDIT_PROFILE
+            ]
+            original_krr_proxy_complete = bool(
+                not RUN_ORIGINAL_KRR_PROXY_FEASIBILITY
+                or (
+                    len(original_krr_proxy_plan) == 8
+                    and len(completed_original_krr_proxy_items)
+                    == len(original_krr_proxy_plan)
+                    and len(original_krr_proxy_summary) == len(original_krr_proxy_plan)
+                    and len(original_krr_proxy_job_rows) == len(original_krr_proxy_plan)
+                    and all(
+                        formal_campaign_job_passed(row)
+                        for row in original_krr_proxy_job_rows
+                    )
+                    and original_krr_proxy_summary["status"]
+                    .astype(str).str.lower().eq("ok").all()
+                    and pd.to_numeric(
+                        original_krr_proxy_summary["successful_repeats"],
+                        errors="coerce",
+                    ).eq(3).all()
+                    and np.isfinite(pd.to_numeric(
+                        original_krr_proxy_summary["train_total_seconds_median"],
+                        errors="coerce",
+                    )).all()
+                    and np.isfinite(pd.to_numeric(
+                        original_krr_proxy_summary["test_rmse_median"],
+                        errors="coerce",
+                    )).all()
+                    and ORIGINAL_KRR_PROXY_SUMMARY_PATH.is_file()
+                    and ORIGINAL_KRR_PROXY_MANIFEST_PATH.is_file()
+                )
+            )
+            original_krr_resource_audit_complete = bool(
+                not RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT
+                or (
+                    len(original_krr_resource_audit_plan) == 4
+                    and len(completed_original_krr_resource_audit_items)
+                    == len(original_krr_resource_audit_plan)
+                    and len(original_krr_resource_audit_summary)
+                    == len(original_krr_resource_audit_plan)
+                    and len(original_krr_resource_audit_job_rows)
+                    == len(original_krr_resource_audit_plan)
+                    and all(
+                        bool(row.get("artifact_complete"))
+                        and str(row.get("status")) == "complete_with_resource_limits"
+                        and str(row.get("resource_limit_methods"))
+                        == "original-krr-nystrom-pcg"
+                        for row in original_krr_resource_audit_job_rows
+                    )
+                    and original_krr_resource_audit_summary["status"]
+                    .astype(str).str.lower().eq("resource_limit").all()
+                    and original_krr_resource_audit_summary[
+                        "resource_preflight_before_backend"
+                    ].astype(str).str.lower().eq("true").all()
+                    and ORIGINAL_KRR_RESOURCE_AUDIT_SUMMARY_PATH.is_file()
+                    and ORIGINAL_KRR_RESOURCE_AUDIT_MANIFEST_PATH.is_file()
+                )
+            )
+            final_manifest["original_krr_nystrom"] = {
+                "proxy_feasibility": {
+                    "enabled": bool(RUN_ORIGINAL_KRR_PROXY_FEASIBILITY),
+                    "profile": ORIGINAL_KRR_PROXY_PROFILE,
+                    "scientific_scope": "small_n_execution_proxy_feasibility_only",
+                    "comparable_to_full_n": False,
+                    "planned_cases": len(original_krr_proxy_plan),
+                    "completed_cases": len(completed_original_krr_proxy_items),
+                    "summary_rows": len(original_krr_proxy_summary),
+                    "summary_path": str(ORIGINAL_KRR_PROXY_SUMMARY_PATH),
+                    "manifest_path": str(ORIGINAL_KRR_PROXY_MANIFEST_PATH),
+                    "complete": original_krr_proxy_complete,
+                },
+                "full_scale_resource_audit": {
+                    "enabled": bool(
+                        RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT
+                    ),
+                    "profile": ORIGINAL_KRR_RESOURCE_AUDIT_PROFILE,
+                    "scientific_scope": "full_n_resource_preflight_only",
+                    "comparable_to_full_n_performance_table": False,
+                    "expected_method_status": "resource_limit",
+                    "planned_cases": len(original_krr_resource_audit_plan),
+                    "completed_cases": len(
+                        completed_original_krr_resource_audit_items
+                    ),
+                    "summary_rows": len(original_krr_resource_audit_summary),
+                    "summary_path": str(ORIGINAL_KRR_RESOURCE_AUDIT_SUMMARY_PATH),
+                    "manifest_path": str(
+                        ORIGINAL_KRR_RESOURCE_AUDIT_MANIFEST_PATH
+                    ),
+                    "complete": original_krr_resource_audit_complete,
+                },
+            }
             literature_baseline_pilot_job_rows = [
                 row for row in stage1_campaign_rows
                 if row.get("profile") == LITERATURE_BASELINE_PILOT_PROFILE
@@ -5595,12 +6147,21 @@ def build_notebook() -> dict:
             literature_baseline_pilot_complete = bool(
                 not RUN_LITERATURE_BASELINE_PILOT
                 or (
-                    len(literature_baseline_pilot_plan) == 8
+                    len(literature_baseline_pilot_plan)
+                    == expected_literature_pilot_case_count
+                    and len(completed_literature_baseline_pilot_items)
+                    == len(literature_baseline_pilot_plan)
+                    and len(literature_baseline_pilot_summary)
+                    == len(literature_baseline_pilot_plan)
                     and len(literature_baseline_pilot_job_rows)
                     == len(literature_baseline_pilot_plan)
+                    and all(
+                        bool(row.get("artifact_complete"))
+                        for row in literature_baseline_pilot_job_rows
+                    )
                     and literature_pilot_gate_ready
                     and int(literature_pilot_selection_manifest.get("selection_count", 0))
-                    == 4
+                    == expected_literature_selection_count
                     and LITERATURE_BASELINE_PILOT_SUMMARY_PATH.is_file()
                     and LITERATURE_BASELINE_SELECTION_PATH.is_file()
                     and LITERATURE_BASELINE_SELECTION_MANIFEST_PATH.is_file()
@@ -5609,7 +6170,8 @@ def build_notebook() -> dict:
             literature_baselines_300m_complete = bool(
                 not RUN_LITERATURE_BASELINES_300M
                 or (
-                    len(literature_baselines_300m_plan) == 4
+                    len(literature_baselines_300m_plan)
+                    == expected_literature_final_case_count
                     and len(completed_literature_baselines_300m_items)
                     == len(literature_baselines_300m_plan)
                     and len(literature_baselines_300m_summary)
@@ -5645,7 +6207,7 @@ def build_notebook() -> dict:
                     "completed_cases": len(completed_literature_baselines_300m_items),
                     "summary_rows": len(literature_baselines_300m_summary),
                     "summary_path": str(LITERATURE_BASELINES_300M_SUMMARY_PATH),
-                    "methods": list(LITERATURE_END_TO_END_METHODS),
+                    "methods": list(SCALABLE_LITERATURE_END_TO_END_METHODS),
                     "single_method_cases": True,
                     "pilot_selection_gate_ready": bool(literature_pilot_gate_ready),
                     "complete": literature_baselines_300m_complete,
@@ -5682,6 +6244,8 @@ def build_notebook() -> dict:
             final_manifest["two_stage_report_complete"] = two_stage_report_complete
             workload_requested = bool(
                 RUN_STAGE1_END_TO_END_KRR or RUN_STAGE2_FIXED_AB_SOLVERS
+                or RUN_ORIGINAL_KRR_PROXY_FEASIBILITY
+                or RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT
                 or RUN_LITERATURE_BASELINE_PILOT or RUN_LITERATURE_BASELINES_300M
                 or RUN_LEGACY_GROUPS or selected_profiles or extra_suites
                 or RUN_PREDICTION_AUDIT
@@ -5693,6 +6257,8 @@ def build_notebook() -> dict:
             run_verified = bool(
                 workload_requested and stage1_scale_complete
                 and stage1_robustness_complete and stage1_family_profiles_complete
+                and original_krr_proxy_complete
+                and original_krr_resource_audit_complete
                 and literature_baseline_pilot_complete
                 and literature_baselines_300m_complete
                 and stage2_formal_complete

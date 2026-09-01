@@ -125,6 +125,113 @@ def test_fourier_adaptations_use_explicit_names_and_roles() -> None:
     )
 
 
+def _capture_fourier_nystrom_psd_block(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cfg: ControlledConfig,
+    apply_block,
+) -> tuple[dict[str, object], dict[str, object]]:
+    system = _fake_system()
+    captured: dict[str, object] = {}
+
+    def fake_build(
+        backend,
+        apply_psd_block,
+        *,
+        size,
+        rank,
+        reg_lambda,
+        seed,
+        dtype,
+    ):
+        del backend, reg_lambda, seed
+        probe = np.ones((size, rank), dtype=dtype)
+        captured["probe"] = probe
+        captured["psd_product"] = apply_psd_block(probe)
+        return SimpleNamespace(
+            U=np.empty((size, rank), dtype=dtype),
+            coeff=np.empty(rank, dtype=np.float32),
+            diagnostics={"storage_bytes": 0},
+        )
+
+    monkeypatch.setattr(benchmark_module, "apply_A_block_v1", apply_block)
+    monkeypatch.setattr(
+        benchmark_module,
+        "build_randomized_nystrom_preconditioner",
+        fake_build,
+    )
+    spec = benchmark_module.MethodSpec(
+        label="fourier-nystrom-precond",
+        kind="fourier-nystrom-precond",
+        rank=2,
+    )
+    _apply, _preconditioner, diagnostics = benchmark_module._build_preconditioner(
+        system,
+        cfg,
+        spec,
+    )
+    return captured, diagnostics
+
+
+def test_fourier_nystrom_sketches_the_unregularized_operator_directly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.default_rng(92)
+    z = rng.standard_normal((7, 7)) + 1j * rng.standard_normal((7, 7))
+    h = z @ z.conj().T
+    seen_regularization: list[float] = []
+
+    def apply_block(_backend, _data_ctx, v, reg_lambda, _block_ctx):
+        seen_regularization.append(float(reg_lambda))
+        return h @ v + float(reg_lambda) * v
+
+    captured, diagnostics = _capture_fourier_nystrom_psd_block(
+        monkeypatch,
+        cfg=ControlledConfig(precision="fp64"),
+        apply_block=apply_block,
+    )
+
+    assert seen_regularization == [0.0]
+    np.testing.assert_array_equal(
+        captured["psd_product"],
+        h @ captured["probe"],
+    )
+    assert diagnostics["psd_operator_definition"] == "A(reg_lambda=0.0)"
+    assert diagnostics["psd_operator_regularization"] == 0.0
+
+
+def test_fourier_nystrom_direct_psd_block_avoids_mixed32_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tiny_psd_scale = np.float32(2.0**-30)
+    seen_regularization: list[float] = []
+
+    def apply_block(_backend, _data_ctx, v, reg_lambda, _block_ctx):
+        seen_regularization.append(float(reg_lambda))
+        scale = np.float32(reg_lambda) + tiny_psd_scale
+        return np.asarray(scale * v, dtype=np.complex64)
+
+    captured, _diagnostics = _capture_fourier_nystrom_psd_block(
+        monkeypatch,
+        cfg=ControlledConfig(precision="mixed32"),
+        apply_block=apply_block,
+    )
+
+    # In complex64, (0.1 + 2**-30) * V - 0.1 * V is exactly zero.  Calling
+    # the block operator with zero regularization preserves the PSD signal.
+    probe = np.asarray(captured["probe"], dtype=np.complex64)
+    old_add_then_subtract = np.asarray(
+        (np.float32(0.1) + tiny_psd_scale) * probe,
+        dtype=np.complex64,
+    ) - np.float32(0.1) * probe
+    assert not np.any(old_add_then_subtract)
+    assert seen_regularization == [0.0]
+    np.testing.assert_array_equal(
+        captured["psd_product"],
+        tiny_psd_scale * probe,
+    )
+
+
 def test_score_rule_uses_only_declared_memory_cap() -> None:
     system = _fake_system()
     cfg = ControlledConfig(

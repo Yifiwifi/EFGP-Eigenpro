@@ -68,6 +68,25 @@ FAMILY_END_TO_END_METHODS = (
 LITERATURE_END_TO_END_METHODS = (
     "native-falkon-krr",
     "matern-rff-ridge",
+    "randomized-nystrom-fourier-pcg",
+    "ski-kissgp-krr",
+    "original-krr-nystrom-pcg",
+)
+SCALABLE_LITERATURE_END_TO_END_METHODS = (
+    "native-falkon-krr",
+    "matern-rff-ridge",
+    "randomized-nystrom-fourier-pcg",
+    "ski-kissgp-krr",
+)
+
+# Literature comparisons that own an adapter outside the EFGP/Fourier
+# runner.  Randomized Nyström is deliberately absent: it preconditions the
+# repository's Fourier system and must therefore use ``_run_efgp_method``.
+LITERATURE_ADAPTER_END_TO_END_METHODS = (
+    "native-falkon-krr",
+    "matern-rff-ridge",
+    "ski-kissgp-krr",
+    "original-krr-nystrom-pcg",
 )
 ALL_END_TO_END_METHODS = tuple(
     dict.fromkeys(
@@ -235,6 +254,47 @@ class EndToEndConfig:
     rff_seed: int = 37
     rff_train_chunk_size: int = 100_000
     rff_prediction_chunk_size: int = 250_000
+    # Frangella--Tropp--Udell randomized Nyström approximation of the
+    # ridge-free PSD part of the Fourier normal operator.  These names remain
+    # distinct from ``nystrom_rank``/``nystrom_seed``, which configure the
+    # data-space restricted-KRR baseline above.
+    fourier_nystrom_rank: int = 256
+    fourier_nystrom_seed: int = 17
+    # Native structured kernel interpolation (SKI/KISS-GP posterior-mean
+    # KRR).  The implementation retains the isotropic 2-D Matérn kernel and
+    # uses BTTB FFT products; it does not substitute a separable Kronecker
+    # product kernel.
+    ski_interpolation: str = "linear"
+    ski_grid_spacing: float = 1.0 / 128.0
+    ski_grid_x_min: float = 0.0
+    ski_grid_x_max: float = 1.0
+    ski_grid_y_min: float = 0.0
+    ski_grid_y_max: float = 1.0
+    ski_grid_padding_points: int = 2
+    ski_train_chunk_size: int = 250_000
+    ski_prediction_chunk_size: int = 250_000
+    ski_cg_tolerance: float = 1e-7
+    ski_cg_maxiter: int = 5_000
+    ski_cg_preconditioner: str = "circulant_density"
+    ski_circulant_spectral_floor_relative: float = 1e-10
+    ski_require_convergence: bool = True
+    # Column-randomized Nyström PCG on the unapproximated data-space
+    # (K + lambda I) system.  Its exact O(N^2) Matérn products are executable
+    # only in the separately labelled proxy profile; the prospective pair and
+    # factor-memory caps fail closed for formal 10M/300M rows.
+    original_krr_nystrom_rank: int = 128
+    original_krr_nystrom_seed: int = 17
+    original_krr_nystrom_tolerance: float = 1e-3
+    original_krr_nystrom_maxiter: int = 250
+    original_krr_matvec_row_chunk_size: int = 2_048
+    original_krr_matvec_column_chunk_size: int = 2_048
+    original_krr_nystrom_row_chunk_size: int = 32_768
+    original_krr_prediction_row_chunk_size: int = 2_048
+    original_krr_prediction_column_chunk_size: int = 2_048
+    original_krr_nystrom_rcond: float = 1e-12
+    original_krr_max_exact_matvec_pairs: int | None = 1_000_000_000
+    original_krr_max_prediction_pairs: int | None = 1_000_000_000
+    original_krr_max_preconditioner_bytes: int | None = 4 * 1024**3
     literature_baseline_precision: str = "fp64"
     # Exact RPCholesky is never replaced by a pilot/subsampled variant.  If the
     # declared factor does not fit this cap (or current device memory), the row
@@ -323,9 +383,19 @@ def _validate_config(cfg: EndToEndConfig) -> None:
     if int(cfg.low_rank_chunk_size) <= 0:
         raise ValueError("low_rank_chunk_size must be positive.")
     if any(
-        int(rank) <= 0 for rank in (cfg.rank, cfg.nystrom_rank, cfg.rpcholesky_rank)
+        int(rank) <= 0
+        for rank in (
+            cfg.rank,
+            cfg.nystrom_rank,
+            cfg.rpcholesky_rank,
+            cfg.fourier_nystrom_rank,
+            cfg.original_krr_nystrom_rank,
+        )
     ):
-        raise ValueError("all ranks must be positive.")
+        raise ValueError(
+            "rank, nystrom_rank, rpcholesky_rank, fourier_nystrom_rank, and "
+            "original_krr_nystrom_rank must be positive."
+        )
     if cfg.full_eig_rank is not None and int(cfg.full_eig_rank) <= 0:
         raise ValueError("full_eig_rank must be positive or None.")
     for field_name in (
@@ -336,9 +406,66 @@ def _validate_config(cfg: EndToEndConfig) -> None:
         "rff_num_features",
         "rff_train_chunk_size",
         "rff_prediction_chunk_size",
+        "ski_grid_padding_points",
+        "ski_train_chunk_size",
+        "ski_prediction_chunk_size",
+        "ski_cg_maxiter",
+        "original_krr_nystrom_maxiter",
+        "original_krr_matvec_row_chunk_size",
+        "original_krr_matvec_column_chunk_size",
+        "original_krr_nystrom_row_chunk_size",
+        "original_krr_prediction_row_chunk_size",
+        "original_krr_prediction_column_chunk_size",
     ):
         if int(getattr(cfg, field_name)) <= 0:
             raise ValueError(f"{field_name} must be positive.")
+    if str(cfg.ski_interpolation).strip().lower() not in {"linear", "cubic"}:
+        raise ValueError("ski_interpolation must be 'linear' or 'cubic'.")
+    for field_name in (
+        "ski_grid_spacing",
+        "ski_cg_tolerance",
+        "ski_circulant_spectral_floor_relative",
+    ):
+        value = float(getattr(cfg, field_name))
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{field_name} must be finite and positive.")
+    for minimum_name, maximum_name in (
+        ("ski_grid_x_min", "ski_grid_x_max"),
+        ("ski_grid_y_min", "ski_grid_y_max"),
+    ):
+        minimum = float(getattr(cfg, minimum_name))
+        maximum = float(getattr(cfg, maximum_name))
+        if not math.isfinite(minimum) or not math.isfinite(maximum) or minimum >= maximum:
+            raise ValueError(
+                f"{minimum_name}/{maximum_name} must be finite and increasing."
+            )
+    if str(cfg.ski_cg_preconditioner).strip().lower() not in {
+        "none",
+        "circulant_density",
+    }:
+        raise ValueError(
+            "ski_cg_preconditioner must be 'none' or 'circulant_density'."
+        )
+    if not math.isfinite(float(cfg.original_krr_nystrom_tolerance)) or not (
+        0.0 < float(cfg.original_krr_nystrom_tolerance) < 1.0
+    ):
+        raise ValueError(
+            "original_krr_nystrom_tolerance must lie strictly between zero and one."
+        )
+    if not math.isfinite(float(cfg.original_krr_nystrom_rcond)) or not (
+        0.0 < float(cfg.original_krr_nystrom_rcond) < 1.0
+    ):
+        raise ValueError(
+            "original_krr_nystrom_rcond must lie strictly between zero and one."
+        )
+    for field_name in (
+        "original_krr_max_exact_matvec_pairs",
+        "original_krr_max_prediction_pairs",
+        "original_krr_max_preconditioner_bytes",
+    ):
+        value = getattr(cfg, field_name)
+        if value is not None and int(value) <= 0:
+            raise ValueError(f"{field_name} must be positive or None.")
     if (
         not math.isfinite(float(cfg.native_falkon_tolerance))
         or float(cfg.native_falkon_tolerance) <= 0.0
@@ -398,6 +525,29 @@ def _validate_config(cfg: EndToEndConfig) -> None:
         "mat",
     }:
         raise ValueError("matern-rff-ridge requires kernel_family='matern'.")
+    if "ski-kissgp-krr" in cfg.methods:
+        if str(cfg.kernel_family).strip().lower() not in {"matern", "mat"}:
+            raise ValueError("ski-kissgp-krr requires kernel_family='matern'.")
+        if str(cfg.ski_interpolation).strip().lower() != "linear":
+            raise ValueError(
+                "The production CuPy ski-kissgp-krr adapter supports linear "
+                "interpolation only; cubic remains a CPU reference path."
+            )
+        if str(cfg.literature_baseline_precision).strip().lower() != "fp64":
+            raise ValueError(
+                "The production ski-kissgp-krr adapter currently requires fp64."
+            )
+    if "original-krr-nystrom-pcg" in cfg.methods:
+        if str(cfg.kernel_family).strip().lower() not in {"matern", "mat"}:
+            raise ValueError(
+                "original-krr-nystrom-pcg requires kernel_family='matern'."
+            )
+        if not math.isclose(float(cfg.nu), 1.5, rel_tol=0.0, abs_tol=1e-12):
+            raise ValueError("original-krr-nystrom-pcg requires nu=1.5.")
+        if str(cfg.literature_baseline_precision).strip().lower() != "fp64":
+            raise ValueError(
+                "original-krr-nystrom-pcg currently requires fp64."
+            )
     if int(cfg.max_test_rows) <= 0:
         raise ValueError("max_test_rows must be positive.")
     if cfg.expected_dataset_noise_std is not None and (
@@ -936,6 +1086,8 @@ def _fixed_config(
         warmup_repeats=cfg.warmup_repeats,
         method_order_seed=cfg.method_order_seed,
         eig_seed=cfg.eig_seed,
+        nystrom_rank=cfg.fourier_nystrom_rank,
+        nystrom_seed=cfg.fourier_nystrom_seed,
         nufft_backend=cfg.nufft_backend,
         precompute_chunk_size=cfg.precompute_chunk_size,
         post_diagnostic_mode="none",
@@ -985,7 +1137,16 @@ def _run_efgp_method(
     is_warmup: bool,
 ) -> dict[str, Any]:
     effective_cfg = cfg
-    if method == "efgp-standard-cg":
+    if method == "randomized-nystrom-fourier-pcg":
+        controlled_cfg = _fixed_config(
+            effective_cfg, ("cg", "fourier-nystrom-precond")
+        )
+        system = fixed_ab.prepare_shared_system(controlled_cfg, dataset_payload=dataset)
+        specs, _ = fixed_ab.resolve_method_specs(system, controlled_cfg)
+        spec = next(spec for spec in specs if spec.label == "fourier-nystrom-precond")
+        setup_route = "standard_nufft"
+        setup_extra = {}
+    elif method == "efgp-standard-cg":
         controlled_cfg = _fixed_config(effective_cfg, ("cg",))
         system = fixed_ab.prepare_shared_system(controlled_cfg, dataset_payload=dataset)
         specs, _ = fixed_ab.resolve_method_specs(system, controlled_cfg)
@@ -1108,7 +1269,11 @@ def _run_efgp_method(
         **method_row,
         **_metrics(dataset["y_test"], prediction),
         "method": method,
-        "pipeline_family": "efgp",
+        "pipeline_family": (
+            "fourier_randomized_nystrom_pcg"
+            if method == "randomized-nystrom-fourier-pcg"
+            else "efgp"
+        ),
         "setup_route": setup_route,
         "setup_seconds": setup,
         "solver_build_seconds": preconditioner_build,
@@ -1124,6 +1289,26 @@ def _run_efgp_method(
         "effective_active_topk": effective_active_topk,
         "effective_active_box_size": effective_active_box_size,
         "effective_active_rank": method_row.get("rank"),
+        "effective_fourier_nystrom_rank": (
+            method_row.get("rank")
+            if method == "randomized-nystrom-fourier-pcg"
+            else None
+        ),
+        "fourier_nystrom_seed": (
+            int(cfg.fourier_nystrom_seed)
+            if method == "randomized-nystrom-fourier-pcg"
+            else None
+        ),
+        "implementation": (
+            "randomized Nystrom-PCG on the complex-Hermitian Fourier system"
+            if method == "randomized-nystrom-fourier-pcg"
+            else "repository EFGP pipeline"
+        ),
+        "literature_citations": (
+            ["frangella2023randomized"]
+            if method == "randomized-nystrom-fourier-pcg"
+            else []
+        ),
         "reporting_family": (
             "inverse"
             if method == "ours-binned-inverse"
@@ -1232,10 +1417,18 @@ def _run_literature_method(
         run_matern_rff_ridge,
         run_native_falkon_krr,
     )
+    from .structured_kernel_interpolation import (
+        StructuredKernelInterpolationConfig,
+        run_structured_kernel_interpolation,
+    )
+    from .original_krr_nystrom import (
+        OriginalKRRNystromConfig,
+        run_original_krr_nystrom_pcg,
+    )
 
-    backend = build_gpu_backend_bundle(BackendConfig(nufft=str(cfg.nufft_backend)))
-    xp = backend.xp
     if method == "native-falkon-krr":
+        backend = build_gpu_backend_bundle(BackendConfig(nufft=str(cfg.nufft_backend)))
+        xp = backend.xp
         baseline_cfg = NativeFalkonKRRConfig(
             nystrom_centers=int(cfg.native_falkon_nystrom_centers),
             maxiter=int(cfg.native_falkon_maxiter),
@@ -1273,6 +1466,8 @@ def _run_literature_method(
             "official_falkon_package": bool(result["official_falkon_package"]),
         }
     elif method == "matern-rff-ridge":
+        backend = build_gpu_backend_bundle(BackendConfig(nufft=str(cfg.nufft_backend)))
+        xp = backend.xp
         baseline_cfg = MaternRFFRidgeConfig(
             num_features=int(cfg.rff_num_features),
             seed=int(cfg.rff_seed),
@@ -1306,6 +1501,114 @@ def _run_literature_method(
             "effective_rff_num_features": int(result["num_features"]),
             "implementation": str(result["implementation"]),
         }
+    elif method == "ski-kissgp-krr":
+        baseline_cfg = StructuredKernelInterpolationConfig(
+            interpolation=str(cfg.ski_interpolation),
+            grid_spacing=float(cfg.ski_grid_spacing),
+            grid_bounds=(
+                (float(cfg.ski_grid_x_min), float(cfg.ski_grid_x_max)),
+                (float(cfg.ski_grid_y_min), float(cfg.ski_grid_y_max)),
+            ),
+            grid_padding_points=int(cfg.ski_grid_padding_points),
+            lengthscale=float(cfg.lengthscale),
+            nu=float(cfg.nu),
+            kernel_variance=float(cfg.variance),
+            absolute_ridge=float(cfg.reg_lambda),
+            train_chunk_size=int(cfg.ski_train_chunk_size),
+            prediction_chunk_size=int(cfg.ski_prediction_chunk_size),
+            cg_tolerance=float(cfg.ski_cg_tolerance),
+            cg_maxiter=int(cfg.ski_cg_maxiter),
+            cg_preconditioner=str(cfg.ski_cg_preconditioner),
+            circulant_spectral_floor_relative=float(
+                cfg.ski_circulant_spectral_floor_relative
+            ),
+            require_convergence=bool(cfg.ski_require_convergence),
+            backend="cupy",
+        )
+        result = run_structured_kernel_interpolation(
+            dataset["x"],
+            dataset["y"],
+            dataset["x_test"],
+            dataset["y_test"],
+            baseline_cfg,
+        )
+        diagnostics = dict(result["diagnostics"])
+        setup_seconds = float(result["setup_seconds"])
+        solver_build_seconds = 0.0
+        iterative_solve_seconds = float(result["solving_phase_seconds"])
+        solving_phase_seconds = iterative_solve_seconds
+        method_parameters = {
+            "effective_ski_interpolation": str(diagnostics["interpolation"]),
+            "effective_ski_grid_spacing": float(diagnostics["grid_spacing"]),
+            "effective_ski_grid_shape": list(diagnostics["grid_shape"]),
+            "effective_ski_grid_size": int(diagnostics["grid_size"]),
+            "ski_original_inducing_relative_residual": float(
+                diagnostics["original_inducing_relative_residual"]
+            ),
+            "ski_kronecker_product_used": bool(
+                diagnostics["kronecker_product_used"]
+            ),
+            "ski_stores_full_interpolation_matrix": bool(
+                diagnostics["stores_full_interpolation_matrix"]
+            ),
+            "ski_strict_kissgp_cubic": False,
+            "implementation": str(result["implementation"]),
+        }
+    elif method == "original-krr-nystrom-pcg":
+        baseline_cfg = OriginalKRRNystromConfig(
+            rank=int(cfg.original_krr_nystrom_rank),
+            seed=int(cfg.original_krr_nystrom_seed),
+            absolute_ridge=float(cfg.reg_lambda),
+            tolerance=float(cfg.original_krr_nystrom_tolerance),
+            maxiter=int(cfg.original_krr_nystrom_maxiter),
+            lengthscale=float(cfg.lengthscale),
+            kernel_variance=float(cfg.variance),
+            precision=str(cfg.literature_baseline_precision),
+            backend="cupy",
+            matvec_row_chunk_size=int(cfg.original_krr_matvec_row_chunk_size),
+            matvec_column_chunk_size=int(
+                cfg.original_krr_matvec_column_chunk_size
+            ),
+            nystrom_row_chunk_size=int(cfg.original_krr_nystrom_row_chunk_size),
+            prediction_row_chunk_size=int(
+                cfg.original_krr_prediction_row_chunk_size
+            ),
+            prediction_column_chunk_size=int(
+                cfg.original_krr_prediction_column_chunk_size
+            ),
+            nystrom_rcond=float(cfg.original_krr_nystrom_rcond),
+            max_exact_matvec_pairs=cfg.original_krr_max_exact_matvec_pairs,
+            max_prediction_pairs=cfg.original_krr_max_prediction_pairs,
+            max_preconditioner_bytes=cfg.original_krr_max_preconditioner_bytes,
+        )
+        result = run_original_krr_nystrom_pcg(
+            dataset["x"],
+            dataset["y"],
+            dataset["x_test"],
+            dataset["y_test"],
+            baseline_cfg,
+        )
+        setup_seconds = float(result["data_staging_seconds"])
+        solver_build_seconds = float(result["preconditioner_setup_seconds"])
+        iterative_solve_seconds = float(result["solve_seconds"])
+        solving_phase_seconds = solver_build_seconds + iterative_solve_seconds
+        method_parameters = {
+            "effective_original_krr_nystrom_rank": int(
+                result["effective_nystrom_rank"]
+            ),
+            "original_krr_true_relative_residual": float(
+                result["true_relative_residual"]
+            ),
+            "original_krr_exact_matvec_count": int(result["exact_matvec_count"]),
+            "original_krr_kernel_pair_evaluations": int(
+                result["kernel_pair_evaluations"]
+            ),
+            "original_krr_operator_approximation": bool(
+                result["operator_approximation"]
+            ),
+            "original_krr_solved_system": str(result["solved_system"]),
+            "implementation": str(result["implementation"]),
+        }
     else:  # pragma: no cover - validated dispatch
         raise ValueError(f"unsupported literature pipeline {method!r}")
 
@@ -1325,7 +1628,14 @@ def _run_literature_method(
         "status": str(result["status"]),
         "method": method,
         "method_kind": method,
-        "pipeline_family": str(result["pipeline_family"]),
+        "pipeline_family": str(
+            result.get(
+                "pipeline_family",
+                "structured_kernel_interpolation_krr"
+                if method == "ski-kissgp-krr"
+                else "",
+            )
+        ),
         "repeat_idx": int(repeat_idx),
         "is_warmup": bool(is_warmup),
         "selection_seconds": 0.0,
@@ -1335,13 +1645,41 @@ def _run_literature_method(
         "solving_phase_seconds": solving_phase_seconds,
         "train_total_seconds": train_total_seconds,
         "prediction_seconds": float(result["prediction_seconds"]),
-        "test_rmse": float(result["test_rmse"]),
-        "test_mae": float(result["test_mae"]),
-        "test_r2": float(result["test_r2"]),
-        "iterations": result.get("iterations"),
-        "literature_citations": list(result.get("citations", ())),
-        "literature_timing_scope": str(result.get("timing_scope", "")),
-        "literature_backend": str(result.get("backend", "")),
+        "test_rmse": float(
+            result["rmse"]
+            if method == "original-krr-nystrom-pcg"
+            else result["test_rmse"]
+        ),
+        "test_mae": float(
+            result["mae"]
+            if method == "original-krr-nystrom-pcg"
+            else result["test_mae"]
+        ),
+        "test_r2": float(
+            result["r2"]
+            if method == "original-krr-nystrom-pcg"
+            else result["test_r2"]
+        ),
+        "iterations": (
+            result["diagnostics"].get("cg_iterations")
+            if method == "ski-kissgp-krr"
+            else result.get("iterations")
+        ),
+        "literature_citations": (
+            list(result.get("citations", ()))
+            if method != "ski-kissgp-krr"
+            else ["wilson2015kissgp"]
+        ),
+        "literature_timing_scope": (
+            str(result.get("timing_scope", ""))
+            if method != "ski-kissgp-krr"
+            else str(result["diagnostics"].get("timing_scope", ""))
+        ),
+        "literature_backend": (
+            str(result.get("backend", ""))
+            if method != "ski-kissgp-krr"
+            else str(result["diagnostics"].get("backend", "cupy"))
+        ),
         **method_parameters,
     }
 
@@ -1429,6 +1767,43 @@ def _base_row(
         "configured_native_falkon_seed": int(cfg.native_falkon_seed),
         "configured_rff_num_features": int(cfg.rff_num_features),
         "configured_rff_seed": int(cfg.rff_seed),
+        "configured_fourier_nystrom_rank": int(cfg.fourier_nystrom_rank),
+        "configured_fourier_nystrom_seed": int(cfg.fourier_nystrom_seed),
+        "configured_ski_interpolation": str(cfg.ski_interpolation),
+        "configured_ski_grid_spacing": float(cfg.ski_grid_spacing),
+        "configured_ski_grid_bounds": [
+            [float(cfg.ski_grid_x_min), float(cfg.ski_grid_x_max)],
+            [float(cfg.ski_grid_y_min), float(cfg.ski_grid_y_max)],
+        ],
+        "configured_ski_grid_padding_points": int(cfg.ski_grid_padding_points),
+        "configured_ski_train_chunk_size": int(cfg.ski_train_chunk_size),
+        "configured_ski_prediction_chunk_size": int(
+            cfg.ski_prediction_chunk_size
+        ),
+        "configured_ski_cg_tolerance": float(cfg.ski_cg_tolerance),
+        "configured_ski_cg_maxiter": int(cfg.ski_cg_maxiter),
+        "configured_ski_cg_preconditioner": str(cfg.ski_cg_preconditioner),
+        "configured_original_krr_nystrom_rank": int(
+            cfg.original_krr_nystrom_rank
+        ),
+        "configured_original_krr_nystrom_seed": int(
+            cfg.original_krr_nystrom_seed
+        ),
+        "configured_original_krr_nystrom_tolerance": float(
+            cfg.original_krr_nystrom_tolerance
+        ),
+        "configured_original_krr_nystrom_maxiter": int(
+            cfg.original_krr_nystrom_maxiter
+        ),
+        "configured_original_krr_max_exact_matvec_pairs": (
+            cfg.original_krr_max_exact_matvec_pairs
+        ),
+        "configured_original_krr_max_prediction_pairs": (
+            cfg.original_krr_max_prediction_pairs
+        ),
+        "configured_original_krr_max_preconditioner_bytes": (
+            cfg.original_krr_max_preconditioner_bytes
+        ),
         "configured_literature_baseline_precision": str(
             cfg.literature_baseline_precision
         ),
@@ -1452,7 +1827,7 @@ def run_pipeline_once(
             row = _run_low_rank_method(
                 method, cfg, dataset, repeat_idx=repeat_idx, is_warmup=is_warmup
             )
-        elif method in LITERATURE_END_TO_END_METHODS:
+        elif method in LITERATURE_ADAPTER_END_TO_END_METHODS:
             row = _run_literature_method(
                 method, cfg, dataset, repeat_idx=repeat_idx, is_warmup=is_warmup
             )
@@ -1462,6 +1837,7 @@ def run_pipeline_once(
             )
         return {**base, **row}
     except MemoryError as exc:
+        resource_audit = dict(getattr(exc, "audit", {}) or {})
         return {
             **base,
             "repeat_idx": int(repeat_idx),
@@ -1474,6 +1850,20 @@ def run_pipeline_once(
             "resource_declared_cap_bytes": getattr(exc, "declared_cap_bytes", None),
             "resource_available_device_bytes": getattr(
                 exc, "available_device_bytes", None
+            ),
+            "resource_limit_reason": getattr(exc, "reason", None),
+            "resource_audit": resource_audit,
+            "original_krr_exact_matvec_pairs": resource_audit.get(
+                "exact_matvec_pairs"
+            ),
+            "original_krr_prediction_pairs": resource_audit.get(
+                "prediction_pairs"
+            ),
+            "original_krr_preconditioner_factor_bytes": resource_audit.get(
+                "preconditioner_factor_bytes"
+            ),
+            "resource_preflight_before_backend": resource_audit.get(
+                "resource_preflight_before_backend"
             ),
             "setup_seconds": math.nan,
             "solving_phase_seconds": math.nan,
@@ -1554,6 +1944,13 @@ def summarize_pipeline_rows(
             "effective_active_topk",
             "effective_active_box_size",
             "effective_active_rank",
+            "effective_fourier_nystrom_rank",
+            "fourier_nystrom_seed",
+            "effective_ski_interpolation",
+            "effective_ski_grid_spacing",
+            "effective_ski_grid_shape",
+            "effective_original_krr_nystrom_rank",
+            "original_krr_operator_approximation",
             "capacity_adapted",
         ):
             diagnostic_values = [row.get(diagnostic_field) for row in ok]
@@ -1615,12 +2012,41 @@ def summarize_pipeline_rows(
                     "configured_native_falkon_seed",
                     "configured_rff_num_features",
                     "configured_rff_seed",
+                    "configured_fourier_nystrom_rank",
+                    "configured_fourier_nystrom_seed",
+                    "configured_ski_interpolation",
+                    "configured_ski_grid_spacing",
+                    "configured_ski_grid_bounds",
+                    "configured_ski_grid_padding_points",
+                    "configured_ski_train_chunk_size",
+                    "configured_ski_prediction_chunk_size",
+                    "configured_ski_cg_tolerance",
+                    "configured_ski_cg_maxiter",
+                    "configured_ski_cg_preconditioner",
+                    "configured_original_krr_nystrom_rank",
+                    "configured_original_krr_nystrom_seed",
+                    "configured_original_krr_nystrom_tolerance",
+                    "configured_original_krr_nystrom_maxiter",
+                    "configured_original_krr_max_exact_matvec_pairs",
+                    "configured_original_krr_max_prediction_pairs",
+                    "configured_original_krr_max_preconditioner_bytes",
                     "configured_literature_baseline_precision",
                     "effective_nystrom_centers",
                     "native_falkon_penalty",
                     "native_falkon_relative_residual",
                     "native_falkon_converged",
                     "effective_rff_num_features",
+                    "effective_fourier_nystrom_rank",
+                    "fourier_nystrom_seed",
+                    "effective_ski_interpolation",
+                    "effective_ski_grid_spacing",
+                    "effective_ski_grid_shape",
+                    "effective_original_krr_nystrom_rank",
+                    "original_krr_true_relative_residual",
+                    "original_krr_exact_matvec_count",
+                    "original_krr_kernel_pair_evaluations",
+                    "original_krr_operator_approximation",
+                    "original_krr_solved_system",
                     "implementation",
                     "official_falkon_package",
                     "literature_citations",
@@ -1632,6 +2058,12 @@ def summarize_pipeline_rows(
                     "resource_effective_cap_bytes",
                     "resource_declared_cap_bytes",
                     "resource_available_device_bytes",
+                    "resource_limit_reason",
+                    "resource_audit",
+                    "original_krr_exact_matvec_pairs",
+                    "original_krr_prediction_pairs",
+                    "original_krr_preconditioner_factor_bytes",
+                    "resource_preflight_before_backend",
                 )
             },
             "method": method,

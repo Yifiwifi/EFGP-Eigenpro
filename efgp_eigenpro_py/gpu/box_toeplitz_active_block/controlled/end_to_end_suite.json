@@ -359,8 +359,181 @@
         ]
       }
     },
+    "original_krr_proxy_feasibility": {
+      "description": "Small-N execution proxy for exact original data-space Matérn KRR solved by PCG with a randomized Nyström preconditioner. Eight prefix-subset cases cover Synthetic/Winnebago, N={10k,25k}, and rank={64,128}. These rows are proxy feasibility evidence only and are never compared with full-N timings.",
+      "overrides": {
+        "kernel_family": "matern",
+        "subset_mode": "prefix",
+        "max_test_rows": 10000,
+        "methods": ["original-krr-nystrom-pcg"],
+        "accuracy_reference_method": "original-krr-nystrom-pcg",
+        "accuracy_max_rmse": null,
+        "accuracy_min_r2": null,
+        "warmup_repeats": 1,
+        "measured_repeats": 3,
+        "precision": "fp64",
+        "literature_baseline_precision": "fp64",
+        "original_krr_nystrom_seed": 17,
+        "original_krr_nystrom_tolerance": 1e-3,
+        "original_krr_nystrom_maxiter": 250,
+        "original_krr_matvec_row_chunk_size": 2048,
+        "original_krr_matvec_column_chunk_size": 2048,
+        "original_krr_nystrom_row_chunk_size": 32768,
+        "original_krr_prediction_row_chunk_size": 2048,
+        "original_krr_prediction_column_chunk_size": 2048,
+        "original_krr_nystrom_rcond": 1e-12,
+        "original_krr_max_exact_matvec_pairs": 1000000000,
+        "original_krr_max_prediction_pairs": 1000000000,
+        "original_krr_max_preconditioner_bytes": 4294967296,
+        "parameter_selection_policy": "predeclared_original_krr_proxy_feasibility",
+        "parameter_source": "proxy-only N={10k,25k}, rank={64,128}; never extrapolated or mixed with full-N comparison rows"
+      },
+      "cases": [
+        {
+          "id": "synthetic_matern_original_krr_proxy_n10k_r64",
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_ntrain10000000",
+          "n_train": 10000,
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d",
+          "original_krr_nystrom_rank": 64
+        },
+        {
+          "id": "synthetic_matern_original_krr_proxy_n10k_r128",
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_ntrain10000000",
+          "n_train": 10000,
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d",
+          "original_krr_nystrom_rank": 128
+        },
+        {
+          "id": "synthetic_matern_original_krr_proxy_n25k_r64",
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_ntrain10000000",
+          "n_train": 25000,
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d",
+          "original_krr_nystrom_rank": 64
+        },
+        {
+          "id": "synthetic_matern_original_krr_proxy_n25k_r128",
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_ntrain10000000",
+          "n_train": 25000,
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d",
+          "original_krr_nystrom_rank": 128
+        },
+        {
+          "id": "winnebago_matern_original_krr_proxy_n10k_r64",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "n_train": 10000,
+          "original_krr_nystrom_rank": 64
+        },
+        {
+          "id": "winnebago_matern_original_krr_proxy_n10k_r128",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "n_train": 10000,
+          "original_krr_nystrom_rank": 128
+        },
+        {
+          "id": "winnebago_matern_original_krr_proxy_n25k_r64",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "n_train": 25000,
+          "original_krr_nystrom_rank": 64
+        },
+        {
+          "id": "winnebago_matern_original_krr_proxy_n25k_r128",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "n_train": 25000,
+          "original_krr_nystrom_rank": 128
+        }
+      ]
+    },
+    "original_krr_full_scale_resource_audit": {
+      "description": "Full-N resource-only audit for exact original data-space KRR with a randomized Nyström PCG preconditioner. Synthetic/Winnebago at 10M and 300M must fail closed during the declared pair/memory preflight before backend initialization. These rows report prospective resource requirements only, not runtime or RMSE comparisons.",
+      "overrides": {
+        "kernel_family": "matern",
+        "methods": ["original-krr-nystrom-pcg"],
+        "accuracy_reference_method": "original-krr-nystrom-pcg",
+        "accuracy_max_rmse": null,
+        "accuracy_min_r2": null,
+        "warmup_repeats": 1,
+        "measured_repeats": 3,
+        "precision": "fp64",
+        "literature_baseline_precision": "fp64",
+        "original_krr_nystrom_rank": 128,
+        "original_krr_nystrom_seed": 17,
+        "original_krr_nystrom_tolerance": 1e-3,
+        "original_krr_nystrom_maxiter": 250,
+        "original_krr_matvec_row_chunk_size": 2048,
+        "original_krr_matvec_column_chunk_size": 2048,
+        "original_krr_nystrom_row_chunk_size": 32768,
+        "original_krr_prediction_row_chunk_size": 2048,
+        "original_krr_prediction_column_chunk_size": 2048,
+        "original_krr_nystrom_rcond": 1e-12,
+        "original_krr_max_exact_matvec_pairs": 1000000000,
+        "original_krr_max_prediction_pairs": 1000000000,
+        "original_krr_max_preconditioner_bytes": 4294967296,
+        "parameter_selection_policy": "resource_preflight_only_no_execution_selection",
+        "parameter_source": "full-N resource audit at N={10M,300M}; resource_limit is the expected outcome and no timing/RMSE claim is permitted"
+      },
+      "cases": [
+        {
+          "id": "synthetic_matern_original_krr_resource_n10m",
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_ntrain10000000",
+          "n_train": 10000000,
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d"
+        },
+        {
+          "id": "synthetic_matern_original_krr_resource_n300m",
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_ntrain300000000",
+          "n_train": 300000000,
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d"
+        },
+        {
+          "id": "winnebago_matern_original_krr_resource_n10m",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "n_train": 10000000
+        },
+        {
+          "id": "winnebago_matern_original_krr_resource_n300m",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain300000000",
+          "n_train": 300000000
+        }
+      ]
+    },
     "literature_baseline_pilot_10m": {
-      "description": "Execution and quality pilot for the two additional Section 4.4 literature baselines. Each method/rank pair runs one warmup and three measured repeats; all finite time/RMSE outcomes are retained.",
+      "description": "Execution and quality pilot for the four additional Section 4.4 literature baselines. Native FALKON and Matérn RFF retain their existing candidates; randomized Nyström-preconditioned Fourier PCG scans ranks 128/256/512, and native isotropic-Matérn SKI scans linear grid spacings 1/64 and 1/128. Every case runs one warmup and three measured repeats.",
       "overrides": {
         "kernel_family": "matern",
         "warmup_repeats": 1,
@@ -370,6 +543,20 @@
         "native_falkon_train_chunk_size": 250000,
         "native_falkon_prediction_chunk_size": 250000,
         "rff_train_chunk_size": 250000,
+        "fourier_nystrom_seed": 17,
+        "ski_interpolation": "linear",
+        "ski_grid_x_min": 0.0,
+        "ski_grid_x_max": 1.0,
+        "ski_grid_y_min": 0.0,
+        "ski_grid_y_max": 1.0,
+        "ski_grid_padding_points": 2,
+        "ski_train_chunk_size": 250000,
+        "ski_prediction_chunk_size": 250000,
+        "ski_cg_tolerance": 1e-7,
+        "ski_cg_maxiter": 5000,
+        "ski_cg_preconditioner": "circulant_density",
+        "ski_circulant_spectral_floor_relative": 1e-10,
+        "ski_require_convergence": true,
         "literature_baseline_precision": "fp64",
         "parameter_selection_policy": "predeclared_literature_baseline_execution_pilot"
       },
@@ -439,6 +626,83 @@
           "parameter_source": "predeclared 10M Matérn-RFF D=256 execution pilot"
         },
         {
+          "id": "synthetic_matern_n10m_fourier_nystrom_r128",
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_ntrain10000000",
+          "n_train": 10000000,
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d",
+          "methods": ["randomized-nystrom-fourier-pcg"],
+          "accuracy_reference_method": "randomized-nystrom-fourier-pcg",
+          "fourier_nystrom_rank": 128,
+          "parameter_source": "predeclared 10M randomized Nyström Fourier-PCG rank=128 execution pilot"
+        },
+        {
+          "id": "synthetic_matern_n10m_fourier_nystrom_r256",
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_ntrain10000000",
+          "n_train": 10000000,
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d",
+          "methods": ["randomized-nystrom-fourier-pcg"],
+          "accuracy_reference_method": "randomized-nystrom-fourier-pcg",
+          "fourier_nystrom_rank": 256,
+          "parameter_source": "predeclared 10M randomized Nyström Fourier-PCG rank=256 execution pilot"
+        },
+        {
+          "id": "synthetic_matern_n10m_fourier_nystrom_r512",
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_ntrain10000000",
+          "n_train": 10000000,
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d",
+          "methods": ["randomized-nystrom-fourier-pcg"],
+          "accuracy_reference_method": "randomized-nystrom-fourier-pcg",
+          "fourier_nystrom_rank": 512,
+          "parameter_source": "predeclared 10M randomized Nyström Fourier-PCG rank=512 execution pilot"
+        },
+        {
+          "id": "synthetic_matern_n10m_ski_linear_h1over64",
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_ntrain10000000",
+          "n_train": 10000000,
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d",
+          "methods": ["ski-kissgp-krr"],
+          "accuracy_reference_method": "ski-kissgp-krr",
+          "ski_interpolation": "linear",
+          "ski_grid_spacing": 0.015625,
+          "parameter_source": "predeclared 10M isotropic-Matérn SKI linear grid-spacing=1/64 execution pilot"
+        },
+        {
+          "id": "synthetic_matern_n10m_ski_linear_h1over128",
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_ntrain10000000",
+          "n_train": 10000000,
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d",
+          "methods": ["ski-kissgp-krr"],
+          "accuracy_reference_method": "ski-kissgp-krr",
+          "ski_interpolation": "linear",
+          "ski_grid_spacing": 0.0078125,
+          "parameter_source": "predeclared 10M isotropic-Matérn SKI linear grid-spacing=1/128 execution pilot"
+        },
+        {
           "id": "winnebago_matern_n10m_native_falkon_m64",
           "dataset_family": "Winnebago",
           "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
@@ -481,11 +745,63 @@
           "accuracy_reference_method": "matern-rff-ridge",
           "rff_num_features": 256,
           "parameter_source": "predeclared 10M Matérn-RFF D=256 execution pilot"
+        },
+        {
+          "id": "winnebago_matern_n10m_fourier_nystrom_r128",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "n_train": 10000000,
+          "methods": ["randomized-nystrom-fourier-pcg"],
+          "accuracy_reference_method": "randomized-nystrom-fourier-pcg",
+          "fourier_nystrom_rank": 128,
+          "parameter_source": "predeclared 10M randomized Nyström Fourier-PCG rank=128 execution pilot"
+        },
+        {
+          "id": "winnebago_matern_n10m_fourier_nystrom_r256",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "n_train": 10000000,
+          "methods": ["randomized-nystrom-fourier-pcg"],
+          "accuracy_reference_method": "randomized-nystrom-fourier-pcg",
+          "fourier_nystrom_rank": 256,
+          "parameter_source": "predeclared 10M randomized Nyström Fourier-PCG rank=256 execution pilot"
+        },
+        {
+          "id": "winnebago_matern_n10m_fourier_nystrom_r512",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "n_train": 10000000,
+          "methods": ["randomized-nystrom-fourier-pcg"],
+          "accuracy_reference_method": "randomized-nystrom-fourier-pcg",
+          "fourier_nystrom_rank": 512,
+          "parameter_source": "predeclared 10M randomized Nyström Fourier-PCG rank=512 execution pilot"
+        },
+        {
+          "id": "winnebago_matern_n10m_ski_linear_h1over64",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "n_train": 10000000,
+          "methods": ["ski-kissgp-krr"],
+          "accuracy_reference_method": "ski-kissgp-krr",
+          "ski_interpolation": "linear",
+          "ski_grid_spacing": 0.015625,
+          "parameter_source": "predeclared 10M isotropic-Matérn SKI linear grid-spacing=1/64 execution pilot"
+        },
+        {
+          "id": "winnebago_matern_n10m_ski_linear_h1over128",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "n_train": 10000000,
+          "methods": ["ski-kissgp-krr"],
+          "accuracy_reference_method": "ski-kissgp-krr",
+          "ski_interpolation": "linear",
+          "ski_grid_spacing": 0.0078125,
+          "parameter_source": "predeclared 10M isotropic-Matérn SKI linear grid-spacing=1/128 execution pilot"
         }
       ]
     },
     "literature_baselines_300m": {
-      "description": "Section 4.4 additional complete-pipeline comparison. Four single-method cases (Synthetic/Winnebago × native FALKON/Matérn RFF) begin from M=128/D=256 placeholders, then receive the matching successful 10M pilot configuration before 300M timing. One warmup and three measured repeats are reported by median.",
+      "description": "Section 4.4 additional complete-pipeline comparison. Eight single-method cases (Synthetic/Winnebago × native FALKON, Matérn RFF, randomized Nyström-preconditioned Fourier PCG, and native isotropic-Matérn SKI) begin from declared placeholders, then receive the matching successful 10M pilot configuration before 300M timing. One warmup and three measured repeats are reported by median.",
       "overrides": {
         "kernel_family": "matern",
         "warmup_repeats": 1,
@@ -499,9 +815,25 @@
         "native_falkon_prediction_chunk_size": 250000,
         "rff_num_features": 256,
         "rff_train_chunk_size": 250000,
+        "fourier_nystrom_rank": 256,
+        "fourier_nystrom_seed": 17,
+        "ski_interpolation": "linear",
+        "ski_grid_spacing": 0.0078125,
+        "ski_grid_x_min": 0.0,
+        "ski_grid_x_max": 1.0,
+        "ski_grid_y_min": 0.0,
+        "ski_grid_y_max": 1.0,
+        "ski_grid_padding_points": 2,
+        "ski_train_chunk_size": 250000,
+        "ski_prediction_chunk_size": 250000,
+        "ski_cg_tolerance": 1e-7,
+        "ski_cg_maxiter": 5000,
+        "ski_cg_preconditioner": "circulant_density",
+        "ski_circulant_spectral_floor_relative": 1e-10,
+        "ski_require_convergence": true,
         "literature_baseline_precision": "fp64",
         "parameter_selection_policy": "pilot_gated_5pct_rmse_then_fastest_median",
-        "parameter_source": "M=128/D=256 placeholders; notebook replaces each dataset/method configuration only from its matching successful 10M pilot candidate"
+        "parameter_source": "Declared placeholders; notebook replaces each dataset/method configuration only from its matching successful 10M pilot candidate"
       },
       "cases": [
         {
@@ -531,6 +863,32 @@
           "accuracy_reference_method": "matern-rff-ridge"
         },
         {
+          "id": "synthetic_matern_n300m_fourier_nystrom",
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_ntrain300000000",
+          "n_train": 300000000,
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d",
+          "methods": ["randomized-nystrom-fourier-pcg"],
+          "accuracy_reference_method": "randomized-nystrom-fourier-pcg"
+        },
+        {
+          "id": "synthetic_matern_n300m_ski",
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_ntrain300000000",
+          "n_train": 300000000,
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d",
+          "methods": ["ski-kissgp-krr"],
+          "accuracy_reference_method": "ski-kissgp-krr"
+        },
+        {
           "id": "winnebago_matern_n300m_native_falkon",
           "dataset_family": "Winnebago",
           "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain300000000",
@@ -545,6 +903,22 @@
           "n_train": 300000000,
           "methods": ["matern-rff-ridge"],
           "accuracy_reference_method": "matern-rff-ridge"
+        },
+        {
+          "id": "winnebago_matern_n300m_fourier_nystrom",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain300000000",
+          "n_train": 300000000,
+          "methods": ["randomized-nystrom-fourier-pcg"],
+          "accuracy_reference_method": "randomized-nystrom-fourier-pcg"
+        },
+        {
+          "id": "winnebago_matern_n300m_ski",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain300000000",
+          "n_train": 300000000,
+          "methods": ["ski-kissgp-krr"],
+          "accuracy_reference_method": "ski-kissgp-krr"
         }
       ]
     },

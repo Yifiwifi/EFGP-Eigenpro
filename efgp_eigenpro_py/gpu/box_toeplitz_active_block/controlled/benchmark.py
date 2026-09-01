@@ -1851,14 +1851,17 @@ def _build_preconditioner(
         block_ctx = _fresh_operator_context(system, cfg)
 
         def apply_psd_block(V: Any) -> Any:
-            AV = apply_A_block_v1(
+            # Sketch the unregularized PSD part directly.  Computing
+            # A(lambda) @ V - lambda * V is algebraically equivalent, but it
+            # allocates another tall block and can erase small H @ V
+            # components through cancellation in mixed precision.
+            return apply_A_block_v1(
                 backend,
                 system.data_ctx,
                 V,
-                float(system.reg_lambda),
+                0.0,
                 block_ctx,
             )
-            return AV - float(system.reg_lambda) * xp.asarray(V, dtype=AV.dtype)
 
         pre = build_randomized_nystrom_preconditioner(
             backend,
@@ -1879,6 +1882,8 @@ def _build_preconditioner(
                 "preconditioner_dtype": str(pre.U.dtype),
                 "preconditioner_coeff_dtype": str(pre.coeff.dtype),
                 "preconditioner_storage_bytes": int(pre.diagnostics["storage_bytes"]),
+                "psd_operator_definition": "A(reg_lambda=0.0)",
+                "psd_operator_regularization": 0.0,
             }
         )
         return apply, pre, diag

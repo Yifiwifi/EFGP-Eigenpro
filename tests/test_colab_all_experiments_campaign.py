@@ -16,7 +16,7 @@ from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled import (
     end_to_end_suite as stage1_suite,
 )
 from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end import (
-    LITERATURE_END_TO_END_METHODS,
+    SCALABLE_LITERATURE_END_TO_END_METHODS,
 )
 from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.suite import (
     load_suite_config,
@@ -80,6 +80,11 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
     assert "RUN_ALL_FORMAL_EXPERIMENTS = True" in source
     assert "RUN_STAGE1_END_TO_END_KRR = RUN_ALL_FORMAL_EXPERIMENTS" in source
     assert "RUN_STAGE1_FAMILY_PARAMETER_SWEEP = RUN_ALL_FORMAL_EXPERIMENTS" in source
+    assert "RUN_ORIGINAL_KRR_PROXY_FEASIBILITY = RUN_ALL_FORMAL_EXPERIMENTS" in source
+    assert (
+        "RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT = RUN_ALL_FORMAL_EXPERIMENTS"
+        in source
+    )
     assert "RUN_LITERATURE_BASELINE_PILOT = RUN_ALL_FORMAL_EXPERIMENTS" in source
     assert "RUN_LITERATURE_BASELINES_300M = RUN_ALL_FORMAL_EXPERIMENTS" in source
     assert "RUN_STAGE2_FIXED_AB_SOLVERS = RUN_ALL_FORMAL_EXPERIMENTS" in source
@@ -90,6 +95,11 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
     ) in source
     assert 'LITERATURE_BASELINE_PILOT_PROFILE = "literature_baseline_pilot_10m"' in source
     assert 'LITERATURE_BASELINES_300M_PROFILE = "literature_baselines_300m"' in source
+    assert 'ORIGINAL_KRR_PROXY_PROFILE = "original_krr_proxy_feasibility"' in source
+    assert (
+        'ORIGINAL_KRR_RESOURCE_AUDIT_PROFILE = '
+        '"original_krr_full_scale_resource_audit"'
+    ) in source
     assert '"nystrom-krr", "rpcholesky-krr", "efgp-standard-cg"' in source
     assert '"efgp-standard-jacobi", "efgp-standard-full-eig"' in source
     assert '"ours-binned-default"' in source
@@ -97,9 +107,30 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
     assert "len(stage1_family_parameter_sweep_plan) != 144" in source
     assert "family_parameter_sweep_reporting.write_family_parameter_sweep_reports(" in source
     assert 'final_manifest["stage1_family_parameter_sweep"]' in source
-    assert "len(literature_baseline_pilot_plan) != 8" in source
-    assert "len(literature_baselines_300m_plan) != 4" in source
-    assert "LITERATURE_END_TO_END_METHODS" in source
+    assert '"randomized-nystrom-fourier-pcg": 3' in source
+    assert '"ski-kissgp-krr": 2' in source
+    assert "expected_literature_pilot_case_count" in source
+    assert "expected_literature_final_case_count" in source
+    assert "expected_literature_selection_count" in source
+    assert "observed_literature_pilot_group_counts" in source
+    assert "observed_literature_final_groups" in source
+    assert "SCALABLE_LITERATURE_END_TO_END_METHODS" in source
+    assert 'final_manifest["original_krr_nystrom"]' in source
+    assert 'STAGE1_OUTPUT_ROOT / "original_krr_proxy_feasibility.csv"' in source
+    assert (
+        'STAGE1_OUTPUT_ROOT / "original_krr_full_scale_resource_audit.csv"'
+        in source
+    )
+    assert '"comparable_to_full_n": False' in source
+    assert '"expected_method_status": "resource_limit"' in source
+    assert "ORIGINAL_KRR_PROXY_PROFILE," in source
+    assert "ORIGINAL_KRR_RESOURCE_AUDIT_PROFILE," in source
+    assert source.index("completed_original_krr_proxy_items = []") < source.index(
+        "completed_original_krr_resource_audit_items = []"
+    )
+    assert source.index("completed_original_krr_resource_audit_items = []") < source.index(
+        "completed_literature_baseline_pilot_items = []"
+    )
     assert 'STAGE1_OUTPUT_ROOT / "literature_baseline_pilot_10m.csv"' in source
     assert 'STAGE1_OUTPUT_ROOT / "literature_baselines_300m.csv"' in source
     assert 'final_manifest["literature_baselines"]' in source
@@ -109,8 +140,13 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
     assert "np.isfinite(candidates[\"test_rmse_median\"])" in source
     assert "profile_label=LITERATURE_BASELINE_PILOT_PROFILE," in source
     assert "mandatory=False," in source
+    assert "len(completed_literature_baseline_pilot_items)" in source
+    assert "len(literature_baseline_pilot_summary)" in source
+    assert 'bool(row.get("artifact_complete"))' in source
     assert "and literature_pilot_gate_ready" in source
     assert 'literature_pilot_selection_manifest.get("selection_count", 0)' in source
+    assert '"fourier_nystrom_rank": int(' in source
+    assert '"ski_grid_spacing": float(' in source
     assert "stage1_suite.select_target_regime(" in source
     assert "canonical_reporting.load_stage1_summaries(" in source
     assert source.index("canonical_reporting.load_stage1_summaries(") < source.index(
@@ -129,6 +165,8 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
     assert "GENERATE_ARCHIVED_SYNTHETIC_SIZES = []" in configuration_source
     assert "GENERATE_FORMAL_SYNTHETIC_IF_MISSING = (" in configuration_source
     assert "RUN_STAGE1_FAMILY_PARAMETER_SWEEP" in configuration_source
+    assert "RUN_ORIGINAL_KRR_PROXY_FEASIBILITY" in configuration_source
+    assert "RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT" in configuration_source
     assert "RUN_LITERATURE_BASELINE_PILOT" in configuration_source
     assert "RUN_LITERATURE_BASELINES_300M" in configuration_source
     assert "if RUN_LITERATURE_BASELINES_300M:" in configuration_source
@@ -298,16 +336,16 @@ def test_literature_baseline_profiles_have_frozen_pilot_and_300m_protocols(
         output_root=tmp_path / "outputs",
     )
 
-    assert len(pilot) == 8
+    assert len(pilot) == 18
     assert all(int(item["config"].n_train) == 10_000_000 for item in pilot)
     assert all(len(item["config"].methods) == 1 for item in pilot)
     assert all(int(item["config"].warmup_repeats) == 1 for item in pilot)
     assert all(int(item["config"].measured_repeats) == 3 for item in pilot)
-    assert len(final) == 4
+    assert len(final) == 8
     assert all(int(item["config"].n_train) == 300_000_000 for item in final)
     assert all(
         len(item["config"].methods) == 1
-        and item["config"].methods[0] in LITERATURE_END_TO_END_METHODS
+        and item["config"].methods[0] in SCALABLE_LITERATURE_END_TO_END_METHODS
         for item in final
     )
     assert all(int(item["config"].warmup_repeats) == 1 for item in final)
@@ -322,8 +360,102 @@ def test_literature_baseline_profiles_have_frozen_pilot_and_300m_protocols(
         for item in pilot
         if item["config"].methods == ("matern-rff-ridge",)
     } == {128, 256}
+    assert {
+        item["config"].fourier_nystrom_rank
+        for item in pilot
+        if item["config"].methods == ("randomized-nystrom-fourier-pcg",)
+    } == {128, 256, 512}
+    assert {
+        item["config"].ski_interpolation
+        for item in pilot
+        if item["config"].methods == ("ski-kissgp-krr",)
+    } == {"linear"}
+    assert {
+        item["config"].ski_grid_spacing
+        for item in pilot
+        if item["config"].methods == ("ski-kissgp-krr",)
+    } == {1.0 / 64.0, 1.0 / 128.0}
     assert all(item["config"].native_falkon_nystrom_centers == 128 for item in final)
     assert all(item["config"].rff_num_features == 256 for item in final)
+    assert all(item["config"].fourier_nystrom_rank == 256 for item in final)
+    assert all(item["config"].fourier_nystrom_seed == 17 for item in final)
+    assert all(item["config"].ski_interpolation == "linear" for item in final)
+    assert all(item["config"].ski_grid_spacing == 1.0 / 128.0 for item in final)
+    assert {
+        (item["dataset_family"], item["config"].methods[0])
+        for item in final
+    } == {
+        (dataset_family, method)
+        for dataset_family in ("Synthetic", "Winnebago")
+        for method in SCALABLE_LITERATURE_END_TO_END_METHODS
+    }
+
+
+def test_original_krr_proxy_and_resource_audit_profiles_are_isolated(
+    tmp_path: Path,
+) -> None:
+    suite = json.loads(STAGE1_SUITE_PATH.read_text(encoding="utf-8"))
+    proxy = stage1_suite.build_profile_plan(
+        suite,
+        "original_krr_proxy_feasibility",
+        dataset_dir=str(tmp_path / "data"),
+        output_root=tmp_path / "outputs",
+    )
+    resource = stage1_suite.build_profile_plan(
+        suite,
+        "original_krr_full_scale_resource_audit",
+        dataset_dir=str(tmp_path / "data"),
+        output_root=tmp_path / "outputs",
+    )
+
+    assert len(proxy) == 8
+    assert {
+        (
+            item["dataset_family"],
+            int(item["config"].n_train),
+            int(item["config"].original_krr_nystrom_rank),
+        )
+        for item in proxy
+    } == {
+        (dataset_family, n_train, rank)
+        for dataset_family in ("Synthetic", "Winnebago")
+        for n_train in (10_000, 25_000)
+        for rank in (64, 128)
+    }
+    assert all(item["config"].methods == ("original-krr-nystrom-pcg",) for item in proxy)
+    assert all(item["config"].subset_mode == "prefix" for item in proxy)
+    assert all(item["config"].max_test_rows == 10_000 for item in proxy)
+    assert all(item["config"].warmup_repeats == 1 for item in proxy)
+    assert all(item["config"].measured_repeats == 3 for item in proxy)
+    assert all(item["config"].original_krr_nystrom_tolerance == 1e-3 for item in proxy)
+    assert all(item["config"].original_krr_nystrom_maxiter == 250 for item in proxy)
+    assert all(item["config"].literature_baseline_precision == "fp64" for item in proxy)
+    assert all(
+        item["config"].original_krr_max_exact_matvec_pairs == 1_000_000_000
+        and item["config"].original_krr_max_prediction_pairs == 1_000_000_000
+        for item in proxy
+    )
+    assert all("proxy-only" in item["config"].parameter_source for item in proxy)
+
+    assert len(resource) == 4
+    assert {
+        (item["dataset_family"], int(item["config"].n_train))
+        for item in resource
+    } == {
+        (dataset_family, n_train)
+        for dataset_family in ("Synthetic", "Winnebago")
+        for n_train in (10_000_000, 300_000_000)
+    }
+    assert all(
+        item["config"].methods == ("original-krr-nystrom-pcg",)
+        and item["config"].original_krr_nystrom_rank == 128
+        and item["config"].warmup_repeats == 1
+        and item["config"].measured_repeats == 3
+        and item["config"].original_krr_max_exact_matvec_pairs == 1_000_000_000
+        and item["config"].original_krr_max_prediction_pairs == 1_000_000_000
+        for item in resource
+    )
+    assert all("resource audit" in item["config"].parameter_source for item in resource)
 
 
 def test_literature_pilot_selector_rejects_nonfinite_rows_and_fails_closed() -> None:
@@ -344,6 +476,8 @@ def test_literature_pilot_selector_rejects_nonfinite_rows_and_fails_closed() -> 
     selector = namespace["select_literature_pilot_candidates"]
     expected_groups = {
         ("Synthetic", "native-falkon-krr"),
+        ("Synthetic", "randomized-nystrom-fourier-pcg"),
+        ("Synthetic", "ski-kissgp-krr"),
         ("Winnebago", "matern-rff-ridge"),
     }
     candidates = pd.DataFrame([
@@ -368,10 +502,42 @@ def test_literature_pilot_selector_rejects_nonfinite_rows_and_fails_closed() -> 
             "configured_native_falkon_nystrom_centers": 128,
             "configured_rff_num_features": 256,
         },
+        {
+            "dataset_family": "Synthetic",
+            "method": "randomized-nystrom-fourier-pcg",
+            "case_id": "fourier_r128", "status": "ok", "successful_repeats": 3,
+            "train_total_seconds_median": 6.0, "test_rmse_median": 0.198,
+            "configured_fourier_nystrom_rank": 128,
+            "configured_fourier_nystrom_seed": 17,
+        },
+        {
+            "dataset_family": "Synthetic",
+            "method": "randomized-nystrom-fourier-pcg",
+            "case_id": "fourier_r256", "status": "ok", "successful_repeats": 3,
+            "train_total_seconds_median": 7.0, "test_rmse_median": 0.190,
+            "configured_fourier_nystrom_rank": 256,
+            "configured_fourier_nystrom_seed": 17,
+        },
+        {
+            "dataset_family": "Synthetic", "method": "ski-kissgp-krr",
+            "case_id": "ski_h64", "status": "ok", "successful_repeats": 3,
+            "train_total_seconds_median": 4.0, "test_rmse_median": 0.300,
+            "configured_ski_interpolation": "linear",
+            "configured_ski_grid_spacing": 1.0 / 64.0,
+        },
+        {
+            "dataset_family": "Synthetic", "method": "ski-kissgp-krr",
+            "case_id": "ski_h128", "status": "ok", "successful_repeats": 3,
+            "train_total_seconds_median": 7.0, "test_rmse_median": 0.280,
+            "configured_ski_interpolation": "linear",
+            "configured_ski_grid_spacing": 1.0 / 128.0,
+        },
     ])
 
     selected = selector(candidates, expected_groups)
-    assert selected["case_id"].tolist() == ["m128"]
+    assert set(selected["case_id"].astype(str)) == {
+        "m128", "fourier_r128", "ski_h128"
+    }
     selected_groups = {
         (str(row["dataset_family"]), str(row["method"]))
         for row in selected.to_dict("records")
@@ -379,6 +545,66 @@ def test_literature_pilot_selector_rejects_nonfinite_rows_and_fails_closed() -> 
     assert expected_groups - selected_groups == {
         ("Winnebago", "matern-rff-ridge")
     }
+
+
+def test_original_profiles_and_pilot_completion_truth_table() -> None:
+    notebook = notebook_builder.build_notebook()
+    source = _cell_source_containing(notebook, "def formal_campaign_job_passed")
+    function = next(
+        node
+        for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "formal_campaign_job_passed"
+    )
+    namespace = {
+        "STAGE1_SCALE_PROFILE": "scale",
+        "STAGE1_FAMILY_SCALE_PROFILE": "family-scale",
+        "STAGE1_FAMILY_PARAMETER_SWEEP_PROFILE": "family-sweep",
+        "ORIGINAL_KRR_PROXY_PROFILE": "original-proxy",
+        "ORIGINAL_KRR_RESOURCE_AUDIT_PROFILE": "original-resource",
+        "LITERATURE_BASELINE_PILOT_PROFILE": "literature-pilot",
+        "LITERATURE_BASELINES_300M_PROFILE": "literature-final",
+        "STAGE1_FAMILY_KERNEL_PROFILE": "family-kernel",
+    }
+    exec(
+        compile(
+            ast.fix_missing_locations(
+                ast.Module(body=[function], type_ignores=[])
+            ),
+            "<formal-job-truth-table>",
+            "exec",
+        ),
+        namespace,
+    )
+    passed = namespace["formal_campaign_job_passed"]
+    assert passed({
+        "profile": "original-proxy",
+        "artifact_complete": True,
+        "scientific_eligible": True,
+        "status": "claim_eligible_complete",
+    })
+    assert passed({
+        "profile": "original-resource",
+        "artifact_complete": True,
+        "scientific_eligible": True,
+        "status": "complete_with_resource_limits",
+    })
+    assert not passed({
+        "profile": "original-resource",
+        "artifact_complete": True,
+        "scientific_eligible": False,
+        "status": "complete_with_resource_limits",
+    })
+
+    completion = source.split(
+        "literature_baseline_pilot_complete = bool(", 1
+    )[1].split("literature_baselines_300m_complete = bool(", 1)[0]
+    assert "expected_literature_pilot_case_count" in completion
+    assert "len(completed_literature_baseline_pilot_items)" in completion
+    assert "len(literature_baseline_pilot_summary)" in completion
+    assert "len(literature_baseline_pilot_job_rows)" in completion
+    assert 'bool(row.get("artifact_complete"))' in completion
+    assert "formal_campaign_job_passed" not in completion
 
 
 def test_committed_notebook_matches_generator() -> None:

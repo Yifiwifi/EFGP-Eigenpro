@@ -14,6 +14,7 @@ from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end import
     END_TO_END_METHODS,
     FAMILY_END_TO_END_METHODS,
     LITERATURE_END_TO_END_METHODS,
+    SCALABLE_LITERATURE_END_TO_END_METHODS,
     PROTOCOL_FAMILY,
     STAGE2_SYSTEM_CONFIG_FIELDS,
     TIMING_SCOPE,
@@ -26,6 +27,7 @@ from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end import
     fit_restricted_krr,
     kernel_cross,
     predict_restricted_krr,
+    run_pipeline_once,
     summarize_pipeline_rows,
     validate_dataset_generation_provenance,
 )
@@ -64,6 +66,15 @@ def test_protocol_methods_are_complete_krr_pipelines() -> None:
     assert set(LITERATURE_END_TO_END_METHODS) == {
         "native-falkon-krr",
         "matern-rff-ridge",
+        "randomized-nystrom-fourier-pcg",
+        "ski-kissgp-krr",
+        "original-krr-nystrom-pcg",
+    }
+    assert set(SCALABLE_LITERATURE_END_TO_END_METHODS) == {
+        "native-falkon-krr",
+        "matern-rff-ridge",
+        "randomized-nystrom-fourier-pcg",
+        "ski-kissgp-krr",
     }
     assert set(LITERATURE_END_TO_END_METHODS).issubset(ALL_END_TO_END_METHODS)
 
@@ -89,6 +100,9 @@ def test_literature_baseline_config_is_validated() -> None:
         native_falkon_maxiter=30,
         native_falkon_tolerance=1e-5,
         rff_num_features=512,
+        fourier_nystrom_rank=256,
+        ski_interpolation="linear",
+        ski_grid_spacing=1.0 / 128.0,
     )
     _validate_config(cfg)
     with pytest.raises(ValueError, match="rff_num_features"):
@@ -100,6 +114,12 @@ def test_literature_baseline_config_is_validated() -> None:
                 kernel_family="se",
             )
         )
+    with pytest.raises(ValueError, match="ski_interpolation"):
+        _validate_config(EndToEndConfig(ski_interpolation="nearest"))
+    with pytest.raises(ValueError, match="fourier_nystrom_rank"):
+        _validate_config(EndToEndConfig(fourier_nystrom_rank=0))
+    with pytest.raises(ValueError, match="original_krr_nystrom_rank"):
+        _validate_config(EndToEndConfig(original_krr_nystrom_rank=0))
 
 
 @pytest.mark.parametrize(
@@ -196,6 +216,178 @@ def test_literature_adapter_maps_to_pipeline_schema(
     assert row["train_total_seconds"] == 6.0
     assert row["test_rmse"] == 0.2
     assert row["test_r2"] == 0.8
+
+
+def test_ski_adapter_maps_gpu_result_without_renaming_linear_ski(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled import (
+        structured_kernel_interpolation as ski,
+    )
+
+    observed: dict[str, object] = {}
+
+    def fake_run(x_train, y_train, x_test, y_test, config):
+        observed["config"] = config
+        return {
+            "status": "ok",
+            "implementation": "native_streamed_ski_krr_cupy",
+            "setup_seconds": 4.0,
+            "solving_phase_seconds": 5.0,
+            "train_total_seconds": 9.0,
+            "prediction_seconds": 0.5,
+            "test_rmse": 0.2,
+            "test_mae": 0.1,
+            "test_r2": 0.8,
+            "diagnostics": {
+                "interpolation": "linear",
+                "grid_spacing": 1.0 / 128.0,
+                "grid_shape": [133, 133],
+                "grid_size": 17_689,
+                "original_inducing_relative_residual": 1e-8,
+                "kronecker_product_used": False,
+                "stores_full_interpolation_matrix": False,
+                "cg_iterations": 17,
+                "timing_scope": "streamed GPU setup and inducing CG",
+                "backend": "cupy",
+            },
+        }
+
+    monkeypatch.setattr(ski, "run_structured_kernel_interpolation", fake_run)
+    cfg = EndToEndConfig(
+        methods=("ski-kissgp-krr",),
+        ski_interpolation="linear",
+        ski_grid_spacing=1.0 / 128.0,
+    )
+    dataset = {
+        "x": np.zeros((5, 2)),
+        "y": np.zeros(5),
+        "x_test": np.zeros((3, 2)),
+        "y_test": np.zeros(3),
+    }
+
+    row = _run_literature_method(
+        "ski-kissgp-krr", cfg, dataset, repeat_idx=0, is_warmup=False
+    )
+
+    assert observed["config"].backend == "cupy"
+    assert observed["config"].interpolation == "linear"
+    assert row["pipeline_family"] == "structured_kernel_interpolation_krr"
+    assert row["train_total_seconds"] == 9.0
+    assert row["effective_ski_grid_shape"] == [133, 133]
+    assert row["ski_kronecker_product_used"] is False
+    assert row["ski_strict_kissgp_cubic"] is False
+    assert row["literature_citations"] == ["wilson2015kissgp"]
+    assert row["iterations"] == 17
+
+
+def test_original_krr_nystrom_adapter_keeps_exact_operator_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled import (
+        original_krr_nystrom as original,
+    )
+
+    observed: dict[str, object] = {}
+
+    def fake_run(x_train, y_train, x_test, y_test, config):
+        observed["config"] = config
+        return {
+            "status": "converged",
+            "implementation": "exact_blocked_data_space_krr_column_nystrom_pcg",
+            "pipeline_family": "literature_original_data_space_krr",
+            "citations": ["frangella2023randomized"],
+            "data_staging_seconds": 1.0,
+            "preconditioner_setup_seconds": 2.0,
+            "setup_seconds": 3.0,
+            "solve_seconds": 4.0,
+            "train_total_seconds": 7.0,
+            "prediction_seconds": 0.5,
+            "rmse": 0.2,
+            "mae": 0.1,
+            "r2": 0.8,
+            "iterations": 11,
+            "effective_nystrom_rank": 64,
+            "true_relative_residual": 8e-4,
+            "exact_matvec_count": 12,
+            "kernel_pair_evaluations": 1_200,
+            "operator_approximation": False,
+            "solved_system": "original_data_space_K_plus_absolute_ridge_I",
+            "timing_scope": "exact original KRR",
+            "backend": "cupy",
+        }
+
+    monkeypatch.setattr(original, "run_original_krr_nystrom_pcg", fake_run)
+    cfg = EndToEndConfig(
+        methods=("original-krr-nystrom-pcg",),
+        original_krr_nystrom_rank=64,
+    )
+    dataset = {
+        "x": np.zeros((10, 2)),
+        "y": np.zeros(10),
+        "x_test": np.zeros((4, 2)),
+        "y_test": np.zeros(4),
+    }
+
+    row = _run_literature_method(
+        "original-krr-nystrom-pcg", cfg, dataset, repeat_idx=0, is_warmup=False
+    )
+
+    assert observed["config"].backend == "cupy"
+    assert observed["config"].rank == 64
+    assert row["setup_seconds"] == 1.0
+    assert row["solver_build_seconds"] == 2.0
+    assert row["iterative_solve_seconds"] == 4.0
+    assert row["solving_phase_seconds"] == 6.0
+    assert row["train_total_seconds"] == 7.0
+    assert row["test_rmse"] == 0.2
+    assert row["original_krr_operator_approximation"] is False
+    assert row["original_krr_solved_system"].startswith("original_data_space")
+
+
+def test_original_krr_full_scale_resource_gate_is_retained_in_pipeline_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled import (
+        original_krr_nystrom as original,
+    )
+
+    audit = {
+        "exact_matvec_pairs": 10**14,
+        "prediction_pairs": 10**10,
+        "preconditioner_factor_bytes": 10_240_000_000,
+        "resource_preflight_before_backend": True,
+    }
+
+    def gated(*args, **kwargs):
+        raise original.OriginalKRRResourceLimit("exact_matvec_pair_cap", audit)
+
+    monkeypatch.setattr(original, "run_original_krr_nystrom_pcg", gated)
+    dataset = {
+        "x": np.zeros((2, 2)),
+        "y": np.zeros(2),
+        "x_test": np.zeros((1, 2)),
+        "y_test": np.zeros(1),
+        "n_test": 1,
+        "source_n_train": 2,
+        "metadata": {},
+        "content_index_sha256": "content",
+        "metadata_sha256": "metadata",
+    }
+
+    row = run_pipeline_once(
+        "original-krr-nystrom-pcg",
+        EndToEndConfig(methods=("original-krr-nystrom-pcg",)),
+        dataset,
+        repeat_idx=0,
+        is_warmup=False,
+    )
+
+    assert row["status"] == "resource_limit"
+    assert row["resource_limit_reason"] == "exact_matvec_pair_cap"
+    assert row["original_krr_exact_matvec_pairs"] == 10**14
+    assert row["original_krr_preconditioner_factor_bytes"] == 10_240_000_000
+    assert row["resource_preflight_before_backend"] is True
 
 
 def _synthetic_generation_dataset(noise_std: float) -> dict[str, object]:
@@ -328,6 +520,95 @@ def test_efgp_pipeline_total_charges_score_selection(monkeypatch: pytest.MonkeyP
     assert row["effective_active_box_size"] == 49
     assert row["effective_active_rank"] == 16
     assert row["capacity_adapted"] is True
+
+
+def test_fourier_nystrom_pipeline_keeps_fourier_setup_and_reports_rank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeBackend:
+        xp = np
+
+    class FakeSystem:
+        backend = FakeBackend()
+        rhs_gpu = np.asarray([1.0 + 0.0j])
+        data_ctx = object()
+        setup_seconds = 4.0
+        manifest = {"M": 1, "mtot": 1}
+        system_id = "fourier-system"
+
+    fake_spec = SimpleNamespace(
+        label="fourier-nystrom-precond", active_set=None, btab_config=None
+    )
+    captured: dict[str, object] = {}
+
+    def fake_fixed_config(cfg, methods):
+        captured["methods"] = methods
+        captured["rank"] = cfg.fourier_nystrom_rank
+        captured["seed"] = cfg.fourier_nystrom_seed
+        return object()
+
+    monkeypatch.setattr(
+        "efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end._fixed_config",
+        fake_fixed_config,
+    )
+    monkeypatch.setattr(
+        "efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end.fixed_ab.prepare_shared_system",
+        lambda cfg, dataset_payload: FakeSystem(),
+    )
+    monkeypatch.setattr(
+        "efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end.fixed_ab.resolve_method_specs",
+        lambda system, cfg: ([fake_spec], {}),
+    )
+    monkeypatch.setattr(
+        "efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end.fixed_ab.run_one_method",
+        lambda *args, **kwargs: (
+            {
+                "status": "converged",
+                "selection_seconds": 0.0,
+                "preconditioner_build_seconds": 2.0,
+                "solve_seconds": 3.0,
+                "rank": 256,
+            },
+            np.asarray([1.0 + 0.0j]),
+        ),
+    )
+    monkeypatch.setattr(
+        "efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end.predict_v1",
+        lambda *args, **kwargs: np.asarray([0.25, -0.25]),
+    )
+    monkeypatch.setattr(
+        "efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end._sync",
+        lambda xp: None,
+    )
+
+    row = _run_efgp_method(
+        "randomized-nystrom-fourier-pcg",
+        EndToEndConfig(
+            methods=("randomized-nystrom-fourier-pcg",),
+            fourier_nystrom_rank=256,
+            fourier_nystrom_seed=17,
+        ),
+        {
+            "x_test": np.asarray([[0.0, 0.0], [1.0, 1.0]]),
+            "y_test": np.asarray([0.25, -0.25]),
+        },
+        repeat_idx=1,
+        is_warmup=False,
+    )
+
+    assert captured == {
+        "methods": ("cg", "fourier-nystrom-precond"),
+        "rank": 256,
+        "seed": 17,
+    }
+    assert row["pipeline_family"] == "fourier_randomized_nystrom_pcg"
+    assert row["setup_seconds"] == 4.0
+    assert row["solver_build_seconds"] == 2.0
+    assert row["iterative_solve_seconds"] == 3.0
+    assert row["train_total_seconds"] == 9.0
+    assert row["effective_fourier_nystrom_rank"] == 256
+    assert row["literature_citations"] == ["frangella2023randomized"]
+    assert row["test_rmse"] == 0.0
 
 
 def test_mixed_pipeline_config_rejects_mismatched_regularization_scaling() -> None:
@@ -1018,8 +1299,8 @@ def test_literature_baseline_profiles_are_executable_and_three_repeat(
         dataset_dir=str(tmp_path / "data"),
         output_root=tmp_path / "out",
     )
-    assert len(pilot) == 8
-    assert len(final) == 4
+    assert len(pilot) == 18
+    assert len(final) == 8
     assert {item["dataset_family"] for item in pilot} == {
         "Synthetic",
         "Winnebago",
@@ -1038,6 +1319,21 @@ def test_literature_baseline_profiles_are_executable_and_three_repeat(
         for item in pilot
         if item["config"].methods == ("matern-rff-ridge",)
     } == {128, 256}
+    assert {
+        item["config"].fourier_nystrom_rank
+        for item in pilot
+        if item["config"].methods == ("randomized-nystrom-fourier-pcg",)
+    } == {128, 256, 512}
+    assert {
+        item["config"].ski_grid_spacing
+        for item in pilot
+        if item["config"].methods == ("ski-kissgp-krr",)
+    } == {1.0 / 64.0, 1.0 / 128.0}
+    assert all(
+        item["config"].ski_interpolation == "linear"
+        for item in pilot
+        if item["config"].methods == ("ski-kissgp-krr",)
+    )
     assert all(
         item["config"].native_falkon_maxiter == 8
         and item["config"].native_falkon_tolerance == 1e-3
@@ -1054,6 +1350,9 @@ def test_literature_baseline_profiles_are_executable_and_three_repeat(
     assert all(item["config"].measured_repeats == 3 for item in final)
     assert all(item["config"].native_falkon_nystrom_centers == 128 for item in final)
     assert all(item["config"].rff_num_features == 256 for item in final)
+    assert all(item["config"].fourier_nystrom_rank == 256 for item in final)
+    assert all(item["config"].ski_interpolation == "linear" for item in final)
+    assert all(item["config"].ski_grid_spacing == 1.0 / 128.0 for item in final)
     assert all(item["config"].native_falkon_train_chunk_size == 250_000 for item in final)
     assert all(item["config"].rff_train_chunk_size == 250_000 for item in final)
 
