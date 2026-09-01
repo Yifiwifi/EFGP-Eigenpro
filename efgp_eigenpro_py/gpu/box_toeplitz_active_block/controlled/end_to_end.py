@@ -35,7 +35,6 @@ from typing import Any, Iterable
 
 import numpy as np
 
-from ....efgp_solver import EFGPSolver
 from ....kernels import make_matern, make_squared_exponential
 from ...backends import BackendConfig, build_gpu_backend_bundle
 from ...benchmark_dataset.stored_npz import (
@@ -66,8 +65,18 @@ FAMILY_END_TO_END_METHODS = (
     "ours-binned-inverse",
     "ours-binned-active-eig",
 )
+LITERATURE_END_TO_END_METHODS = (
+    "native-falkon-krr",
+    "matern-rff-ridge",
+)
 ALL_END_TO_END_METHODS = tuple(
-    dict.fromkeys((*END_TO_END_METHODS, *FAMILY_END_TO_END_METHODS))
+    dict.fromkeys(
+        (
+            *END_TO_END_METHODS,
+            *FAMILY_END_TO_END_METHODS,
+            *LITERATURE_END_TO_END_METHODS,
+        )
+    )
 )
 
 # Configuration carried from the selected Stage-1 KRR regime into the one
@@ -117,7 +126,8 @@ TIMING_SCOPE = (
     "Each method owns algorithmic model setup and solve. train_total_seconds = "
     "setup_seconds + solving_phase_seconds. This is a method-owned algorithmic "
     "training total, not process wall clock: common dataset I/O, backend creation, "
-    "and host-to-device staging are excluded, and prediction is separate."
+    "and any one-time common full-dataset staging are excluded; method-owned "
+    "streamed transfers are included, and prediction is separate."
 )
 
 
@@ -211,6 +221,21 @@ class EndToEndConfig:
     measured_repeats: int = 1
     low_rank_chunk_size: int = 250_000
     low_rank_dtype: str = "fp64"
+    # Additional literature baselines used only by the dedicated Section 4.4
+    # profile.  Both paths stream row chunks and use the same absolute ridge
+    # convention as the other complete KRR pipelines.
+    native_falkon_nystrom_centers: int = 512
+    native_falkon_maxiter: int = 30
+    native_falkon_tolerance: float = 1e-5
+    native_falkon_seed: int = 31
+    native_falkon_train_chunk_size: int = 100_000
+    native_falkon_prediction_chunk_size: int = 250_000
+    native_falkon_preconditioner_jitter: float | None = None
+    rff_num_features: int = 512
+    rff_seed: int = 37
+    rff_train_chunk_size: int = 100_000
+    rff_prediction_chunk_size: int = 250_000
+    literature_baseline_precision: str = "fp64"
     # Exact RPCholesky is never replaced by a pilot/subsampled variant.  If the
     # declared factor does not fit this cap (or current device memory), the row
     # is retained with status=resource_limit.
@@ -303,6 +328,34 @@ def _validate_config(cfg: EndToEndConfig) -> None:
         raise ValueError("all ranks must be positive.")
     if cfg.full_eig_rank is not None and int(cfg.full_eig_rank) <= 0:
         raise ValueError("full_eig_rank must be positive or None.")
+    for field_name in (
+        "native_falkon_nystrom_centers",
+        "native_falkon_maxiter",
+        "native_falkon_train_chunk_size",
+        "native_falkon_prediction_chunk_size",
+        "rff_num_features",
+        "rff_train_chunk_size",
+        "rff_prediction_chunk_size",
+    ):
+        if int(getattr(cfg, field_name)) <= 0:
+            raise ValueError(f"{field_name} must be positive.")
+    if (
+        not math.isfinite(float(cfg.native_falkon_tolerance))
+        or float(cfg.native_falkon_tolerance) <= 0.0
+    ):
+        raise ValueError("native_falkon_tolerance must be finite and positive.")
+    if cfg.native_falkon_preconditioner_jitter is not None and (
+        not math.isfinite(float(cfg.native_falkon_preconditioner_jitter))
+        or float(cfg.native_falkon_preconditioner_jitter) <= 0.0
+    ):
+        raise ValueError(
+            "native_falkon_preconditioner_jitter must be positive or None."
+        )
+    if str(cfg.literature_baseline_precision).strip().lower() not in {
+        "fp32",
+        "fp64",
+    }:
+        raise ValueError("literature_baseline_precision must be 'fp32' or 'fp64'.")
     if cfg.active_topk is not None and int(cfg.active_topk) <= 0:
         raise ValueError("active_topk must be positive or None.")
     for field_name in (
@@ -333,6 +386,18 @@ def _validate_config(cfg: EndToEndConfig) -> None:
             "Current EFGP uses Phi*Phi + reg_lambda*I. Use convention='absolute' "
             "for mixed pipeline comparisons; do not compare mismatched ridge scaling."
         )
+    if convention != "absolute" and any(
+        method in LITERATURE_END_TO_END_METHODS for method in cfg.methods
+    ):
+        raise ValueError(
+            "Literature baseline profiles use the repository's absolute ridge "
+            "convention; mean_loss is not supported here."
+        )
+    if "matern-rff-ridge" in cfg.methods and str(cfg.kernel_family).strip().lower() not in {
+        "matern",
+        "mat",
+    }:
+        raise ValueError("matern-rff-ridge requires kernel_family='matern'.")
     if int(cfg.max_test_rows) <= 0:
         raise ValueError("max_test_rows must be positive.")
     if cfg.expected_dataset_noise_std is not None and (
@@ -1151,6 +1216,136 @@ def _run_low_rank_method(
     }
 
 
+def _run_literature_method(
+    method: str,
+    cfg: EndToEndConfig,
+    dataset: dict[str, Any],
+    *,
+    repeat_idx: int,
+    is_warmup: bool,
+) -> dict[str, Any]:
+    """Run an independently constructed, row-streamed literature baseline."""
+
+    from .literature_baselines import (
+        MaternRFFRidgeConfig,
+        NativeFalkonKRRConfig,
+        run_matern_rff_ridge,
+        run_native_falkon_krr,
+    )
+
+    backend = build_gpu_backend_bundle(BackendConfig(nufft=str(cfg.nufft_backend)))
+    xp = backend.xp
+    if method == "native-falkon-krr":
+        baseline_cfg = NativeFalkonKRRConfig(
+            nystrom_centers=int(cfg.native_falkon_nystrom_centers),
+            maxiter=int(cfg.native_falkon_maxiter),
+            tolerance=float(cfg.native_falkon_tolerance),
+            seed=int(cfg.native_falkon_seed),
+            kernel_family=str(cfg.kernel_family),
+            lengthscale=float(cfg.lengthscale),
+            nu=float(cfg.nu),
+            kernel_variance=float(cfg.variance),
+            absolute_ridge=float(cfg.reg_lambda),
+            train_chunk_size=int(cfg.native_falkon_train_chunk_size),
+            prediction_chunk_size=int(cfg.native_falkon_prediction_chunk_size),
+            precision=str(cfg.literature_baseline_precision),
+            backend="cupy",
+            preconditioner_jitter=cfg.native_falkon_preconditioner_jitter,
+        )
+        result = run_native_falkon_krr(
+            dataset["x"],
+            dataset["y"],
+            dataset["x_test"],
+            dataset["y_test"],
+            baseline_cfg,
+            array_module=xp,
+        )
+        setup_seconds = float(result["setup_seconds"])
+        solver_build_seconds = float(result["solver_build_seconds"])
+        iterative_solve_seconds = float(result["iterative_solve_seconds"])
+        solving_phase_seconds = solver_build_seconds + iterative_solve_seconds
+        method_parameters = {
+            "effective_nystrom_centers": int(result["nystrom_centers"]),
+            "native_falkon_penalty": float(result["falkon_penalty"]),
+            "native_falkon_relative_residual": float(result["relative_residual"]),
+            "native_falkon_converged": bool(result["converged"]),
+            "implementation": str(result["implementation"]),
+            "official_falkon_package": bool(result["official_falkon_package"]),
+        }
+    elif method == "matern-rff-ridge":
+        baseline_cfg = MaternRFFRidgeConfig(
+            num_features=int(cfg.rff_num_features),
+            seed=int(cfg.rff_seed),
+            lengthscale=float(cfg.lengthscale),
+            nu=float(cfg.nu),
+            kernel_variance=float(cfg.variance),
+            absolute_ridge=float(cfg.reg_lambda),
+            train_chunk_size=int(cfg.rff_train_chunk_size),
+            prediction_chunk_size=int(cfg.rff_prediction_chunk_size),
+            precision=str(cfg.literature_baseline_precision),
+            backend="cupy",
+        )
+        result = run_matern_rff_ridge(
+            dataset["x"],
+            dataset["y"],
+            dataset["x_test"],
+            dataset["y_test"],
+            baseline_cfg,
+            array_module=xp,
+        )
+        # Feature sampling plus streamed sufficient-statistic accumulation is
+        # method-owned model setup; the final dense ridge solve is the solving
+        # phase.  Their sum remains exactly the adapter's train total.
+        setup_seconds = float(result["setup_seconds"]) + float(
+            result["feature_accumulation_seconds"]
+        )
+        solver_build_seconds = 0.0
+        iterative_solve_seconds = float(result["solve_seconds"])
+        solving_phase_seconds = iterative_solve_seconds
+        method_parameters = {
+            "effective_rff_num_features": int(result["num_features"]),
+            "implementation": str(result["implementation"]),
+        }
+    else:  # pragma: no cover - validated dispatch
+        raise ValueError(f"unsupported literature pipeline {method!r}")
+
+    train_total_seconds = setup_seconds + solving_phase_seconds
+    adapter_total = float(result["train_total_seconds"])
+    if not math.isclose(
+        train_total_seconds,
+        adapter_total,
+        rel_tol=1e-10,
+        abs_tol=1e-10,
+    ):
+        raise RuntimeError(
+            f"{method} timing components do not add to adapter total: "
+            f"{train_total_seconds} != {adapter_total}"
+        )
+    return {
+        "status": str(result["status"]),
+        "method": method,
+        "method_kind": method,
+        "pipeline_family": str(result["pipeline_family"]),
+        "repeat_idx": int(repeat_idx),
+        "is_warmup": bool(is_warmup),
+        "selection_seconds": 0.0,
+        "setup_seconds": setup_seconds,
+        "solver_build_seconds": solver_build_seconds,
+        "iterative_solve_seconds": iterative_solve_seconds,
+        "solving_phase_seconds": solving_phase_seconds,
+        "train_total_seconds": train_total_seconds,
+        "prediction_seconds": float(result["prediction_seconds"]),
+        "test_rmse": float(result["test_rmse"]),
+        "test_mae": float(result["test_mae"]),
+        "test_r2": float(result["test_r2"]),
+        "iterations": result.get("iterations"),
+        "literature_citations": list(result.get("citations", ())),
+        "literature_timing_scope": str(result.get("timing_scope", "")),
+        "literature_backend": str(result.get("backend", "")),
+        **method_parameters,
+    }
+
+
 def _base_row(
     cfg: EndToEndConfig, dataset: dict[str, Any], method: str
 ) -> dict[str, Any]:
@@ -1224,6 +1419,19 @@ def _base_row(
         ),
         "parameter_selection_policy": str(cfg.parameter_selection_policy),
         "parameter_source": str(cfg.parameter_source),
+        "configured_native_falkon_nystrom_centers": int(
+            cfg.native_falkon_nystrom_centers
+        ),
+        "configured_native_falkon_maxiter": int(cfg.native_falkon_maxiter),
+        "configured_native_falkon_tolerance": float(
+            cfg.native_falkon_tolerance
+        ),
+        "configured_native_falkon_seed": int(cfg.native_falkon_seed),
+        "configured_rff_num_features": int(cfg.rff_num_features),
+        "configured_rff_seed": int(cfg.rff_seed),
+        "configured_literature_baseline_precision": str(
+            cfg.literature_baseline_precision
+        ),
         "accuracy_max_rmse": cfg.accuracy_max_rmse,
         "accuracy_min_r2": cfg.accuracy_min_r2,
         "gpu_allocator_cache_reset_between_pipelines": True,
@@ -1242,6 +1450,10 @@ def run_pipeline_once(
     try:
         if method in {"nystrom-krr", "rpcholesky-krr"}:
             row = _run_low_rank_method(
+                method, cfg, dataset, repeat_idx=repeat_idx, is_warmup=is_warmup
+            )
+        elif method in LITERATURE_END_TO_END_METHODS:
+            row = _run_literature_method(
                 method, cfg, dataset, repeat_idx=repeat_idx, is_warmup=is_warmup
             )
         else:
@@ -1397,6 +1609,23 @@ def summarize_pipeline_rows(
                     "configured_allow_frozen_topk_capacity_adaptation",
                     "parameter_selection_policy",
                     "parameter_source",
+                    "configured_native_falkon_nystrom_centers",
+                    "configured_native_falkon_maxiter",
+                    "configured_native_falkon_tolerance",
+                    "configured_native_falkon_seed",
+                    "configured_rff_num_features",
+                    "configured_rff_seed",
+                    "configured_literature_baseline_precision",
+                    "effective_nystrom_centers",
+                    "native_falkon_penalty",
+                    "native_falkon_relative_residual",
+                    "native_falkon_converged",
+                    "effective_rff_num_features",
+                    "implementation",
+                    "official_falkon_package",
+                    "literature_citations",
+                    "literature_timing_scope",
+                    "literature_backend",
                     "accuracy_max_rmse",
                     "accuracy_min_r2",
                     "resource_required_bytes",

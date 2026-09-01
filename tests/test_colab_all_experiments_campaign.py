@@ -11,6 +11,10 @@ import pytest
 
 from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled import (
     build_colab_all_experiments_notebook as notebook_builder,
+    end_to_end_suite as stage1_suite,
+)
+from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end import (
+    LITERATURE_END_TO_END_METHODS,
 )
 from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.suite import (
     load_suite_config,
@@ -60,7 +64,7 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
     source = _all_source(notebook)
     configuration_source = _cell_source_containing(notebook, "required_bundles = []")
     formal_stage1_bundle_branch = configuration_source.split(
-        "if RUN_STAGE1_END_TO_END_KRR:", 1
+        "required_bundles = []", 1
     )[1].split("if RUN_LEGACY_GROUPS:", 1)[0]
     stage1_source = _cell_source_containing(
         notebook, "stage1_scale_plan = stage1_suite.build_profile_plan("
@@ -73,12 +77,30 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
     )
     assert "RUN_ALL_FORMAL_EXPERIMENTS = True" in source
     assert "RUN_STAGE1_END_TO_END_KRR = RUN_ALL_FORMAL_EXPERIMENTS" in source
+    assert "RUN_STAGE1_FAMILY_PARAMETER_SWEEP = RUN_ALL_FORMAL_EXPERIMENTS" in source
+    assert "RUN_LITERATURE_BASELINE_PILOT = RUN_ALL_FORMAL_EXPERIMENTS" in source
+    assert "RUN_LITERATURE_BASELINES_300M = RUN_ALL_FORMAL_EXPERIMENTS" in source
     assert "RUN_STAGE2_FIXED_AB_SOLVERS = RUN_ALL_FORMAL_EXPERIMENTS" in source
     assert 'STAGE1_SCALE_PROFILE = "scale_10m_300m"' in source
+    assert (
+        'STAGE1_FAMILY_PARAMETER_SWEEP_PROFILE = '
+        '"matern_family_parameter_sweep_10m_300m"'
+    ) in source
+    assert 'LITERATURE_BASELINE_PILOT_PROFILE = "literature_baseline_pilot_10m"' in source
+    assert 'LITERATURE_BASELINES_300M_PROFILE = "literature_baselines_300m"' in source
     assert '"nystrom-krr", "rpcholesky-krr", "efgp-standard-cg"' in source
     assert '"efgp-standard-jacobi", "efgp-standard-full-eig"' in source
     assert '"ours-binned-default"' in source
     assert "stage1_suite.build_profile_plan(" in source
+    assert "len(stage1_family_parameter_sweep_plan) != 144" in source
+    assert "family_parameter_sweep_reporting.write_family_parameter_sweep_reports(" in source
+    assert 'final_manifest["stage1_family_parameter_sweep"]' in source
+    assert "len(literature_baseline_pilot_plan) != 8" in source
+    assert "len(literature_baselines_300m_plan) != 2" in source
+    assert "LITERATURE_END_TO_END_METHODS" in source
+    assert 'STAGE1_OUTPUT_ROOT / "literature_baseline_pilot_10m.csv"' in source
+    assert 'STAGE1_OUTPUT_ROOT / "literature_baselines_300m.csv"' in source
+    assert 'final_manifest["literature_baselines"]' in source
     assert "stage1_suite.select_target_regime(" in source
     assert "canonical_reporting.load_stage1_summaries(" in source
     assert source.index("canonical_reporting.load_stage1_summaries(") < source.index(
@@ -95,10 +117,11 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
     assert "archived_exact_available" in formal_stage1_bundle_branch
     assert "development_scale_masters" not in formal_stage1_bundle_branch
     assert "GENERATE_ARCHIVED_SYNTHETIC_SIZES = []" in configuration_source
-    assert (
-        "GENERATE_FORMAL_SYNTHETIC_IF_MISSING = RUN_STAGE1_END_TO_END_KRR"
-        in configuration_source
-    )
+    assert "GENERATE_FORMAL_SYNTHETIC_IF_MISSING = (" in configuration_source
+    assert "RUN_STAGE1_FAMILY_PARAMETER_SWEEP" in configuration_source
+    assert "RUN_LITERATURE_BASELINE_PILOT" in configuration_source
+    assert "RUN_LITERATURE_BASELINES_300M" in configuration_source
+    assert "if RUN_LITERATURE_BASELINES_300M:" in configuration_source
     assert 'stem = f"synthetic_true_func_2d_ntrain{int(n_train)}"' in formal_generator_source
     formal_validator_call = "validate_archived_synthetic_inputs(FORMAL_SCALE_SIZES)"
     assert formal_validator_call in stage1_source
@@ -217,6 +240,67 @@ def test_formal_stage1_suite_matches_archived_noise03_generation_route() -> None
     assert "synthetic_true_func_2d_n300000000" not in json.dumps(
         [*synthetic_cases.values(), suite["profiles"]["robustness_at_selected_target"]["datasets"][0]]
     )
+
+
+def test_matern_family_parameter_sweep_is_144_single_method_three_repeat_cases(
+    tmp_path: Path,
+) -> None:
+    suite = json.loads(STAGE1_SUITE_PATH.read_text(encoding="utf-8"))
+    profile = "matern_family_parameter_sweep_10m_300m"
+    plan = stage1_suite.build_profile_plan(
+        suite,
+        profile,
+        dataset_dir=str(tmp_path / "data"),
+        output_root=tmp_path / "outputs",
+    )
+
+    assert len(plan) == 144
+    assert {item["dataset_family"] for item in plan} == {"Synthetic", "Winnebago"}
+    assert {int(item["config"].n_train) for item in plan} == {
+        10_000_000,
+        30_000_000,
+        100_000_000,
+        300_000_000,
+    }
+    assert all(item["profile"] == profile for item in plan)
+    assert all(int(item["config"].warmup_repeats) == 1 for item in plan)
+    assert all(int(item["config"].measured_repeats) == 3 for item in plan)
+    assert all(len(item["config"].methods) == 1 for item in plan)
+    assert {
+        item["config"].methods[0] for item in plan
+    } == {"ours-binned-inverse", "ours-binned-active-eig"}
+
+
+def test_literature_baseline_profiles_have_frozen_pilot_and_300m_protocols(
+    tmp_path: Path,
+) -> None:
+    suite = json.loads(STAGE1_SUITE_PATH.read_text(encoding="utf-8"))
+    pilot = stage1_suite.build_profile_plan(
+        suite,
+        "literature_baseline_pilot_10m",
+        dataset_dir=str(tmp_path / "data"),
+        output_root=tmp_path / "outputs",
+    )
+    final = stage1_suite.build_profile_plan(
+        suite,
+        "literature_baselines_300m",
+        dataset_dir=str(tmp_path / "data"),
+        output_root=tmp_path / "outputs",
+    )
+
+    assert len(pilot) == 8
+    assert all(int(item["config"].n_train) == 10_000_000 for item in pilot)
+    assert all(len(item["config"].methods) == 1 for item in pilot)
+    assert all(int(item["config"].warmup_repeats) == 1 for item in pilot)
+    assert all(int(item["config"].measured_repeats) == 3 for item in pilot)
+    assert len(final) == 2
+    assert all(int(item["config"].n_train) == 300_000_000 for item in final)
+    assert all(
+        tuple(item["config"].methods) == LITERATURE_END_TO_END_METHODS
+        for item in final
+    )
+    assert all(int(item["config"].warmup_repeats) == 1 for item in final)
+    assert all(int(item["config"].measured_repeats) == 3 for item in final)
 
 
 def test_committed_notebook_matches_generator() -> None:

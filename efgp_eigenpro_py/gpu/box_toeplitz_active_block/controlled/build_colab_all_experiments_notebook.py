@@ -86,11 +86,17 @@ def build_notebook() -> dict:
             RUN_STAGE1_END_TO_END_KRR = RUN_ALL_FORMAL_EXPERIMENTS
             RUN_STAGE1_ROBUSTNESS = RUN_ALL_FORMAL_EXPERIMENTS
             RUN_STAGE1_FAMILY_SCALE = RUN_ALL_FORMAL_EXPERIMENTS
+            RUN_STAGE1_FAMILY_PARAMETER_SWEEP = RUN_ALL_FORMAL_EXPERIMENTS
+            RUN_LITERATURE_BASELINE_PILOT = RUN_ALL_FORMAL_EXPERIMENTS
+            RUN_LITERATURE_BASELINES_300M = RUN_ALL_FORMAL_EXPERIMENTS
             RUN_STAGE1_FAMILY_ROBUSTNESS = RUN_ALL_FORMAL_EXPERIMENTS
             RUN_STAGE1_FAMILY_KERNEL = RUN_ALL_FORMAL_EXPERIMENTS
             RUN_STAGE2_FIXED_AB_SOLVERS = RUN_ALL_FORMAL_EXPERIMENTS
             STAGE1_SCALE_PROFILE = "scale_10m_300m"
             STAGE1_FAMILY_SCALE_PROFILE = "family_scale_10m_300m"
+            STAGE1_FAMILY_PARAMETER_SWEEP_PROFILE = "matern_family_parameter_sweep_10m_300m"
+            LITERATURE_BASELINE_PILOT_PROFILE = "literature_baseline_pilot_10m"
+            LITERATURE_BASELINES_300M_PROFILE = "literature_baselines_300m"
             STAGE1_FAMILY_KERNEL_PROFILE = "family_kernel_at_30m"
             STAGE1_METHODS = [
                 "nystrom-krr", "rpcholesky-krr", "efgp-standard-cg",
@@ -130,8 +136,8 @@ def build_notebook() -> dict:
             RUN_PREDICTION_AUDIT = RUN_ALL_FORMAL_EXPERIMENTS
 
             ACTIVE_SIZES = list(FORMAL_SCALE_SIZES) if RUN_ALL_FORMAL_EXPERIMENTS else [10_000_000]
-            ALLOW_100M = RUN_ALL_FORMAL_EXPERIMENTS
-            ALLOW_300M = RUN_ALL_FORMAL_EXPERIMENTS
+            ALLOW_100M = RUN_ALL_FORMAL_EXPERIMENTS or RUN_LITERATURE_BASELINES_300M
+            ALLOW_300M = RUN_ALL_FORMAL_EXPERIMENTS or RUN_LITERATURE_BASELINES_300M
             PREDICTION_AUDIT_MAX_TEST_N = 2_500_000
             PREDICTION_AUDIT_PROFILES = ["fixed_ab_selected_target"]
 
@@ -141,14 +147,24 @@ def build_notebook() -> dict:
 
             # Match the archived group_a/b/c notebook: formal Synthetic is
             # generated locally per N when absent, with _ntrainN/noise=.3.
-            GENERATE_FORMAL_SYNTHETIC_IF_MISSING = RUN_STAGE1_END_TO_END_KRR
+            GENERATE_FORMAL_SYNTHETIC_IF_MISSING = (
+                RUN_STAGE1_END_TO_END_KRR
+                or RUN_STAGE1_FAMILY_PARAMETER_SWEEP
+                or RUN_LITERATURE_BASELINE_PILOT
+                or RUN_LITERATURE_BASELINES_300M
+            )
             GENERATE_ARCHIVED_SYNTHETIC_SIZES = []  # noise=.3 / chunk=5M / _ntrainN
             GENERATE_MANITOWOC_300M = False
             MANITOWOC_START_LOD = 8  # 只是起点；容量不足时必须提高并重新精确扫描
             SYNC_GENERATED_DATA_TO_DRIVE = False
 
             required_bundles = []
-            if RUN_STAGE1_END_TO_END_KRR:
+            if (
+                RUN_STAGE1_END_TO_END_KRR
+                or RUN_STAGE1_FAMILY_PARAMETER_SWEEP
+                or RUN_LITERATURE_BASELINE_PILOT
+                or RUN_LITERATURE_BASELINES_300M
+            ):
                 # Winnebago exact artifacts come from the catalog. Synthetic
                 # exact per-N files are generated locally if not already selected.
                 required_bundles.append("archived_exact_available")
@@ -179,6 +195,8 @@ def build_notebook() -> dict:
                 requested_size_hints.append(300_000_000)
             if RUN_PREDICTION_AUDIT:
                 requested_size_hints.extend([10_000_000, 100_000_000, 300_000_000])
+            if RUN_LITERATURE_BASELINES_300M:
+                requested_size_hints.append(300_000_000)
             MAX_REQUESTED_N = max(requested_size_hints or [0])
 
             # Release the paid Colab accelerator after every mandatory artifact
@@ -978,6 +996,10 @@ def build_notebook() -> dict:
             r"""
             from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled import (
                 end_to_end_suite as stage1_suite,
+                family_parameter_sweep_reporting,
+            )
+            from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end import (
+                LITERATURE_END_TO_END_METHODS,
             )
             from dataclasses import asdict
 
@@ -987,6 +1009,9 @@ def build_notebook() -> dict:
             )
             STAGE1_OUTPUT_ROOT = DRIVE_RUN_ROOT / "stage1_end_to_end_krr"
             STAGE1_RUNTIME_CONFIG_ROOT = DRIVE_RUN_ROOT / "runtime_configs" / "stage1"
+            STAGE1_FAMILY_PARAMETER_SWEEP_REPORT_ROOT = (
+                STAGE1_OUTPUT_ROOT / "matern_family_parameter_sweep_reports"
+            )
             STAGE1_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
             STAGE1_RUNTIME_CONFIG_ROOT.mkdir(parents=True, exist_ok=True)
             STAGE1_TARGET_PATH = STAGE1_OUTPUT_ROOT / "selected_target_regime.json"
@@ -1002,7 +1027,12 @@ def build_notebook() -> dict:
                 STAGE1_OUTPUT_ROOT / "synthetic_data_family_manifest.json"
             )
             stage1_synthetic_inputs = []
-            if RUN_STAGE1_END_TO_END_KRR:
+            if (
+                RUN_STAGE1_END_TO_END_KRR
+                or RUN_STAGE1_FAMILY_PARAMETER_SWEEP
+                or RUN_LITERATURE_BASELINE_PILOT
+                or RUN_LITERATURE_BASELINES_300M
+            ):
                 stage1_synthetic_inputs = validate_archived_synthetic_inputs(FORMAL_SCALE_SIZES)
                 if synthetic_family_manifest_path.is_file():
                     prior_synthetic_inputs = json.loads(
@@ -1041,6 +1071,24 @@ def build_notebook() -> dict:
                 dataset_dir=str(LOCAL_DATA_DIR),
                 output_root=STAGE1_OUTPUT_ROOT,
             )
+            stage1_family_parameter_sweep_plan = stage1_suite.build_profile_plan(
+                stage1_config,
+                STAGE1_FAMILY_PARAMETER_SWEEP_PROFILE,
+                dataset_dir=str(LOCAL_DATA_DIR),
+                output_root=STAGE1_OUTPUT_ROOT,
+            )
+            literature_baseline_pilot_plan = stage1_suite.build_profile_plan(
+                stage1_config,
+                LITERATURE_BASELINE_PILOT_PROFILE,
+                dataset_dir=str(LOCAL_DATA_DIR),
+                output_root=STAGE1_OUTPUT_ROOT,
+            )
+            literature_baselines_300m_plan = stage1_suite.build_profile_plan(
+                stage1_config,
+                LITERATURE_BASELINES_300M_PROFILE,
+                dataset_dir=str(LOCAL_DATA_DIR),
+                output_root=STAGE1_OUTPUT_ROOT,
+            )
             stage1_family_kernel_plan = stage1_suite.build_profile_plan(
                 stage1_config,
                 STAGE1_FAMILY_KERNEL_PROFILE,
@@ -1052,6 +1100,46 @@ def build_notebook() -> dict:
                 for item in [*stage1_family_scale_plan, *stage1_family_kernel_plan]
             ):
                 raise RuntimeError("Family profiles differ from STAGE1_FAMILY_METHODS.")
+            family_parameter_sweep_methods = set(
+                family_parameter_sweep_reporting.METHOD_FAMILY
+            )
+            if (
+                len(stage1_family_parameter_sweep_plan) != 144
+                or any(
+                    int(item["config"].warmup_repeats) != 1
+                    or int(item["config"].measured_repeats) != 3
+                    or len(item["config"].methods) != 1
+                    or str(item["config"].methods[0]) not in family_parameter_sweep_methods
+                    for item in stage1_family_parameter_sweep_plan
+                )
+            ):
+                raise RuntimeError(
+                    "The Matérn family parameter sweep must contain exactly 144 "
+                    "single-method cases with one warmup and three measured repeats."
+                )
+            if (
+                len(literature_baseline_pilot_plan) != 8
+                or any(
+                    int(item["config"].warmup_repeats) != 1
+                    or int(item["config"].measured_repeats) != 3
+                    or len(item["config"].methods) != 1
+                    or str(item["config"].methods[0])
+                    not in LITERATURE_END_TO_END_METHODS
+                    for item in literature_baseline_pilot_plan
+                )
+                or len(literature_baselines_300m_plan) != 2
+                or any(
+                    tuple(item["config"].methods) != LITERATURE_END_TO_END_METHODS
+                    or int(item["config"].warmup_repeats) != 1
+                    or int(item["config"].measured_repeats) != 3
+                    for item in literature_baselines_300m_plan
+                )
+            ):
+                raise RuntimeError(
+                    "Literature baseline profiles must be eight single-method 10M "
+                    "pilot cases and two 300M cases with both literature methods, "
+                    "all using one warmup and three measured repeats."
+                )
 
             stage1_campaign_rows = []
             stage1_selected_case_records = []
@@ -1320,11 +1408,48 @@ def build_notebook() -> dict:
                     print(f"[Stage 1/{item['case_id']}] {status}: {reason or ('resumed' if reused else 'executed')}")
                 return completed_items
 
+            completed_literature_baseline_pilot_items = []
+            if RUN_LITERATURE_BASELINE_PILOT:
+                completed_literature_baseline_pilot_items = run_stage1_items(
+                    literature_baseline_pilot_plan,
+                    profile_label=LITERATURE_BASELINE_PILOT_PROFILE,
+                )
+
+            completed_literature_baselines_300m_items = []
+            if RUN_LITERATURE_BASELINES_300M:
+                completed_literature_baselines_300m_items = run_stage1_items(
+                    literature_baselines_300m_plan,
+                    profile_label=LITERATURE_BASELINES_300M_PROFILE,
+                )
+
             completed_stage1_family_scale_items = []
             if RUN_STAGE1_FAMILY_SCALE:
                 completed_stage1_family_scale_items = run_stage1_items(
                     stage1_family_scale_plan,
                     profile_label=STAGE1_FAMILY_SCALE_PROFILE,
+                )
+
+            completed_stage1_family_parameter_sweep_items = []
+            STAGE1_FAMILY_PARAMETER_SWEEP_REPORT_RESULT = None
+            if RUN_STAGE1_FAMILY_PARAMETER_SWEEP:
+                completed_stage1_family_parameter_sweep_items = run_stage1_items(
+                    stage1_family_parameter_sweep_plan,
+                    profile_label=STAGE1_FAMILY_PARAMETER_SWEEP_PROFILE,
+                )
+                STAGE1_FAMILY_PARAMETER_SWEEP_REPORT_RESULT = (
+                    family_parameter_sweep_reporting.write_family_parameter_sweep_reports(
+                        stage1_family_parameter_sweep_plan,
+                        STAGE1_FAMILY_PARAMETER_SWEEP_REPORT_ROOT,
+                    )
+                )
+                print(
+                    "Wrote Matérn B/q sweep reports:",
+                    {
+                        key: str(path)
+                        for key, path in STAGE1_FAMILY_PARAMETER_SWEEP_REPORT_RESULT[
+                            "paths"
+                        ].items()
+                    },
                 )
 
             completed_stage1_family_kernel_items = []
@@ -1454,6 +1579,25 @@ def build_notebook() -> dict:
                         })
                         selected.append(row)
                 return pd.DataFrame(selected)
+
+            literature_baseline_pilot_summary = collect_stage1_summaries(
+                completed_literature_baseline_pilot_items
+            )
+            LITERATURE_BASELINE_PILOT_SUMMARY_PATH = (
+                STAGE1_OUTPUT_ROOT / "literature_baseline_pilot_10m.csv"
+            )
+            literature_baseline_pilot_summary.to_csv(
+                LITERATURE_BASELINE_PILOT_SUMMARY_PATH, index=False
+            )
+            literature_baselines_300m_summary = collect_stage1_summaries(
+                completed_literature_baselines_300m_items
+            )
+            LITERATURE_BASELINES_300M_SUMMARY_PATH = (
+                STAGE1_OUTPUT_ROOT / "literature_baselines_300m.csv"
+            )
+            literature_baselines_300m_summary.to_csv(
+                LITERATURE_BASELINES_300M_SUMMARY_PATH, index=False
+            )
 
             stage1_family_scale_all = collect_stage1_summaries(
                 completed_stage1_family_scale_items
@@ -4657,6 +4801,9 @@ def build_notebook() -> dict:
                     STAGE1_SCALE_PROFILE,
                     "robustness_at_selected_target",
                     STAGE1_FAMILY_SCALE_PROFILE,
+                    STAGE1_FAMILY_PARAMETER_SWEEP_PROFILE,
+                    LITERATURE_BASELINE_PILOT_PROFILE,
+                    LITERATURE_BASELINES_300M_PROFILE,
                     STAGE1_FAMILY_KERNEL_PROFILE,
                     "family_robustness_at_selected_target",
                 }:
@@ -5168,6 +5315,124 @@ def build_notebook() -> dict:
                     "complete": profile_complete,
                 }
                 stage1_family_profiles_complete &= profile_complete
+            stage1_family_parameter_sweep_job_rows = [
+                row for row in stage1_campaign_rows
+                if row.get("profile") == STAGE1_FAMILY_PARAMETER_SWEEP_PROFILE
+            ]
+            stage1_family_parameter_sweep_manifest = (
+                STAGE1_FAMILY_PARAMETER_SWEEP_REPORT_RESULT.get("manifest", {})
+                if STAGE1_FAMILY_PARAMETER_SWEEP_REPORT_RESULT is not None
+                else {}
+            )
+            stage1_family_parameter_sweep_paths = {
+                key: str(path)
+                for key, path in (
+                    STAGE1_FAMILY_PARAMETER_SWEEP_REPORT_RESULT.get("paths", {}).items()
+                    if STAGE1_FAMILY_PARAMETER_SWEEP_REPORT_RESULT is not None
+                    else []
+                )
+            }
+            stage1_family_parameter_sweep_complete = bool(
+                not RUN_STAGE1_FAMILY_PARAMETER_SWEEP
+                or (
+                    len(stage1_family_parameter_sweep_plan) == 144
+                    and len(completed_stage1_family_parameter_sweep_items)
+                    == len(stage1_family_parameter_sweep_plan)
+                    and len(stage1_family_parameter_sweep_job_rows)
+                    == len(stage1_family_parameter_sweep_plan)
+                    and all(
+                        formal_campaign_job_passed(row)
+                        for row in stage1_family_parameter_sweep_job_rows
+                    )
+                    and stage1_family_parameter_sweep_manifest.get("candidate_count")
+                    == len(stage1_family_parameter_sweep_plan)
+                    and Path(
+                        stage1_family_parameter_sweep_paths.get("manifest_json", "")
+                    ).is_file()
+                )
+            )
+            final_manifest["stage1_family_parameter_sweep"] = {
+                "enabled": bool(RUN_STAGE1_FAMILY_PARAMETER_SWEEP),
+                "profile": STAGE1_FAMILY_PARAMETER_SWEEP_PROFILE,
+                "planned_cases": len(stage1_family_parameter_sweep_plan),
+                "completed_cases": len(completed_stage1_family_parameter_sweep_items),
+                "candidate_count": stage1_family_parameter_sweep_manifest.get(
+                    "candidate_count"
+                ),
+                "selection_eligible_count": stage1_family_parameter_sweep_manifest.get(
+                    "selection_eligible_count"
+                ),
+                "winner_count": stage1_family_parameter_sweep_manifest.get("winner_count"),
+                "report_paths": stage1_family_parameter_sweep_paths,
+                "complete": stage1_family_parameter_sweep_complete,
+            }
+            stage1_family_profiles_complete &= stage1_family_parameter_sweep_complete
+            literature_baseline_pilot_job_rows = [
+                row for row in stage1_campaign_rows
+                if row.get("profile") == LITERATURE_BASELINE_PILOT_PROFILE
+            ]
+            literature_baselines_300m_job_rows = [
+                row for row in stage1_campaign_rows
+                if row.get("profile") == LITERATURE_BASELINES_300M_PROFILE
+            ]
+            literature_baseline_pilot_complete = bool(
+                not RUN_LITERATURE_BASELINE_PILOT
+                or (
+                    len(literature_baseline_pilot_plan) == 8
+                    and len(completed_literature_baseline_pilot_items)
+                    == len(literature_baseline_pilot_plan)
+                    and len(literature_baseline_pilot_summary)
+                    == len(literature_baseline_pilot_plan)
+                    and len(literature_baseline_pilot_job_rows)
+                    == len(literature_baseline_pilot_plan)
+                    and all(
+                        formal_campaign_job_passed(row)
+                        for row in literature_baseline_pilot_job_rows
+                    )
+                    and LITERATURE_BASELINE_PILOT_SUMMARY_PATH.is_file()
+                )
+            )
+            literature_baselines_300m_complete = bool(
+                not RUN_LITERATURE_BASELINES_300M
+                or (
+                    len(literature_baselines_300m_plan) == 2
+                    and len(completed_literature_baselines_300m_items)
+                    == len(literature_baselines_300m_plan)
+                    and len(literature_baselines_300m_summary)
+                    == (
+                        len(literature_baselines_300m_plan)
+                        * len(LITERATURE_END_TO_END_METHODS)
+                    )
+                    and len(literature_baselines_300m_job_rows)
+                    == len(literature_baselines_300m_plan)
+                    and all(
+                        formal_campaign_job_passed(row)
+                        for row in literature_baselines_300m_job_rows
+                    )
+                    and LITERATURE_BASELINES_300M_SUMMARY_PATH.is_file()
+                )
+            )
+            final_manifest["literature_baselines"] = {
+                "pilot": {
+                    "enabled": bool(RUN_LITERATURE_BASELINE_PILOT),
+                    "profile": LITERATURE_BASELINE_PILOT_PROFILE,
+                    "planned_cases": len(literature_baseline_pilot_plan),
+                    "completed_cases": len(completed_literature_baseline_pilot_items),
+                    "summary_rows": len(literature_baseline_pilot_summary),
+                    "summary_path": str(LITERATURE_BASELINE_PILOT_SUMMARY_PATH),
+                    "complete": literature_baseline_pilot_complete,
+                },
+                "final_300m": {
+                    "enabled": bool(RUN_LITERATURE_BASELINES_300M),
+                    "profile": LITERATURE_BASELINES_300M_PROFILE,
+                    "planned_cases": len(literature_baselines_300m_plan),
+                    "completed_cases": len(completed_literature_baselines_300m_items),
+                    "summary_rows": len(literature_baselines_300m_summary),
+                    "summary_path": str(LITERATURE_BASELINES_300M_SUMMARY_PATH),
+                    "methods": list(LITERATURE_END_TO_END_METHODS),
+                    "complete": literature_baselines_300m_complete,
+                },
+            }
             stage2_formal_complete = bool(
                 not RUN_STAGE2_FIXED_AB_SOLVERS
                 or (
@@ -5199,6 +5464,7 @@ def build_notebook() -> dict:
             final_manifest["two_stage_report_complete"] = two_stage_report_complete
             workload_requested = bool(
                 RUN_STAGE1_END_TO_END_KRR or RUN_STAGE2_FIXED_AB_SOLVERS
+                or RUN_LITERATURE_BASELINE_PILOT or RUN_LITERATURE_BASELINES_300M
                 or RUN_LEGACY_GROUPS or selected_profiles or extra_suites
                 or RUN_PREDICTION_AUDIT
             )
@@ -5209,6 +5475,8 @@ def build_notebook() -> dict:
             run_verified = bool(
                 workload_requested and stage1_scale_complete
                 and stage1_robustness_complete and stage1_family_profiles_complete
+                and literature_baseline_pilot_complete
+                and literature_baselines_300m_complete
                 and stage2_formal_complete
                 and two_stage_report_complete
                 and legacy_complete and controlled_complete

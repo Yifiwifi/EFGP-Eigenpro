@@ -264,6 +264,261 @@
         "parameter_selection_policy": "historical_two_family_transfer_no_current_scan"
       }
     },
+    "matern_family_parameter_sweep_10m_300m": {
+      "description": "Predeclared Matérn shortlist for the inverse and active-eigenpair families on Synthetic and Winnebago at 10M, 30M, 100M, and 300M. Every expanded case executes exactly one family method with one warmup and three measured repeats; the active-eigenpair B axis includes the full-grid endpoint.",
+      "source_profile": "scale_10m_300m",
+      "overrides": {
+        "kernel_family": "matern",
+        "warmup_repeats": 1,
+        "measured_repeats": 3,
+        "inverse_max_size": 16384,
+        "allow_frozen_topk_capacity_adaptation": false,
+        "parameter_selection_policy": "predeclared_matern_two_family_parameter_sweep"
+      },
+      "family_parameter_sweep": {
+        "dataset_families": [
+          "Synthetic",
+          "Winnebago"
+        ],
+        "assert_source_winners_in_candidates": true,
+        "parameter_source": "end_to_end_suite.json::matern_family_parameter_sweep_10m_300m; shortlist declared before timing; old timings excluded",
+        "topk_to_expected_box_size": {
+          "512": 625,
+          "728": 961,
+          "1024": 1369,
+          "2048": 2601,
+          "4096": 5329,
+          "8192": 10609,
+          "12288": 15625,
+          "16384": 21025,
+          "20480": 25921,
+          "25720": 32761,
+          "35721": 35721
+        },
+        "size_groups": [
+          {
+            "n_train": [
+              10000000,
+              30000000
+            ],
+            "inverse_topk": [
+              512,
+              728,
+              1024,
+              2048,
+              4096
+            ],
+            "active_eig": [
+              {
+                "topk": 2048,
+                "ranks": [192]
+              },
+              {
+                "topk": 4096,
+                "ranks": [192, 256]
+              },
+              {
+                "topk": 8192,
+                "ranks": [192, 256, 320]
+              },
+              {
+                "topk": 16384,
+                "ranks": [192, 256, 320]
+              },
+              {
+                "topk": 35721,
+                "ranks": [128, 192, 256, 320]
+              }
+            ]
+          },
+          {
+            "n_train": [
+              100000000,
+              300000000
+            ],
+            "inverse_topk": [
+              4096,
+              8192,
+              12288
+            ],
+            "active_eig": [
+              {
+                "topk": 20480,
+                "ranks": [192, 256, 320, 384, 448]
+              },
+              {
+                "topk": 25720,
+                "ranks": [192, 256, 320, 384, 448]
+              },
+              {
+                "topk": 35721,
+                "ranks": [192, 256, 320, 384, 448]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "literature_baseline_pilot_10m": {
+      "description": "Execution and quality pilot for the two additional Section 4.4 literature baselines. Each method/rank pair runs one warmup and three measured repeats; all finite time/RMSE outcomes are retained.",
+      "overrides": {
+        "kernel_family": "matern",
+        "warmup_repeats": 1,
+        "measured_repeats": 3,
+        "accuracy_max_rmse": null,
+        "accuracy_min_r2": null,
+        "literature_baseline_precision": "fp64",
+        "parameter_selection_policy": "predeclared_literature_baseline_execution_pilot"
+      },
+      "cases": [
+        {
+          "id": "synthetic_matern_n10m_native_falkon_m256",
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_ntrain10000000",
+          "n_train": 10000000,
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d",
+          "methods": ["native-falkon-krr"],
+          "accuracy_reference_method": "native-falkon-krr",
+          "native_falkon_nystrom_centers": 256,
+          "native_falkon_maxiter": 30,
+          "native_falkon_tolerance": 1e-5,
+          "parameter_source": "predeclared 10M native-FALKON M=256 execution pilot"
+        },
+        {
+          "id": "synthetic_matern_n10m_native_falkon_m512",
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_ntrain10000000",
+          "n_train": 10000000,
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d",
+          "methods": ["native-falkon-krr"],
+          "accuracy_reference_method": "native-falkon-krr",
+          "native_falkon_nystrom_centers": 512,
+          "native_falkon_maxiter": 30,
+          "native_falkon_tolerance": 1e-5,
+          "parameter_source": "predeclared 10M native-FALKON M=512 execution pilot"
+        },
+        {
+          "id": "synthetic_matern_n10m_rff_d256",
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_ntrain10000000",
+          "n_train": 10000000,
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d",
+          "methods": ["matern-rff-ridge"],
+          "accuracy_reference_method": "matern-rff-ridge",
+          "rff_num_features": 256,
+          "parameter_source": "predeclared 10M Matérn-RFF D=256 execution pilot"
+        },
+        {
+          "id": "synthetic_matern_n10m_rff_d512",
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_ntrain10000000",
+          "n_train": 10000000,
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d",
+          "methods": ["matern-rff-ridge"],
+          "accuracy_reference_method": "matern-rff-ridge",
+          "rff_num_features": 512,
+          "parameter_source": "predeclared 10M Matérn-RFF D=512 execution pilot"
+        },
+        {
+          "id": "winnebago_matern_n10m_native_falkon_m256",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "n_train": 10000000,
+          "methods": ["native-falkon-krr"],
+          "accuracy_reference_method": "native-falkon-krr",
+          "native_falkon_nystrom_centers": 256,
+          "native_falkon_maxiter": 30,
+          "native_falkon_tolerance": 1e-5,
+          "parameter_source": "predeclared 10M native-FALKON M=256 execution pilot"
+        },
+        {
+          "id": "winnebago_matern_n10m_native_falkon_m512",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "n_train": 10000000,
+          "methods": ["native-falkon-krr"],
+          "accuracy_reference_method": "native-falkon-krr",
+          "native_falkon_nystrom_centers": 512,
+          "native_falkon_maxiter": 30,
+          "native_falkon_tolerance": 1e-5,
+          "parameter_source": "predeclared 10M native-FALKON M=512 execution pilot"
+        },
+        {
+          "id": "winnebago_matern_n10m_rff_d256",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "n_train": 10000000,
+          "methods": ["matern-rff-ridge"],
+          "accuracy_reference_method": "matern-rff-ridge",
+          "rff_num_features": 256,
+          "parameter_source": "predeclared 10M Matérn-RFF D=256 execution pilot"
+        },
+        {
+          "id": "winnebago_matern_n10m_rff_d512",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain10000000",
+          "n_train": 10000000,
+          "methods": ["matern-rff-ridge"],
+          "accuracy_reference_method": "matern-rff-ridge",
+          "rff_num_features": 512,
+          "parameter_source": "predeclared 10M Matérn-RFF D=512 execution pilot"
+        }
+      ]
+    },
+    "literature_baselines_300m": {
+      "description": "Section 4.4 additional complete-pipeline comparison. Memory-safe M=512 native FALKON and D=512 Matérn RFF configurations are frozen before 300M timing; one warmup and three measured repeats are reported by median.",
+      "overrides": {
+        "kernel_family": "matern",
+        "methods": ["native-falkon-krr", "matern-rff-ridge"],
+        "warmup_repeats": 1,
+        "measured_repeats": 3,
+        "accuracy_reference_method": "native-falkon-krr",
+        "accuracy_max_rmse": null,
+        "accuracy_min_r2": null,
+        "native_falkon_nystrom_centers": 512,
+        "native_falkon_maxiter": 30,
+        "native_falkon_tolerance": 1e-5,
+        "rff_num_features": 512,
+        "literature_baseline_precision": "fp64",
+        "parameter_selection_policy": "predeclared_memory_safe_literature_baselines_300m",
+        "parameter_source": "M=512 and D=512 frozen before 300M timing; 10M profile is an execution/quality pilot, not a post-hoc 300M selector"
+      },
+      "cases": [
+        {
+          "id": "synthetic_matern_n300m_literature_baselines",
+          "dataset_family": "Synthetic",
+          "dataset_stem": "synthetic_true_func_2d_ntrain300000000",
+          "n_train": 300000000,
+          "expected_dataset_noise_std": 0.3,
+          "expected_dataset_seed_train": 20260421,
+          "expected_dataset_seed_test": 1,
+          "expected_dataset_generation_chunk_rows": 5000000,
+          "expected_dataset_target_function": "true_func_2d"
+        },
+        {
+          "id": "winnebago_matern_n300m_literature_baselines",
+          "dataset_family": "Winnebago",
+          "dataset_stem": "USGS_LPC_IL_Winnebago_2018_ground_elevation_regression_ntrain300000000",
+          "n_train": 300000000
+        }
+      ]
+    },
     "family_kernel_at_30m": {
       "description": "SE-versus-Matern family comparison at N=30M. Each kernel/data case transfers the family-optimal inverse and eigenpair settings from the primary archived configuration sweep; current timings are rerun with the family protocol.",
       "overrides": {

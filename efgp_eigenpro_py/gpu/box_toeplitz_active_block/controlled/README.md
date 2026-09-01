@@ -11,7 +11,8 @@ model setup and solve. The primary total is
 `train_total_seconds = setup_seconds + solving_phase_seconds`; prediction is
 reported separately. This is the method-owned algorithmic training total, not
 process wall clock: common dataset I/O, backend creation, and host-to-device
-staging are disclosed exclusions. For score-selected EFGP methods, the solving
+staging shared outside a method are disclosed exclusions; method-owned streamed
+transfers are included. For score-selected EFGP methods, the solving
 phase includes score selection, preconditioner construction, and CG/PCG solve.
 Every successful matched-repeat pair retains
 its raw setup, solving, and training-total speedups, including methods that trade
@@ -68,6 +69,42 @@ the recorded rule is
 this authorization and retain their strict historical box-size provenance
 check. Canonical Stage-1 output reports configured/effective top-k, effective
 box size, selection rule, and the capacity-adaptation flag.
+
+The extension profile `matern_family_parameter_sweep_10m_300m` is a separate,
+predeclared parameter study. It expands to 144 single-method cases covering
+Synthetic and Winnebago at 10M, 30M, 100M, and 300M. The inverse branch varies
+the asserted active box, while the active-eigenpair branch varies both the box
+and `q`, including the full-grid endpoint. Every point uses one warm-up and
+three measured repeats. The companion reporter writes `all_candidates` and
+`selected_winners` CSV/JSON artifacts; a winner must have exactly three
+successful repeats and minimizes median training total. RMSE is retained but
+is never used to filter or rank sweep candidates.
+
+Section 4.4 adds two independently constructed, row-streamed literature
+baselines: `native-falkon-krr`, an explicitly labelled implementation of the
+published two-Cholesky FALKON preconditioner, and `matern-rff-ridge`, a Matérn
+random-Fourier-feature ridge model. Both use the repository's absolute ridge
+convention. The FALKON conversion is
+`penalty = absolute_ridge / n_train`; RFF accumulates only
+`Phi.T @ Phi` and `Phi.T @ y`. `literature_baseline_pilot_10m` checks the
+M/D configurations, and `literature_baselines_300m` freezes the memory-safe
+M=512 and D=512 rows before the 300M timing. Both profiles use one warm-up and
+three measured repeats and report prediction time separately from training.
+
+```bash
+python -m efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end_suite \
+  --suite-config efgp_eigenpro_py/gpu/box_toeplitz_active_block/controlled/end_to_end_suite.json \
+  --profile matern_family_parameter_sweep_10m_300m \
+  --dataset-dir /content/efgp_data \
+  --output-root /content/drive/MyDrive/EFGP_Colab/matern_extension
+
+python -m efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.family_parameter_sweep_reporting \
+  --suite-config efgp_eigenpro_py/gpu/box_toeplitz_active_block/controlled/end_to_end_suite.json \
+  --profile matern_family_parameter_sweep_10m_300m \
+  --dataset-dir /content/efgp_data \
+  --suite-output-root /content/drive/MyDrive/EFGP_Colab/matern_extension \
+  --output-dir /content/drive/MyDrive/EFGP_Colab/matern_extension/reports
+```
 
 ```bash
 python -m efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end_suite \

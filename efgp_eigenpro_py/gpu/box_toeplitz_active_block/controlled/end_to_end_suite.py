@@ -63,6 +63,10 @@ BUDGET_ADAPTIVE_PARAMETER_SOURCE = (
     "robustness box-budget axis; score_tau selection under the declared cap, "
     "separate from frozen historical-transfer rows"
 )
+FAMILY_SWEEP_METHODS = {
+    "inverse": "ours-binned-inverse",
+    "active_eig": "ours-binned-active-eig",
+}
 
 
 class TargetSelectionError(RuntimeError):
@@ -92,6 +96,263 @@ def _normalize_config(payload: dict[str, Any]) -> EndToEndConfig:
     if unknown:
         raise ValueError(f"unknown EndToEndConfig fields: {unknown}")
     return EndToEndConfig(**cooked)
+
+
+def _positive_int(value: Any, *, label: str) -> int:
+    try:
+        cooked = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a positive integer, got {value!r}.") from exc
+    if cooked <= 0 or isinstance(value, float) and not value.is_integer():
+        raise ValueError(f"{label} must be a positive integer, got {value!r}.")
+    return cooked
+
+
+def _expand_family_parameter_sweep(
+    profile_payload: dict[str, Any],
+    *,
+    profile: str,
+) -> list[dict[str, Any]]:
+    """Expand a compact, predeclared two-family Matérn parameter shortlist."""
+    raw_sweep = profile_payload.get("family_parameter_sweep")
+    source_cases = profile_payload.get("cases")
+    if raw_sweep is None:
+        return list(source_cases or ())
+    if not isinstance(raw_sweep, dict):
+        raise ValueError(
+            f"profile {profile!r} family_parameter_sweep must be an object."
+        )
+    if not isinstance(source_cases, list) or not source_cases:
+        raise ValueError(
+            f"profile {profile!r} family_parameter_sweep requires source cases."
+        )
+
+    raw_mapping = raw_sweep.get("topk_to_expected_box_size")
+    if not isinstance(raw_mapping, dict) or not raw_mapping:
+        raise ValueError(
+            f"profile {profile!r} family_parameter_sweep requires a nonempty "
+            "topk_to_expected_box_size mapping."
+        )
+    topk_to_box: dict[int, int] = {}
+    for raw_topk, raw_box_size in raw_mapping.items():
+        topk = _positive_int(raw_topk, label="family sweep topk")
+        box_size = _positive_int(
+            raw_box_size,
+            label=f"family sweep expected box size for topk={topk}",
+        )
+        if topk in topk_to_box:
+            raise ValueError(
+                f"profile {profile!r} declares topk={topk} more than once."
+            )
+        if box_size < topk:
+            raise ValueError(
+                f"profile {profile!r} maps topk={topk} to smaller |B|={box_size}."
+            )
+        topk_to_box[topk] = box_size
+
+    raw_groups = raw_sweep.get("size_groups")
+    if not isinstance(raw_groups, list) or not raw_groups:
+        raise ValueError(
+            f"profile {profile!r} family_parameter_sweep requires size_groups."
+        )
+    candidates_by_n: dict[int, dict[str, tuple[Any, ...]]] = {}
+    for group_index, raw_group in enumerate(raw_groups):
+        if not isinstance(raw_group, dict):
+            raise ValueError(
+                f"profile {profile!r} size_groups[{group_index}] must be an object."
+            )
+        n_values = tuple(
+            _positive_int(value, label=f"size_groups[{group_index}] n_train")
+            for value in raw_group.get("n_train", ())
+        )
+        if not n_values:
+            raise ValueError(
+                f"profile {profile!r} size_groups[{group_index}] has no n_train."
+            )
+        inverse_topk = tuple(
+            _positive_int(value, label=f"size_groups[{group_index}] inverse topk")
+            for value in raw_group.get("inverse_topk", ())
+        )
+        if not inverse_topk or len(set(inverse_topk)) != len(inverse_topk):
+            raise ValueError(
+                f"profile {profile!r} size_groups[{group_index}] inverse_topk "
+                "must be nonempty and unique."
+            )
+        missing_inverse = sorted(set(inverse_topk) - set(topk_to_box))
+        if missing_inverse:
+            raise ValueError(
+                f"profile {profile!r} has inverse top-k values without |B| "
+                f"assertions: {missing_inverse}."
+            )
+
+        raw_active = raw_group.get("active_eig")
+        if not isinstance(raw_active, list) or not raw_active:
+            raise ValueError(
+                f"profile {profile!r} size_groups[{group_index}] active_eig "
+                "must be a nonempty list."
+            )
+        active_candidates: list[tuple[int, int]] = []
+        for active_index, raw_candidate in enumerate(raw_active):
+            if not isinstance(raw_candidate, dict):
+                raise ValueError(
+                    f"profile {profile!r} active_eig candidate {active_index} "
+                    "must be an object."
+                )
+            topk = _positive_int(
+                raw_candidate.get("topk"),
+                label=f"size_groups[{group_index}] active_eig topk",
+            )
+            if topk not in topk_to_box:
+                raise ValueError(
+                    f"profile {profile!r} has active-eig topk={topk} without "
+                    "a |B| assertion."
+                )
+            ranks = tuple(
+                _positive_int(
+                    value,
+                    label=(
+                        f"size_groups[{group_index}] active_eig topk={topk} rank"
+                    ),
+                )
+                for value in raw_candidate.get("ranks", ())
+            )
+            if not ranks or len(set(ranks)) != len(ranks):
+                raise ValueError(
+                    f"profile {profile!r} active_eig topk={topk} ranks must "
+                    "be nonempty and unique."
+                )
+            if any(rank > topk_to_box[topk] for rank in ranks):
+                raise ValueError(
+                    f"profile {profile!r} active_eig topk={topk} rank exceeds "
+                    f"the asserted |B|={topk_to_box[topk]}."
+                )
+            active_candidates.extend((topk, rank) for rank in ranks)
+        if len(set(active_candidates)) != len(active_candidates):
+            raise ValueError(
+                f"profile {profile!r} size_groups[{group_index}] repeats an "
+                "active-eig (topk, rank) candidate."
+            )
+
+        group_candidates = {
+            "inverse": inverse_topk,
+            "active_eig": tuple(active_candidates),
+        }
+        for n_train in n_values:
+            if n_train in candidates_by_n:
+                raise ValueError(
+                    f"profile {profile!r} assigns n_train={n_train} to multiple "
+                    "family sweep size groups."
+                )
+            candidates_by_n[n_train] = group_candidates
+
+    expected_families = tuple(
+        str(value) for value in raw_sweep.get("dataset_families", ())
+    )
+    if not expected_families or len(set(expected_families)) != len(expected_families):
+        raise ValueError(
+            f"profile {profile!r} dataset_families must be nonempty and unique."
+        )
+    source_keys = {
+        (str(case.get("dataset_family")), int(case.get("n_train", 0)))
+        for case in source_cases
+    }
+    expected_keys = {
+        (family, n_train)
+        for family in expected_families
+        for n_train in candidates_by_n
+    }
+    if source_keys != expected_keys:
+        raise ValueError(
+            f"profile {profile!r} source coverage does not match the declared "
+            f"dataset/size grid; missing={sorted(expected_keys - source_keys)}, "
+            f"extra={sorted(source_keys - expected_keys)}."
+        )
+
+    if bool(raw_sweep.get("assert_source_winners_in_candidates", False)):
+        for case in source_cases:
+            n_train = int(case["n_train"])
+            candidates = candidates_by_n[n_train]
+            inverse_winner = (
+                int(case["inverse_active_topk"]),
+                int(case["inverse_expected_active_box_size"]),
+            )
+            inverse_candidates = {
+                (topk, topk_to_box[topk]) for topk in candidates["inverse"]
+            }
+            if inverse_winner not in inverse_candidates:
+                raise ValueError(
+                    f"profile {profile!r} omits source inverse winner "
+                    f"{inverse_winner} for case {case['id']!r}."
+                )
+            active_winner = (
+                int(case["active_eig_topk"]),
+                int(case["active_eig_expected_active_box_size"]),
+                int(case["active_eig_rank"]),
+            )
+            active_candidates = {
+                (topk, topk_to_box[topk], rank)
+                for topk, rank in candidates["active_eig"]
+            }
+            if active_winner not in active_candidates:
+                raise ValueError(
+                    f"profile {profile!r} omits source active-eig winner "
+                    f"{active_winner} for case {case['id']!r}."
+                )
+
+    parameter_source = str(
+        raw_sweep.get(
+            "parameter_source",
+            f"{profile} predeclared two-family parameter shortlist",
+        )
+    )
+    expanded: list[dict[str, Any]] = []
+    for source_case in source_cases:
+        source_id = str(source_case["id"])
+        n_train = int(source_case["n_train"])
+        candidates = candidates_by_n[n_train]
+        for topk in candidates["inverse"]:
+            box_size = topk_to_box[topk]
+            expanded.append(
+                {
+                    **source_case,
+                    "id": f"{source_id}__inverse_k{topk}_b{box_size}",
+                    "methods": [FAMILY_SWEEP_METHODS["inverse"]],
+                    "active_topk": topk,
+                    "expected_active_box_size": box_size,
+                    "inverse_active_topk": topk,
+                    "inverse_expected_active_box_size": box_size,
+                    "active_eig_topk": None,
+                    "active_eig_expected_active_box_size": None,
+                    "active_eig_rank": None,
+                    "parameter_source": (
+                        f"{parameter_source}; asserted topk={topk}->|B|={box_size}"
+                    ),
+                }
+            )
+        for topk, rank in candidates["active_eig"]:
+            box_size = topk_to_box[topk]
+            expanded.append(
+                {
+                    **source_case,
+                    "id": (
+                        f"{source_id}__active_eig_k{topk}_b{box_size}_q{rank}"
+                    ),
+                    "methods": [FAMILY_SWEEP_METHODS["active_eig"]],
+                    "rank": rank,
+                    "active_topk": topk,
+                    "expected_active_box_size": box_size,
+                    "inverse_active_topk": None,
+                    "inverse_expected_active_box_size": None,
+                    "active_eig_topk": topk,
+                    "active_eig_expected_active_box_size": box_size,
+                    "active_eig_rank": rank,
+                    "parameter_source": (
+                        f"{parameter_source}; asserted topk={topk}->|B|={box_size}; "
+                        f"q={rank}"
+                    ),
+                }
+            )
+    return expanded
 
 
 def build_profile_plan(
@@ -128,7 +389,9 @@ def build_profile_plan(
     base = dict(suite["base"])
     base.update(profile_payload.get("overrides", {}))
     plan: list[dict[str, Any]] = []
-    for case in profile_payload["cases"]:
+    is_family_sweep = "family_parameter_sweep" in profile_payload
+    cases = _expand_family_parameter_sweep(profile_payload, profile=str(profile))
+    for case in cases:
         case_id = str(case["id"])
         merged = dict(base)
         merged.update(
@@ -141,6 +404,11 @@ def build_profile_plan(
         merged["dataset_dir"] = str(dataset_dir)
         merged["output_dir"] = str(Path(output_root) / str(profile) / case_id)
         config = _normalize_config(merged)
+        if is_family_sweep and str(config.kernel_family).lower() != "matern":
+            raise ValueError(
+                f"profile {profile!r} family parameter sweep only supports Matérn "
+                f"cases, but {case_id!r} uses {config.kernel_family!r}."
+            )
         plan.append(
             {
                 "profile": str(profile),

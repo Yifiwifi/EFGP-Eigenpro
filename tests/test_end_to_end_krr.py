@@ -4,6 +4,7 @@ import math
 import json
 from dataclasses import asdict
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -12,11 +13,13 @@ from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end import
     ALL_END_TO_END_METHODS,
     END_TO_END_METHODS,
     FAMILY_END_TO_END_METHODS,
+    LITERATURE_END_TO_END_METHODS,
     PROTOCOL_FAMILY,
     STAGE2_SYSTEM_CONFIG_FIELDS,
     TIMING_SCOPE,
     EndToEndConfig,
     _run_efgp_method,
+    _run_literature_method,
     _validate_config,
     choose_rpcholesky_landmarks,
     choose_uniform_landmarks,
@@ -58,6 +61,11 @@ def test_protocol_methods_are_complete_krr_pipelines() -> None:
         "ours-binned-active-eig",
     }
     assert set(END_TO_END_METHODS).issubset(ALL_END_TO_END_METHODS)
+    assert set(LITERATURE_END_TO_END_METHODS) == {
+        "native-falkon-krr",
+        "matern-rff-ridge",
+    }
+    assert set(LITERATURE_END_TO_END_METHODS).issubset(ALL_END_TO_END_METHODS)
 
 
 def test_explicit_family_route_config_is_validated() -> None:
@@ -72,6 +80,122 @@ def test_explicit_family_route_config_is_validated() -> None:
     _validate_config(cfg)
     with pytest.raises(ValueError, match="inverse_active_topk"):
         _validate_config(EndToEndConfig(inverse_active_topk=0))
+
+
+def test_literature_baseline_config_is_validated() -> None:
+    cfg = EndToEndConfig(
+        methods=LITERATURE_END_TO_END_METHODS,
+        native_falkon_nystrom_centers=512,
+        native_falkon_maxiter=30,
+        native_falkon_tolerance=1e-5,
+        rff_num_features=512,
+    )
+    _validate_config(cfg)
+    with pytest.raises(ValueError, match="rff_num_features"):
+        _validate_config(EndToEndConfig(rff_num_features=0))
+    with pytest.raises(ValueError, match="matern-rff-ridge requires"):
+        _validate_config(
+            EndToEndConfig(
+                methods=("matern-rff-ridge",),
+                kernel_family="se",
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("method", "adapter_name", "adapter_result", "expected_setup"),
+    [
+        (
+            "native-falkon-krr",
+            "run_native_falkon_krr",
+            {
+                "status": "converged",
+                "pipeline_family": "literature_data_space_krr",
+                "setup_seconds": 1.0,
+                "solver_build_seconds": 2.0,
+                "iterative_solve_seconds": 3.0,
+                "train_total_seconds": 6.0,
+                "prediction_seconds": 0.5,
+                "test_rmse": 0.2,
+                "test_mae": 0.1,
+                "test_r2": 0.8,
+                "iterations": 7,
+                "citations": ["rudi2017falkon"],
+                "timing_scope": "test",
+                "backend": "numpy",
+                "nystrom_centers": 11,
+                "falkon_penalty": 0.01,
+                "relative_residual": 1e-6,
+                "converged": True,
+                "implementation": "native_falkon_algorithm",
+                "official_falkon_package": False,
+            },
+            1.0,
+        ),
+        (
+            "matern-rff-ridge",
+            "run_matern_rff_ridge",
+            {
+                "status": "ok",
+                "pipeline_family": "literature_random_features_krr",
+                "setup_seconds": 1.0,
+                "feature_accumulation_seconds": 2.0,
+                "solve_seconds": 3.0,
+                "train_total_seconds": 6.0,
+                "prediction_seconds": 0.5,
+                "test_rmse": 0.2,
+                "test_mae": 0.1,
+                "test_r2": 0.8,
+                "citations": ["rahimi2007random"],
+                "timing_scope": "test",
+                "backend": "numpy",
+                "num_features": 13,
+                "implementation": "native_streaming_rff",
+            },
+            3.0,
+        ),
+    ],
+)
+def test_literature_adapter_maps_to_pipeline_schema(
+    monkeypatch,
+    method,
+    adapter_name,
+    adapter_result,
+    expected_setup,
+) -> None:
+    from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled import (
+        literature_baselines,
+    )
+
+    monkeypatch.setattr(
+        "efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end.build_gpu_backend_bundle",
+        lambda config: SimpleNamespace(xp=np),
+    )
+    monkeypatch.setattr(
+        literature_baselines,
+        adapter_name,
+        lambda *args, **kwargs: dict(adapter_result),
+    )
+    dataset = {
+        "x": np.zeros((5, 2)),
+        "y": np.zeros(5),
+        "x_test": np.zeros((3, 2)),
+        "y_test": np.zeros(3),
+    }
+    row = _run_literature_method(
+        method,
+        EndToEndConfig(methods=(method,)),
+        dataset,
+        repeat_idx=2,
+        is_warmup=False,
+    )
+    assert row["status"] == adapter_result["status"]
+    assert row["setup_seconds"] == expected_setup
+    expected_solving = 5.0 if method == "native-falkon-krr" else 3.0
+    assert row["solving_phase_seconds"] == expected_solving
+    assert row["train_total_seconds"] == 6.0
+    assert row["test_rmse"] == 0.2
+    assert row["test_r2"] == 0.8
 
 
 def _synthetic_generation_dataset(noise_std: float) -> dict[str, object]:
@@ -833,6 +957,199 @@ def test_shipped_family_profiles_separate_inverse_and_eigenpair_branches(
         ("Winnebago", "matern"),
     }
     assert all(item["config"].methods == FAMILY_END_TO_END_METHODS for item in kernel)
+
+
+def test_matern_family_parameter_sweep_plan_size_coverage_and_repeats(
+    tmp_path: Path,
+) -> None:
+    suite = load_suite_config()
+    plan = build_profile_plan(
+        suite,
+        "matern_family_parameter_sweep_10m_300m",
+        dataset_dir=str(tmp_path / "data"),
+        output_root=tmp_path / "out",
+    )
+
+    assert len(plan) == 144
+    assert len({item["case_id"] for item in plan}) == len(plan)
+    assert {
+        (item["dataset_family"], item["config"].n_train) for item in plan
+    } == {
+        (family, n_train)
+        for family in ("Synthetic", "Winnebago")
+        for n_train in (10_000_000, 30_000_000, 100_000_000, 300_000_000)
+    }
+    method_counts = {
+        method: sum(item["config"].methods == (method,) for item in plan)
+        for method in ("ours-binned-inverse", "ours-binned-active-eig")
+    }
+    assert method_counts == {
+        "ours-binned-inverse": 32,
+        "ours-binned-active-eig": 112,
+    }
+    assert all(len(item["config"].methods) == 1 for item in plan)
+    assert all(item["config"].kernel_family == "matern" for item in plan)
+    assert all(item["config"].warmup_repeats == 1 for item in plan)
+    assert all(item["config"].measured_repeats == 3 for item in plan)
+    assert all(
+        item["config"].allow_frozen_topk_capacity_adaptation is False
+        for item in plan
+    )
+    assert all(
+        item["config"].parameter_selection_policy
+        == "predeclared_matern_two_family_parameter_sweep"
+        for item in plan
+    )
+
+
+def test_literature_baseline_profiles_are_executable_and_three_repeat(
+    tmp_path: Path,
+) -> None:
+    suite = load_suite_config()
+    pilot = build_profile_plan(
+        suite,
+        "literature_baseline_pilot_10m",
+        dataset_dir=str(tmp_path / "data"),
+        output_root=tmp_path / "out",
+    )
+    final = build_profile_plan(
+        suite,
+        "literature_baselines_300m",
+        dataset_dir=str(tmp_path / "data"),
+        output_root=tmp_path / "out",
+    )
+    assert len(pilot) == 8
+    assert len(final) == 2
+    assert {item["dataset_family"] for item in pilot} == {
+        "Synthetic",
+        "Winnebago",
+    }
+    assert all(item["config"].n_train == 10_000_000 for item in pilot)
+    assert all(len(item["config"].methods) == 1 for item in pilot)
+    assert all(item["config"].warmup_repeats == 1 for item in pilot)
+    assert all(item["config"].measured_repeats == 3 for item in pilot)
+    assert all(item["config"].n_train == 300_000_000 for item in final)
+    assert all(
+        item["config"].methods == LITERATURE_END_TO_END_METHODS for item in final
+    )
+    assert all(item["config"].warmup_repeats == 1 for item in final)
+    assert all(item["config"].measured_repeats == 3 for item in final)
+    assert all(item["config"].native_falkon_nystrom_centers == 512 for item in final)
+    assert all(item["config"].rff_num_features == 512 for item in final)
+
+
+def test_matern_family_parameter_sweep_candidates_and_box_assertions(
+    tmp_path: Path,
+) -> None:
+    suite = load_suite_config()
+    profile = suite["profiles"]["matern_family_parameter_sweep_10m_300m"]
+    sweep = profile["family_parameter_sweep"]
+    topk_to_box = {
+        int(topk): int(box_size)
+        for topk, box_size in sweep["topk_to_expected_box_size"].items()
+    }
+    assert topk_to_box == {
+        512: 625,
+        728: 961,
+        1024: 1369,
+        2048: 2601,
+        4096: 5329,
+        8192: 10609,
+        12288: 15625,
+        16384: 21025,
+        20480: 25921,
+        25720: 32761,
+        35721: 35721,
+    }
+    plan = build_profile_plan(
+        suite,
+        "matern_family_parameter_sweep_10m_300m",
+        dataset_dir=str(tmp_path / "data"),
+        output_root=tmp_path / "out",
+    )
+
+    observed: dict[tuple[str, int, str], set[tuple[int, ...]]] = {}
+    for item in plan:
+        cfg = item["config"]
+        method = cfg.methods[0]
+        key = (str(item["dataset_family"]), int(cfg.n_train), method)
+        if method == "ours-binned-inverse":
+            assert cfg.inverse_active_topk == cfg.active_topk
+            assert cfg.inverse_expected_active_box_size == cfg.expected_active_box_size
+            assert cfg.active_eig_topk is None
+            assert cfg.active_eig_expected_active_box_size is None
+            assert cfg.active_eig_rank is None
+            candidate = (int(cfg.active_topk), int(cfg.expected_active_box_size))
+        else:
+            assert method == "ours-binned-active-eig"
+            assert cfg.active_eig_topk == cfg.active_topk
+            assert cfg.active_eig_expected_active_box_size == cfg.expected_active_box_size
+            assert cfg.active_eig_rank == cfg.rank
+            assert cfg.inverse_active_topk is None
+            assert cfg.inverse_expected_active_box_size is None
+            candidate = (
+                int(cfg.active_topk),
+                int(cfg.expected_active_box_size),
+                int(cfg.active_eig_rank),
+            )
+            assert candidate[2] <= candidate[1]
+        assert topk_to_box[candidate[0]] == candidate[1]
+        assert (
+            f"asserted topk={candidate[0]}->|B|={candidate[1]}"
+            in cfg.parameter_source
+        )
+        observed.setdefault(key, set()).add(candidate)
+
+    small_inverse = {
+        (512, 625),
+        (728, 961),
+        (1024, 1369),
+        (2048, 2601),
+        (4096, 5329),
+    }
+    high_inverse = {(4096, 5329), (8192, 10609), (12288, 15625)}
+    small_active = {
+        (2048, 2601, 192),
+        (4096, 5329, 192),
+        (4096, 5329, 256),
+        *((8192, 10609, rank) for rank in (192, 256, 320)),
+        *((16384, 21025, rank) for rank in (192, 256, 320)),
+        *((35721, 35721, rank) for rank in (128, 192, 256, 320)),
+    }
+    high_active = {
+        (topk, topk_to_box[topk], rank)
+        for topk in (20480, 25720, 35721)
+        for rank in (192, 256, 320, 384, 448)
+    }
+    for family in ("Synthetic", "Winnebago"):
+        for n_train in (10_000_000, 30_000_000):
+            assert observed[(family, n_train, "ours-binned-inverse")] == small_inverse
+            assert observed[(family, n_train, "ours-binned-active-eig")] == small_active
+        for n_train in (100_000_000, 300_000_000):
+            assert observed[(family, n_train, "ours-binned-inverse")] == high_inverse
+            assert observed[(family, n_train, "ours-binned-active-eig")] == high_active
+
+    source_winners = {
+        (str(case["dataset_family"]), int(case["n_train"])): {
+            "ours-binned-inverse": {
+                (
+                    int(case["inverse_active_topk"]),
+                    int(case["inverse_expected_active_box_size"]),
+                )
+            },
+            "ours-binned-active-eig": {
+                (
+                    int(case["active_eig_topk"]),
+                    int(case["active_eig_expected_active_box_size"]),
+                    int(case["active_eig_rank"]),
+                )
+            },
+        }
+        for case in suite["profiles"]["scale_10m_300m"]["cases"]
+    }
+    for (family, n_train), winners in source_winners.items():
+        for method, candidates in winners.items():
+            assert candidates <= observed[(family, n_train, method)]
 
 
 def test_family_robustness_freezes_both_family_configs(tmp_path: Path) -> None:
