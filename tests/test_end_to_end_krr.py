@@ -1445,7 +1445,7 @@ def test_matern_family_parameter_sweep_plan_size_coverage_and_repeats(
         output_root=tmp_path / "out",
     )
 
-    assert len(plan) == 144
+    assert len(plan) == 72
     assert len({item["case_id"] for item in plan}) == len(plan)
     assert {
         (item["dataset_family"], item["config"].n_train) for item in plan
@@ -1459,8 +1459,8 @@ def test_matern_family_parameter_sweep_plan_size_coverage_and_repeats(
         for method in ("ours-binned-inverse", "ours-binned-active-eig")
     }
     assert method_counts == {
-        "ours-binned-inverse": 32,
-        "ours-binned-active-eig": 112,
+        "ours-binned-inverse": 24,
+        "ours-binned-active-eig": 48,
     }
     assert all(len(item["config"].methods) == 1 for item in plan)
     assert all(item["config"].kernel_family == "matern" for item in plan)
@@ -1472,7 +1472,7 @@ def test_matern_family_parameter_sweep_plan_size_coverage_and_repeats(
     )
     assert all(
         item["config"].parameter_selection_policy
-        == "predeclared_matern_two_family_parameter_sweep"
+        == "archived_a100_informed_pruned_matern_two_family_sweep"
         for item in plan
     )
 
@@ -1591,14 +1591,10 @@ def test_matern_family_parameter_sweep_candidates_and_box_assertions(
     }
     assert topk_to_box == {
         512: 625,
-        728: 961,
-        1024: 1369,
         2048: 2601,
         4096: 5329,
+        6250: 7921,
         8192: 10609,
-        12288: 15625,
-        16384: 21025,
-        20480: 25921,
         25720: 32761,
         35721: 35721,
     }
@@ -1643,24 +1639,20 @@ def test_matern_family_parameter_sweep_candidates_and_box_assertions(
 
     small_inverse = {
         (512, 625),
-        (728, 961),
-        (1024, 1369),
         (2048, 2601),
         (4096, 5329),
+        (6250, 7921),
     }
-    high_inverse = {(4096, 5329), (8192, 10609), (12288, 15625)}
+    high_inverse = {(4096, 5329), (6250, 7921)}
     small_active = {
-        (2048, 2601, 192),
-        (4096, 5329, 192),
         (4096, 5329, 256),
-        *((8192, 10609, rank) for rank in (192, 256, 320)),
-        *((16384, 21025, rank) for rank in (192, 256, 320)),
-        *((35721, 35721, rank) for rank in (128, 192, 256, 320)),
+        *((8192, 10609, rank) for rank in (256, 320)),
+        *((35721, 35721, rank) for rank in (128, 256, 320)),
     }
     high_active = {
         (topk, topk_to_box[topk], rank)
-        for topk in (20480, 25720, 35721)
-        for rank in (192, 256, 320, 384, 448)
+        for topk in (25720, 35721)
+        for rank in (256, 320, 384)
     }
     for family in ("Synthetic", "Winnebago"):
         for n_train in (10_000_000, 30_000_000):
@@ -1691,6 +1683,30 @@ def test_matern_family_parameter_sweep_candidates_and_box_assertions(
     for (family, n_train), winners in source_winners.items():
         for method, candidates in winners.items():
             assert candidates <= observed[(family, n_train, method)]
+
+
+def test_matern_family_sweep_rejects_wrong_box_geometry_before_execution(
+    tmp_path: Path,
+) -> None:
+    suite = json.loads(json.dumps(load_suite_config()))
+    sweep = suite["profiles"]["matern_family_parameter_sweep_10m_300m"][
+        "family_parameter_sweep"
+    ]
+    sweep["topk_to_expected_box_size"]["6250"] = 8099
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"CPU active-box geometry preflight failed before dataset/GPU work: "
+            r"topk=6250 declares \|B\|=8099, observed 7921"
+        ),
+    ):
+        build_profile_plan(
+            suite,
+            "matern_family_parameter_sweep_10m_300m",
+            dataset_dir=str(tmp_path / "unread-data"),
+            output_root=tmp_path / "out",
+        )
 
 
 def test_family_robustness_freezes_both_family_configs(tmp_path: Path) -> None:

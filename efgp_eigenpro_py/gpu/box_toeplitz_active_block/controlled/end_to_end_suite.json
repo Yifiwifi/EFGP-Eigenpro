@@ -265,7 +265,7 @@
       }
     },
     "matern_family_parameter_sweep_10m_300m": {
-      "description": "Predeclared Matérn shortlist for the inverse and active-eigenpair families on Synthetic and Winnebago at 10M, 30M, 100M, and 300M. Every expanded case resolves exactly one family method: a resource-eligible case executes one warmup and three measured repeats, while a provably infeasible case is excluded before data/GPU work; the active-eigenpair B axis includes the full-grid endpoint.",
+      "description": "Archived-A100-informed, 72-case Matérn shortlist for the inverse and active-eigenpair families on Synthetic and Winnebago at 10M, 30M, 100M, and 300M. It retains the historical winners and boundary controls while removing redundant slow candidates. Every expanded case resolves exactly one family method: a resource-eligible case executes one warmup and three measured repeats, while a provably infeasible case is excluded before data/GPU work.",
       "source_profile": "scale_10m_300m",
       "overrides": {
         "kernel_family": "matern",
@@ -273,7 +273,7 @@
         "measured_repeats": 3,
         "inverse_max_size": 16384,
         "allow_frozen_topk_capacity_adaptation": false,
-        "parameter_selection_policy": "predeclared_matern_two_family_parameter_sweep"
+        "parameter_selection_policy": "archived_a100_informed_pruned_matern_two_family_sweep"
       },
       "family_parameter_sweep": {
         "dataset_families": [
@@ -281,17 +281,19 @@
           "Winnebago"
         ],
         "assert_source_winners_in_candidates": true,
-        "parameter_source": "end_to_end_suite.json::matern_family_parameter_sweep_10m_300m; shortlist declared before timing; old timings excluded",
+        "parameter_source": "archived A100-40GB summary outputs/btab_group_a_group_b_group_c_20260703_053504_export_bundle/btab_group_a_group_b_group_c_20260703_053504/summary.csv sha256=C90E8E9991103870F337E112F19F967CB0EDF456115B953B1CD7453809F0C3D0; retained historical winners and endpoint controls; topk=6250->|B|=7921 is a prospective interpolating inverse endpoint without prior A100 timing",
+        "active_box_geometry_preflight": {
+          "dimension": 2,
+          "reference_span": 1.0,
+          "expected_mtot": 189,
+          "rule": "CPU-only Matérn Fourier-weight ordering check before dataset loading, CUDA initialization, or GPU work"
+        },
         "topk_to_expected_box_size": {
           "512": 625,
-          "728": 961,
-          "1024": 1369,
           "2048": 2601,
           "4096": 5329,
+          "6250": 7921,
           "8192": 10609,
-          "12288": 15625,
-          "16384": 21025,
-          "20480": 25921,
           "25720": 32761,
           "35721": 35721
         },
@@ -303,31 +305,22 @@
             ],
             "inverse_topk": [
               512,
-              728,
-              1024,
               2048,
-              4096
+              4096,
+              6250
             ],
             "active_eig": [
               {
-                "topk": 2048,
-                "ranks": [192]
-              },
-              {
                 "topk": 4096,
-                "ranks": [192, 256]
+                "ranks": [256]
               },
               {
                 "topk": 8192,
-                "ranks": [192, 256, 320]
-              },
-              {
-                "topk": 16384,
-                "ranks": [192, 256, 320]
+                "ranks": [256, 320]
               },
               {
                 "topk": 35721,
-                "ranks": [128, 192, 256, 320]
+                "ranks": [128, 256, 320]
               }
             ]
           },
@@ -338,21 +331,16 @@
             ],
             "inverse_topk": [
               4096,
-              8192,
-              12288
+              6250
             ],
             "active_eig": [
               {
-                "topk": 20480,
-                "ranks": [192, 256, 320, 384, 448]
-              },
-              {
                 "topk": 25720,
-                "ranks": [192, 256, 320, 384, 448]
+                "ranks": [256, 320, 384]
               },
               {
                 "topk": 35721,
-                "ranks": [192, 256, 320, 384, 448]
+                "ranks": [256, 320, 384]
               }
             ]
           }

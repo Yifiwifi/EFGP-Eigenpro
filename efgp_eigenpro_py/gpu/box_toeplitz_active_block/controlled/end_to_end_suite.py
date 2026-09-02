@@ -21,13 +21,18 @@ from dataclasses import asdict, fields
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from ....discretization import basis_weights, choose_grid_params
+from ....kernels import make_matern
+from ..active_set import build_box_active_set
 from .end_to_end import (
     DATASET_PROVENANCE_CONFIG_FIELDS,
     END_TO_END_METHODS,
     FAMILY_END_TO_END_METHODS,
     STAGE2_SYSTEM_CONFIG_FIELDS,
     TIMING_SCOPE,
+    EndToEndBatchCache,
     EndToEndConfig,
+    dataset_execution_identity,
     run_end_to_end_experiment,
 )
 
@@ -112,6 +117,7 @@ def _expand_family_parameter_sweep(
     profile_payload: dict[str, Any],
     *,
     profile: str,
+    base_config: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """Expand a compact, predeclared two-family Matérn parameter shortlist."""
     raw_sweep = profile_payload.get("family_parameter_sweep")
@@ -149,6 +155,68 @@ def _expand_family_parameter_sweep(
                 f"profile {profile!r} maps topk={topk} to smaller |B|={box_size}."
             )
         topk_to_box[topk] = box_size
+
+    geometry_preflight = raw_sweep.get("active_box_geometry_preflight")
+    if geometry_preflight is not None:
+        if not isinstance(geometry_preflight, dict):
+            raise ValueError(
+                f"profile {profile!r} active_box_geometry_preflight must be an object."
+            )
+        family = str(base_config.get("kernel_family", "")).strip().lower()
+        if family != "matern":
+            raise ValueError(
+                f"profile {profile!r} CPU active-box preflight requires Matérn, "
+                f"got {family!r}."
+            )
+        dimension = _positive_int(
+            geometry_preflight.get("dimension"),
+            label="active_box_geometry_preflight dimension",
+        )
+        reference_span = float(geometry_preflight.get("reference_span", 0.0))
+        if not math.isfinite(reference_span) or reference_span <= 0.0:
+            raise ValueError(
+                "active_box_geometry_preflight reference_span must be positive."
+            )
+        kernel = make_matern(
+            lengthscale=float(base_config["lengthscale"]),
+            nu=float(base_config["nu"]),
+            dim=dimension,
+            variance=float(base_config["variance"]),
+        )
+        grid = choose_grid_params(
+            kernel,
+            float(base_config["fourier_eps"]),
+            reference_span,
+            l2scaled=bool(base_config["l2_scaled"]),
+        )
+        expected_mtot = _positive_int(
+            geometry_preflight.get("expected_mtot"),
+            label="active_box_geometry_preflight expected_mtot",
+        )
+        if int(grid.mtot) != expected_mtot:
+            raise ValueError(
+                f"profile {profile!r} CPU active-box preflight grid mismatch: "
+                f"expected mtot={expected_mtot}, observed {int(grid.mtot)}."
+            )
+        weights = basis_weights(kernel, grid.xis, grid.h)
+        for topk, expected_box_size in topk_to_box.items():
+            active = build_box_active_set(
+                gamma=1.0,
+                weights=weights,
+                reg_lambda=float(base_config["reg_lambda"]),
+                mtot=int(grid.mtot),
+                dim=dimension,
+                active_mode="topk",
+                active_topk=topk,
+                active_tau=None,
+            )
+            observed_box_size = int(active.box_idx.size)
+            if observed_box_size != expected_box_size:
+                raise ValueError(
+                    f"profile {profile!r} CPU active-box geometry preflight failed "
+                    f"before dataset/GPU work: topk={topk} declares "
+                    f"|B|={expected_box_size}, observed {observed_box_size}."
+                )
 
     raw_groups = raw_sweep.get("size_groups")
     if not isinstance(raw_groups, list) or not raw_groups:
@@ -390,7 +458,11 @@ def build_profile_plan(
     base.update(profile_payload.get("overrides", {}))
     plan: list[dict[str, Any]] = []
     is_family_sweep = "family_parameter_sweep" in profile_payload
-    cases = _expand_family_parameter_sweep(profile_payload, profile=str(profile))
+    cases = _expand_family_parameter_sweep(
+        profile_payload,
+        profile=str(profile),
+        base_config=base,
+    )
     for case in cases:
         case_id = str(case["id"])
         merged = dict(base)
@@ -858,67 +930,167 @@ def _load_completed_case(cfg: EndToEndConfig) -> dict[str, Any] | None:
     }
 
 
+def _resumed_loaded_dataset_fingerprint(
+    completed: dict[str, Any],
+) -> tuple[str, str | None] | None:
+    """Read and internally cross-check a resumed case's stored fingerprints.
+
+    A resource-only case that deliberately never loaded data has no fingerprint
+    and is exempt.  This helper reads only the already-produced JSON artifacts;
+    it never opens the source dataset.
+    """
+    completion = completed["completion"]
+    summary = completed["summary"]
+    provenance = completion.get("dataset_provenance")
+    provenance = provenance if isinstance(provenance, dict) else {}
+    content_values: list[Any] = []
+    metadata_values: list[Any] = []
+    if "content_index_sha256" in provenance:
+        content_values.append(provenance.get("content_index_sha256"))
+    if "metadata_sha256" in provenance:
+        metadata_values.append(provenance.get("metadata_sha256"))
+    for row in summary:
+        if "dataset_content_index_sha256" in row:
+            content_values.append(row.get("dataset_content_index_sha256"))
+        if "dataset_metadata_sha256" in row:
+            metadata_values.append(row.get("dataset_metadata_sha256"))
+
+    dataset_loaded = completion.get("dataset_loaded") is True or any(
+        value is not None for value in content_values
+    )
+    if not dataset_loaded:
+        return None
+    normalized_content = {
+        str(value).strip() if value is not None else None for value in content_values
+    }
+    if len(normalized_content) != 1 or None in normalized_content or "" in normalized_content:
+        raise RuntimeError(
+            "resumed loaded case has missing or inconsistent dataset content hashes"
+        )
+    normalized_metadata = {
+        None if value is None else str(value) for value in metadata_values
+    }
+    if not normalized_metadata:
+        normalized_metadata = {None}
+    if len(normalized_metadata) != 1:
+        raise RuntimeError(
+            "resumed loaded case has inconsistent dataset metadata hashes"
+        )
+    return (
+        next(iter(normalized_content)),
+        next(iter(normalized_metadata)),
+    )
+
+
 def run_plan(
     plan: Iterable[dict[str, Any]],
     *,
     index_root: str | Path,
     resume: bool = True,
+    reuse_dataset_batches: bool = True,
 ) -> list[dict[str, Any]]:
+    """Run cases with stable dataset grouping and per-case checkpoints.
+
+    Grouping changes only process-level overhead.  Every case retains its own
+    output directory, configuration, repeats, summary, and resume validation.
+    """
     index: list[dict[str, Any]] = []
     root = Path(index_root)
-    for item in plan:
-        cfg = item["config"]
-        result = _load_completed_case(cfg) if resume else None
+    planned_items = list(plan)
+    if reuse_dataset_batches:
+        grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+        for item in planned_items:
+            grouped.setdefault(
+                dataset_execution_identity(item["config"]), []
+            ).append(item)
+        execution_groups = list(grouped.values())
+    else:
+        execution_groups = [planned_items]
+
+    for group_items in execution_groups:
+        batch_cache = EndToEndBatchCache() if reuse_dataset_batches else None
         try:
-            if result is None:
-                result = run_end_to_end_experiment(cfg)
-                result["resumed_existing"] = False
-            index_row = {
-                "profile": item["profile"],
-                "case_id": item["case_id"],
-                "dataset_family": item.get("dataset_family"),
-                "robustness_axes": item.get("robustness_axes"),
-                "output_dir": result["output_dir"],
-                "n_train": result["completion"]["n_train"],
-                "n_test": result["completion"]["n_test"],
-                "all_rows_present": result["completion"]["all_rows_present"],
-                "status": str(
-                    result["completion"].get(
-                        "formal_result_status", "scientific_status_missing"
-                    )
-                ),
-                "invocation_mode": (
-                    "resumed_existing" if result.get("resumed_existing") else "executed"
-                ),
-                "resource_limit_methods": result["completion"].get(
-                    "resource_limit_methods", []
-                ),
-                "performance_ineligible_methods": result["completion"].get(
-                    "performance_ineligible_methods", []
-                ),
-                "error_type": None,
-                "error_message": None,
-            }
-        except Exception as exc:
-            index_row = {
-                "profile": item["profile"],
-                "case_id": item["case_id"],
-                "dataset_family": item.get("dataset_family"),
-                "robustness_axes": item.get("robustness_axes"),
-                "output_dir": str(Path(cfg.output_dir).resolve()),
-                "n_train": cfg.n_train,
-                "n_test": None,
-                "all_rows_present": False,
-                "status": "error",
-                "invocation_mode": "executed",
-                "resource_limit_methods": [],
-                "performance_ineligible_methods": [],
-                "error_type": type(exc).__name__,
-                "error_message": str(exc),
-                "traceback": traceback.format_exc(),
-            }
-        index.append(index_row)
-        _write_index(root / "end_to_end_suite_index", index)
+            prepared = [
+                (item, _load_completed_case(item["config"]) if resume else None)
+                for item in group_items
+            ]
+            if (
+                batch_cache is not None
+                and any(result is not None for _, result in prepared)
+                and any(result is None for _, result in prepared)
+            ):
+                for _, result in prepared:
+                    if result is None:
+                        continue
+                    fingerprint = _resumed_loaded_dataset_fingerprint(result)
+                    if fingerprint is not None:
+                        batch_cache.require_resumed_dataset_fingerprint(
+                            content_index_sha256=fingerprint[0],
+                            metadata_sha256=fingerprint[1],
+                        )
+
+            for item, result in prepared:
+                cfg = item["config"]
+                try:
+                    if result is None:
+                        result = run_end_to_end_experiment(
+                            cfg, batch_cache=batch_cache
+                        )
+                        result["resumed_existing"] = False
+                    index_row = {
+                        "profile": item["profile"],
+                        "case_id": item["case_id"],
+                        "dataset_family": item.get("dataset_family"),
+                        "robustness_axes": item.get("robustness_axes"),
+                        "output_dir": result["output_dir"],
+                        "n_train": result["completion"]["n_train"],
+                        "n_test": result["completion"]["n_test"],
+                        "all_rows_present": result["completion"][
+                            "all_rows_present"
+                        ],
+                        "status": str(
+                            result["completion"].get(
+                                "formal_result_status",
+                                "scientific_status_missing",
+                            )
+                        ),
+                        "invocation_mode": (
+                            "resumed_existing"
+                            if result.get("resumed_existing")
+                            else "executed"
+                        ),
+                        "resource_limit_methods": result["completion"].get(
+                            "resource_limit_methods", []
+                        ),
+                        "performance_ineligible_methods": result[
+                            "completion"
+                        ].get("performance_ineligible_methods", []),
+                        "error_type": None,
+                        "error_message": None,
+                    }
+                except Exception as exc:
+                    index_row = {
+                        "profile": item["profile"],
+                        "case_id": item["case_id"],
+                        "dataset_family": item.get("dataset_family"),
+                        "robustness_axes": item.get("robustness_axes"),
+                        "output_dir": str(Path(cfg.output_dir).resolve()),
+                        "n_train": cfg.n_train,
+                        "n_test": None,
+                        "all_rows_present": False,
+                        "status": "error",
+                        "invocation_mode": "executed",
+                        "resource_limit_methods": [],
+                        "performance_ineligible_methods": [],
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                        "traceback": traceback.format_exc(),
+                    }
+                index.append(index_row)
+                _write_index(root / "end_to_end_suite_index", index)
+        finally:
+            if batch_cache is not None:
+                batch_cache.close()
     return index
 
 
@@ -997,6 +1169,7 @@ def run_stage1_campaign(
     dataset_dir: str,
     output_root: str | Path,
     resume: bool = True,
+    reuse_dataset_batches: bool = True,
 ) -> dict[str, Any]:
     """Run scale first, freeze the target artifact, then run robustness."""
     root = Path(output_root)
@@ -1006,7 +1179,12 @@ def run_stage1_campaign(
         dataset_dir=dataset_dir,
         output_root=root,
     )
-    scale_index = run_plan(scale_plan, index_root=root, resume=resume)
+    scale_index = run_plan(
+        scale_plan,
+        index_root=root,
+        resume=resume,
+        reuse_dataset_batches=reuse_dataset_batches,
+    )
     require_complete_plan(scale_plan, scale_index, phase="Stage 1 scale campaign")
     scale_rows = collect_summary_rows(scale_plan)
     _write_index(root / "stage1_scale_summary", scale_rows)
@@ -1052,6 +1230,7 @@ def run_stage1_campaign(
         robustness_plan,
         index_root=root / "robustness_at_selected_target",
         resume=resume,
+        reuse_dataset_batches=reuse_dataset_batches,
     )
     require_complete_plan(
         robustness_plan,
@@ -1088,6 +1267,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--no-resume", action="store_true")
+    parser.add_argument(
+        "--no-dataset-batch-reuse",
+        action="store_true",
+        help=(
+            "Preserve input case order and reload/restage every case. By default, "
+            "cases are stably grouped by dataset identity and share common data."
+        ),
+    )
     return parser
 
 
@@ -1100,6 +1287,7 @@ def main(argv: list[str] | None = None) -> int:
             dataset_dir=args.dataset_dir,
             output_root=args.output_root,
             resume=not args.no_resume,
+            reuse_dataset_batches=not args.no_dataset_batch_reuse,
         )
         return 0
     plan = build_profile_plan(
@@ -1108,7 +1296,12 @@ def main(argv: list[str] | None = None) -> int:
         dataset_dir=args.dataset_dir,
         output_root=args.output_root,
     )
-    index = run_plan(plan, index_root=args.output_root, resume=not args.no_resume)
+    index = run_plan(
+        plan,
+        index_root=args.output_root,
+        resume=not args.no_resume,
+        reuse_dataset_batches=not args.no_dataset_batch_reuse,
+    )
     require_complete_plan(plan, index, phase=f"Stage 1 profile {args.profile}")
     return 0
 

@@ -322,6 +322,194 @@ class EndToEndConfig:
     output_dir: str = ""
 
 
+def dataset_execution_identity(cfg: EndToEndConfig) -> tuple[Any, ...]:
+    """Identify the exact host dataset/test slice shared by parameter cases."""
+    return (
+        str(fixed_ab._dataset_directory_path(cfg.dataset_dir)),
+        str(cfg.dataset_stem),
+        None if cfg.n_train is None else int(cfg.n_train),
+        int(cfg.subset_seed),
+        str(cfg.subset_mode).strip().lower(),
+        int(cfg.max_test_rows),
+    )
+
+
+@dataclass
+class EndToEndBatchCache:
+    """Process-local cache for one dataset group in a suite invocation.
+
+    The first CUDA free-memory probe establishes a conservative group ceiling.
+    Later cases re-probe after releasing unused allocator blocks and add back
+    only the retained common x/y bytes, so the resource model neither
+    double-counts those arrays nor ignores new external memory pressure.
+    ``close`` releases both host and device references at the group boundary.
+    """
+
+    dataset_identity: tuple[Any, ...] | None = None
+    dataset: dict[str, Any] | None = None
+    dataset_load_count: int = 0
+    dataset_reuse_count: int = 0
+    cuda_probe_attempted: bool = False
+    available_device_bytes: int | None = None
+    cuda_probe_count: int = 0
+    last_live_available_device_bytes: int | None = None
+    last_effective_available_device_bytes: int | None = None
+    resumed_fingerprint_validation_required: bool = False
+    expected_resumed_content_index_sha256: str | None = None
+    expected_resumed_metadata_sha256: str | None = None
+    dataset_identity_failure: str | None = None
+
+    def probe_available_device_bytes(self) -> int | None:
+        if self.dataset is not None:
+            # Previous-case system/preconditioner objects are out of scope here.
+            # Flush their unused pool blocks before inspecting current pressure;
+            # retained training arrays remain live and are added back below.
+            _release_gpu_allocator_cache()
+        live = _probe_available_device_bytes_without_allocation()
+        self.cuda_probe_attempted = True
+        self.cuda_probe_count += 1
+        self.last_live_available_device_bytes = live
+        if live is None:
+            self.last_effective_available_device_bytes = None
+            return None
+        if self.available_device_bytes is None:
+            self.available_device_bytes = int(live)
+        gpu_diag = (
+            fixed_ab.batch_gpu_training_reuse_diagnostics(self.dataset)
+            if self.dataset is not None
+            else {"cached_bytes": 0}
+        )
+        adjusted = int(live) + int(gpu_diag.get("cached_bytes", 0))
+        effective = min(int(self.available_device_bytes), adjusted)
+        self.last_effective_available_device_bytes = int(effective)
+        return int(effective)
+
+    def require_resumed_dataset_fingerprint(
+        self,
+        *,
+        content_index_sha256: str,
+        metadata_sha256: str | None,
+    ) -> None:
+        """Require a future actual load to match mixed resumed case artifacts."""
+        content = str(content_index_sha256).strip()
+        if not content:
+            raise ValueError("resumed dataset content_index_sha256 is empty")
+        metadata = None if metadata_sha256 is None else str(metadata_sha256)
+        if self.resumed_fingerprint_validation_required and (
+            content != self.expected_resumed_content_index_sha256
+            or metadata != self.expected_resumed_metadata_sha256
+        ):
+            raise RuntimeError(
+                "resumed cases in one dataset batch have inconsistent dataset "
+                "content or metadata fingerprints"
+            )
+        self.resumed_fingerprint_validation_required = True
+        self.expected_resumed_content_index_sha256 = content
+        self.expected_resumed_metadata_sha256 = metadata
+
+    def _validate_resumed_dataset_fingerprint(
+        self, dataset: dict[str, Any]
+    ) -> None:
+        if not self.resumed_fingerprint_validation_required:
+            return
+        actual_content = dataset.get("content_index_sha256")
+        actual_metadata = dataset.get("metadata_sha256")
+        if (
+            actual_content != self.expected_resumed_content_index_sha256
+            or actual_metadata != self.expected_resumed_metadata_sha256
+        ):
+            message = (
+                "loaded dataset does not match the completed cases resumed in "
+                "this batch: "
+                f"content {actual_content!r} != "
+                f"{self.expected_resumed_content_index_sha256!r}, metadata "
+                f"{actual_metadata!r} != {self.expected_resumed_metadata_sha256!r}"
+            )
+            self.dataset_identity_failure = message
+            raise RuntimeError(message)
+
+    def acquire_dataset(
+        self, cfg: EndToEndConfig
+    ) -> tuple[dict[str, Any], bool]:
+        identity = dataset_execution_identity(cfg)
+        if self.dataset_identity_failure is not None:
+            raise RuntimeError(self.dataset_identity_failure)
+        if self.dataset is None:
+            dataset = load_end_to_end_dataset(cfg)
+            self._validate_resumed_dataset_fingerprint(dataset)
+            fixed_ab.enable_batch_gpu_training_reuse(dataset)
+            self.dataset_identity = identity
+            self.dataset = dataset
+            self.dataset_load_count += 1
+            return dataset, False
+        if identity != self.dataset_identity:
+            raise ValueError(
+                "EndToEndBatchCache cannot mix dataset groups; close it before "
+                f"switching from {self.dataset_identity!r} to {identity!r}."
+            )
+        # Re-run every case's declared metadata expectations.  Sharing bytes
+        # must not weaken per-case provenance validation.
+        provenance = validate_dataset_generation_provenance(cfg, self.dataset)
+        self.dataset.update(provenance)
+        self.dataset_reuse_count += 1
+        return self.dataset, True
+
+    def diagnostics(self) -> dict[str, Any]:
+        gpu = (
+            fixed_ab.batch_gpu_training_reuse_diagnostics(self.dataset)
+            if self.dataset is not None
+            else {
+                "enabled": False,
+                "staged": False,
+                "stage_count": 0,
+                "reuse_count": 0,
+                "cached_bytes": 0,
+            }
+        )
+        return {
+            "dataset_identity": list(self.dataset_identity or ()),
+            "dataset_load_count": int(self.dataset_load_count),
+            "dataset_reuse_count": int(self.dataset_reuse_count),
+            "cuda_probe_attempted": bool(self.cuda_probe_attempted),
+            "available_device_bytes_at_group_start": self.available_device_bytes,
+            "cuda_probe_count": int(self.cuda_probe_count),
+            "last_live_available_device_bytes": self.last_live_available_device_bytes,
+            "last_effective_available_device_bytes": (
+                self.last_effective_available_device_bytes
+            ),
+            "resumed_fingerprint_validation_required": bool(
+                self.resumed_fingerprint_validation_required
+            ),
+            "expected_resumed_content_index_sha256": (
+                self.expected_resumed_content_index_sha256
+            ),
+            "expected_resumed_metadata_sha256": (
+                self.expected_resumed_metadata_sha256
+            ),
+            "dataset_identity_failure": self.dataset_identity_failure,
+            "gpu_training_arrays": gpu,
+        }
+
+    def close(self) -> None:
+        dataset = self.dataset
+        touched_runnable_dataset = dataset is not None
+        if dataset is not None:
+            fixed_ab.release_batch_gpu_training_reuse(dataset)
+        self.dataset = None
+        self.dataset_identity = None
+        self.dataset_identity_failure = None
+        self.resumed_fingerprint_validation_required = False
+        self.expected_resumed_content_index_sha256 = None
+        self.expected_resumed_metadata_sha256 = None
+        self.cuda_probe_attempted = False
+        self.available_device_bytes = None
+        self.cuda_probe_count = 0
+        self.last_live_available_device_bytes = None
+        self.last_effective_available_device_bytes = None
+        if touched_runnable_dataset:
+            _release_gpu_allocator_cache()
+
+
 def _json_default(value: Any) -> Any:
     if isinstance(value, (np.integer,)):
         return int(value)
@@ -3053,7 +3241,11 @@ def _write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
-def run_end_to_end_experiment(cfg: EndToEndConfig) -> dict[str, Any]:
+def run_end_to_end_experiment(
+    cfg: EndToEndConfig,
+    *,
+    batch_cache: EndToEndBatchCache | None = None,
+) -> dict[str, Any]:
     _validate_config(cfg)
     output = (
         Path(cfg.output_dir).expanduser().resolve()
@@ -3067,7 +3259,11 @@ def run_end_to_end_experiment(cfg: EndToEndConfig) -> dict[str, Any]:
         # import, dataset read, allocator reset, or timing repeat is attempted.
         resource_preflight = cpu_preflight
     else:
-        available_device_bytes = _probe_available_device_bytes_without_allocation()
+        available_device_bytes = (
+            batch_cache.probe_available_device_bytes()
+            if batch_cache is not None
+            else _probe_available_device_bytes_without_allocation()
+        )
         resource_preflight = preflight_end_to_end_resources(
             cfg,
             available_device_bytes=available_device_bytes,
@@ -3100,11 +3296,13 @@ def run_end_to_end_experiment(cfg: EndToEndConfig) -> dict[str, Any]:
         ),
         encoding="utf-8",
     )
-    dataset = (
-        None
-        if resource_preflight["all_methods_excluded"]
-        else load_end_to_end_dataset(cfg)
-    )
+    dataset_reused_from_batch_cache = False
+    if resource_preflight["all_methods_excluded"]:
+        dataset = None
+    elif batch_cache is None:
+        dataset = load_end_to_end_dataset(cfg)
+    else:
+        dataset, dataset_reused_from_batch_cache = batch_cache.acquire_dataset(cfg)
     rows: list[dict[str, Any]] = []
     total_repeats = int(cfg.warmup_repeats) + int(cfg.measured_repeats)
     for repeat in range(total_repeats):
@@ -3271,6 +3469,11 @@ def run_end_to_end_experiment(cfg: EndToEndConfig) -> dict[str, Any]:
             )
         ),
         "dataset_loaded": dataset is not None,
+        "batch_dataset_reuse_enabled": batch_cache is not None,
+        "dataset_reused_from_batch_cache": bool(dataset_reused_from_batch_cache),
+        "batch_reuse_diagnostics": (
+            batch_cache.diagnostics() if batch_cache is not None else None
+        ),
         "gpu_work_launched": bool(
             dataset is not None
             and any(

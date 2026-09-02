@@ -79,6 +79,14 @@ _SOLVER_TOTAL_DEFINITION = (
     "score selection + preconditioner construction + CG/PCG solve"
 )
 
+# ``end_to_end_suite`` may execute several parameter-only variants for one
+# dataset in a single process.  The host arrays are already shared by passing
+# ``dataset_payload``; this private payload entry additionally retains the
+# common x/y device arrays between cases.  Preconditioner/system arrays are
+# never cached here, so every repeat still owns and times its full algorithmic
+# setup exactly as declared by the end-to-end protocol.
+_BATCH_GPU_TRAINING_CACHE_KEY = "_controlled_batch_gpu_training_cache"
+
 
 # These are exactly the ControlledConfig fields that can change the arrays
 # defining the Fourier system.  Method, timing, diagnostic, and active-box
@@ -921,15 +929,27 @@ def _normalize_n_train(n_train: int | None) -> int | None:
     return int(n_train)
 
 
-def _resolve_dataset_dir(dataset_dir: str = "") -> Path:
+def _dataset_directory_path(dataset_dir: str = "") -> Path:
+    """Resolve the configured dataset directory without touching the filesystem.
+
+    Batch planning uses this helper before resource preflight.  Keeping the
+    path-only operation separate from ``_resolve_dataset_dir`` means a
+    resource-only case can still fail closed without requiring the dataset to
+    exist, while an empty ``dataset_dir`` has exactly the same environment and
+    repository-default semantics as the loader.
+    """
     requested = (
         str(dataset_dir).strip() or os.environ.get("BTAB_PROCESSED_DIR", "").strip()
     )
-    directory = (
+    return (
         Path(requested).expanduser().resolve()
         if requested
         else _PROCESSED_DIR.resolve()
     )
+
+
+def _resolve_dataset_dir(dataset_dir: str = "") -> Path:
+    directory = _dataset_directory_path(dataset_dir)
     if not directory.is_dir():
         raise FileNotFoundError(
             f"processed dataset directory was not found: {directory}"
@@ -1159,6 +1179,121 @@ def _validate_config(
         warnings.warn(message, RuntimeWarning, stacklevel=2)
 
 
+def enable_batch_gpu_training_reuse(dataset: dict[str, Any]) -> None:
+    """Allow one dataset payload to retain its common x/y device staging.
+
+    This is deliberately opt-in.  Ordinary benchmark invocations keep their
+    historical allocation behavior, while a grouped end-to-end suite can
+    exclude the one-time common staging described by its timing scope.
+    """
+    dataset.setdefault(
+        _BATCH_GPU_TRAINING_CACHE_KEY,
+        {
+            "enabled": True,
+            "x_gpu": None,
+            "y_gpu": None,
+            "host_x_id": id(dataset.get("x")),
+            "host_y_id": id(dataset.get("y")),
+            "stage_count": 0,
+            "reuse_count": 0,
+        },
+    )
+
+
+def batch_gpu_training_reuse_diagnostics(dataset: dict[str, Any]) -> dict[str, Any]:
+    """Return JSON-safe diagnostics without exposing cached device arrays."""
+    state = dataset.get(_BATCH_GPU_TRAINING_CACHE_KEY)
+    if not isinstance(state, dict):
+        return {
+            "enabled": False,
+            "staged": False,
+            "stage_count": 0,
+            "reuse_count": 0,
+            "cached_bytes": 0,
+        }
+    cached_bytes = 0
+    for key in ("x_gpu", "y_gpu"):
+        array = state.get(key)
+        if array is not None:
+            try:
+                cached_bytes += int(array.nbytes)
+            except (AttributeError, TypeError, ValueError):
+                pass
+    return {
+        "enabled": bool(state.get("enabled", False)),
+        "staged": state.get("x_gpu") is not None and state.get("y_gpu") is not None,
+        "stage_count": int(state.get("stage_count", 0)),
+        "reuse_count": int(state.get("reuse_count", 0)),
+        "cached_bytes": int(cached_bytes),
+    }
+
+
+def release_batch_gpu_training_reuse(dataset: dict[str, Any]) -> bool:
+    """Drop retained device-array references from a batch dataset payload.
+
+    Returns whether either training array had actually been staged.  Removing
+    the private state before an allocator-pool flush makes ``close`` effective
+    even when another diagnostic reference to the host payload still exists.
+    """
+    state = dataset.pop(_BATCH_GPU_TRAINING_CACHE_KEY, None)
+    if not isinstance(state, dict):
+        return False
+    staged = state.get("x_gpu") is not None or state.get("y_gpu") is not None
+    state["x_gpu"] = None
+    state["y_gpu"] = None
+    state.pop("device_id", None)
+    return bool(staged)
+
+
+def _gpu_device_identity(xp: Any) -> int | None:
+    try:
+        return int(xp.cuda.Device().id)
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        return None
+
+
+def _training_data_context(
+    backend: Any,
+    x: np.ndarray,
+    y: np.ndarray,
+    dataset: dict[str, Any],
+) -> GPUDataContext:
+    """Build a data context, reusing only explicitly enabled device x/y arrays."""
+    state = dataset.get(_BATCH_GPU_TRAINING_CACHE_KEY)
+    if not isinstance(state, dict) or not bool(state.get("enabled", False)):
+        return ensure_gpu_data_context(backend, x, y, state=None)
+
+    if id(x) != state.get("host_x_id") or id(y) != state.get("host_y_id"):
+        raise ValueError("batch GPU cache no longer matches its host training arrays")
+    device_id = _gpu_device_identity(backend.xp)
+    x_gpu = state.get("x_gpu")
+    y_gpu = state.get("y_gpu")
+    if x_gpu is not None or y_gpu is not None:
+        if x_gpu is None or y_gpu is None:
+            raise RuntimeError("batch GPU training cache is only partially populated")
+        if state.get("device_id") != device_id:
+            raise RuntimeError(
+                "batch GPU training cache belongs to a different CUDA device"
+            )
+        if tuple(x_gpu.shape) != tuple(x.shape) or tuple(y_gpu.shape) != tuple(y.shape):
+            raise RuntimeError("batch GPU training cache shape mismatch")
+        if str(x_gpu.dtype) != str(x.dtype) or str(y_gpu.dtype) != str(y.dtype):
+            raise RuntimeError("batch GPU training cache dtype mismatch")
+        state["reuse_count"] = int(state.get("reuse_count", 0)) + 1
+        return GPUDataContext(x_gpu=x_gpu, y_gpu=y_gpu)
+
+    context = ensure_gpu_data_context(backend, x, y, state=None)
+    state.update(
+        {
+            "x_gpu": context.x_gpu,
+            "y_gpu": context.y_gpu,
+            "device_id": device_id,
+            "stage_count": int(state.get("stage_count", 0)) + 1,
+        }
+    )
+    return context
+
+
 def prepare_shared_system(
     cfg: ControlledConfig,
     *,
@@ -1195,7 +1330,7 @@ def prepare_shared_system(
         l2scaled=bool(cfg.l2_scaled),
     )
     backend = build_gpu_backend_bundle(BackendConfig(nufft=str(cfg.nufft_backend)))
-    data_ctx = ensure_gpu_data_context(backend, x, y, state=None)
+    data_ctx = _training_data_context(backend, x, y, dataset)
     data_ctx.meta["debug_finite_checks"] = False
     setup_ctx = GPUOperatorContext()
 

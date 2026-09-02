@@ -58,7 +58,7 @@ def build_notebook() -> dict:
 
             `nystrom-krr` 与 `rpcholesky-krr` 只出现在 Stage 1；Fourier-space randomized preconditioner adaptations 不得以 Nyström/RPCholesky KRR 的名字进入正式图。参考 notebook 的 legacy 路线默认关闭。
 
-            原始 data-space KRR 的 `original-krr-nystrom-pcg` 另走隔离证据链：先跑 N={10k,25k} 的 execution proxy，再对 10M/300M 各做一次 dataset/CuPy/allocator/GPU 之前的静态资源排除。proxy 结果不得和 full-N 表混合；full-N 只接受并记录 `resource_limit`，不进入四个 scalable literature methods 的 10M gate 或 300M 时间/RMSE 表。
+            原始 data-space KRR 的 `original-krr-nystrom-pcg` 保留为显式 opt-in 的隔离证据链，默认不执行。如手动开启，先跑 N={10k,25k} 的 execution proxy，再对 10M/300M 各做一次 dataset/CuPy/allocator/GPU 之前的静态资源排除。proxy 结果不得和 full-N 表混合；full-N 只接受并记录 `resource_limit`，不进入四个 scalable literature methods 的 10M gate 或 300M 时间/RMSE 表。
             """
         )
     )
@@ -89,8 +89,10 @@ def build_notebook() -> dict:
             RUN_STAGE1_ROBUSTNESS = RUN_ALL_FORMAL_EXPERIMENTS
             RUN_STAGE1_FAMILY_SCALE = RUN_ALL_FORMAL_EXPERIMENTS
             RUN_STAGE1_FAMILY_PARAMETER_SWEEP = RUN_ALL_FORMAL_EXPERIMENTS
-            RUN_ORIGINAL_KRR_PROXY_FEASIBILITY = RUN_ALL_FORMAL_EXPERIMENTS
-            RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT = RUN_ALL_FORMAL_EXPERIMENTS
+            # 原始 data-space KRR 开销过高，不随一键 formal campaign 执行。
+            # 需要复现隔离的 small-N proxy / full-N 资源审计时显式改为 True。
+            RUN_ORIGINAL_KRR_PROXY_FEASIBILITY = False
+            RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT = False
             RUN_LITERATURE_BASELINE_PILOT = RUN_ALL_FORMAL_EXPERIMENTS
             RUN_LITERATURE_BASELINES_300M = RUN_ALL_FORMAL_EXPERIMENTS
             RUN_STAGE1_FAMILY_ROBUSTNESS = RUN_ALL_FORMAL_EXPERIMENTS
@@ -654,7 +656,7 @@ def build_notebook() -> dict:
             })
             if synthetic_sizes_to_generate:
                 sizes_arg = ",".join(str(int(n)) for n in synthetic_sizes_to_generate)
-                run_cmd([
+                synthetic_generation_args = [
                     sys.executable, "-m",
                     "efgp_eigenpro_py.gpu.benchmark_dataset.preprocess_synthetic_true_func_2d_size_sweep",
                     "--n-train-list", sizes_arg,
@@ -664,7 +666,26 @@ def build_notebook() -> dict:
                     "--chunk-rows", "5000000",
                     "--size-token", "ntrain",
                     "--output-dir", str(LOCAL_DATA_DIR),
-                ], cwd=LOCAL_REPO)
+                ]
+                prefix_reuse_safe = bool(
+                    len(synthetic_sizes_to_generate) > 1
+                    and all(
+                        int(n_train) % 5_000_000 == 0
+                        for n_train in synthetic_sizes_to_generate[:-1]
+                    )
+                )
+                if prefix_reuse_safe:
+                    synthetic_generation_args.append("--reuse-largest-prefix")
+                    print(
+                        "Synthetic generation order: generate the largest train "
+                        "RNG stream once, then serialize aligned smaller prefixes."
+                    )
+                else:
+                    print(
+                        "Synthetic prefix reuse disabled: requested optional sizes "
+                        "are not a multi-size, 5M-aligned prefix family."
+                    )
+                run_cmd(synthetic_generation_args, cwd=LOCAL_REPO)
 
             if GENERATE_MANITOWOC_300M:
                 run_cmd([
@@ -1193,7 +1214,7 @@ def build_notebook() -> dict:
                 family_parameter_sweep_reporting.METHOD_FAMILY
             )
             if (
-                len(stage1_family_parameter_sweep_plan) != 144
+                len(stage1_family_parameter_sweep_plan) != 72
                 or any(
                     int(item["config"].warmup_repeats) != 1
                     or int(item["config"].measured_repeats) != 3
@@ -1203,7 +1224,7 @@ def build_notebook() -> dict:
                 )
             ):
                 raise RuntimeError(
-                    "The Matérn family parameter sweep must contain exactly 144 "
+                    "The Matérn family parameter sweep must contain exactly 72 "
                     "single-method cases with one warmup and three measured repeats."
                 )
             expected_original_krr_proxy_groups = {
@@ -1418,15 +1439,42 @@ def build_notebook() -> dict:
                 )
 
             def run_stage1_items(items, *, profile_label, mandatory=True):
+                items = list(items)
                 completed_items = []
-                for item in items:
-                    started = time.perf_counter()
-                    run_dir = Path(item["config"].output_dir)
-                    if (
+
+                def stage1_item_skipped_by_hardware(item):
+                    return bool(
                         int(item["config"].n_train) >= 300_000_000
                         and profile_label != ORIGINAL_KRR_RESOURCE_AUDIT_PROFILE
                         and not bool(globals().get("CAN_RUN_300M", False))
-                    ):
+                    )
+
+                # Freeze resume state before launching any group. Otherwise later
+                # cases completed by the first batch subprocess would be mislabeled
+                # as pre-existing artifacts. Grouping is exact on dataset identity;
+                # it never reuses a Fourier system, preconditioner, or solve state.
+                initial_reuse_by_case = {}
+                batch_groups = {}
+                for item in items:
+                    if stage1_item_skipped_by_hardware(item):
+                        continue
+                    initial_reuse_by_case[item["case_id"]] = (
+                        stage1_completion_is_reusable(item)
+                    )
+                    batch_identity = stage1_suite.dataset_execution_identity(
+                        item["config"]
+                    )
+                    batch_groups.setdefault(batch_identity, []).append(item)
+                batch_group_ordinals = {
+                    identity: index
+                    for index, identity in enumerate(batch_groups, start=1)
+                }
+                batch_launch_results = {}
+
+                for item in items:
+                    started = time.perf_counter()
+                    run_dir = Path(item["config"].output_dir)
+                    if stage1_item_skipped_by_hardware(item):
                         record = {
                             "profile": profile_label,
                             "case_id": item["case_id"],
@@ -1456,7 +1504,10 @@ def build_notebook() -> dict:
                         })
                         print(f"[Stage 1/{item['case_id']}] SKIPPED_HARDWARE")
                         continue
-                    reused = stage1_completion_is_reusable(item)
+                    reused = bool(initial_reuse_by_case[item["case_id"]])
+                    batch_identity = stage1_suite.dataset_execution_identity(
+                        item["config"]
+                    )
                     status = "execution_error"
                     reason = ""
                     artifact_complete = False
@@ -1471,46 +1522,84 @@ def build_notebook() -> dict:
                     cuda_runtime_memory_query_succeeded = None
                     resource_preflight_all_methods_excluded = None
                     try:
-                        if not reused:
-                            runtime_base = asdict(item["config"])
+                        if not reused and batch_identity not in batch_launch_results:
+                            batch_items = batch_groups[batch_identity]
+                            runtime_base = asdict(batch_items[0]["config"])
                             runtime_base.pop("dataset_dir", None)
                             runtime_base.pop("output_dir", None)
+                            runtime_cases = []
+                            for batch_item in batch_items:
+                                case_config = asdict(batch_item["config"])
+                                case_config.pop("dataset_dir", None)
+                                case_config.pop("output_dir", None)
+                                runtime_cases.append({
+                                    "id": batch_item["case_id"],
+                                    "dataset_family": declared_stage1_dataset_family(
+                                        batch_item
+                                    ),
+                                    **case_config,
+                                })
                             runtime_payload = {
                                 "schema_version": stage1_config.get("schema_version", 1),
                                 "protocol_family": "end_to_end_krr",
                                 "base": runtime_base,
                                 "profiles": {
                                     profile_label: {
-                                        "cases": [{
-                                            "id": item["case_id"],
-                                            "dataset_family": declared_stage1_dataset_family(item),
-                                        }]
+                                        "description": (
+                                            "Notebook runtime batch grouped by exact dataset identity"
+                                        ),
+                                        "cases": runtime_cases,
                                     }
                                 },
                             }
+                            batch_ordinal = batch_group_ordinals[batch_identity]
                             runtime_path = (
                                 STAGE1_RUNTIME_CONFIG_ROOT
-                                / f"{profile_label}_{item['case_id']}.json"
+                                / f"{profile_label}__dataset_batch_{batch_ordinal:03d}.json"
                             )
                             runtime_path.write_text(
                                 json.dumps(runtime_payload, indent=2), encoding="utf-8"
                             )
-                            completed = run_cmd([
-                                sys.executable, "-m",
-                                "efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end_suite",
-                                "--suite-config", str(runtime_path),
-                                "--profile", profile_label,
-                                "--dataset-dir", str(LOCAL_DATA_DIR),
-                                "--output-root", str(STAGE1_OUTPUT_ROOT),
-                                "--no-resume",
-                            ], cwd=LOCAL_REPO, check=False)
-                            if int(completed.returncode) != 0:
-                                raise RuntimeError(
-                                    f"end_to_end_suite exited with code {completed.returncode}"
-                                )
+                            batch_started = time.perf_counter()
+                            batch_error = None
+                            batch_return_code = None
+                            try:
+                                completed = run_cmd([
+                                    sys.executable, "-m",
+                                    "efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end_suite",
+                                    "--suite-config", str(runtime_path),
+                                    "--profile", profile_label,
+                                    "--dataset-dir", str(LOCAL_DATA_DIR),
+                                    "--output-root", str(STAGE1_OUTPUT_ROOT),
+                                ], cwd=LOCAL_REPO, check=False)
+                                batch_return_code = int(completed.returncode)
+                            except Exception as exc:
+                                batch_error = f"{type(exc).__name__}: {exc}"
+                            batch_launch_results[batch_identity] = {
+                                "batch_ordinal": batch_ordinal,
+                                "case_count": len(batch_items),
+                                "executed_case_count": sum(
+                                    not initial_reuse_by_case[batch_item["case_id"]]
+                                    for batch_item in batch_items
+                                ),
+                                "elapsed_seconds": time.perf_counter() - batch_started,
+                                "return_code": batch_return_code,
+                                "error": batch_error,
+                                "runtime_path": str(runtime_path),
+                            }
                         completion_payload = load_matching_stage1_artifact(item)
                         if completion_payload is None:
-                            raise RuntimeError("complete Stage-1 artifact set was not produced")
+                            launch = batch_launch_results.get(batch_identity, {})
+                            detail = launch.get("error")
+                            if detail is None and launch.get("return_code") not in {None, 0}:
+                                detail = (
+                                    "end_to_end_suite exited with code "
+                                    f"{launch['return_code']}"
+                                )
+                            raise RuntimeError(
+                                "complete Stage-1 artifact set was not produced"
+                                + (f": {detail}" if detail else "")
+                            )
                         artifact_complete = True
                         completed_items.append(item)
                         status = str(completion_payload["formal_result_status"])
@@ -1565,7 +1654,13 @@ def build_notebook() -> dict:
                     except Exception as exc:
                         status = "execution_error"
                         reason = f"{type(exc).__name__}: {exc}"
-                    elapsed = time.perf_counter() - started
+                    launch = batch_launch_results.get(batch_identity, {})
+                    if reused:
+                        elapsed = time.perf_counter() - started
+                    else:
+                        elapsed = float(launch.get("elapsed_seconds", 0.0)) / max(
+                            int(launch.get("executed_case_count", 1)), 1
+                        )
                     record = {
                         "profile": profile_label,
                         "case_id": item["case_id"],
@@ -1603,11 +1698,33 @@ def build_notebook() -> dict:
                         ),
                         "case_count": 1,
                         "elapsed_seconds": elapsed,
+                        "elapsed_seconds_scope": (
+                            "amortized exact-dataset batch subprocess wall time; "
+                            "never method timing"
+                            if not reused
+                            else "current artifact resume validation wall time"
+                        ),
                         "invocation_mode": "resumed_existing" if reused else "executed",
                         "resumed_case_count": int(reused),
                         "executed_case_count": int(not reused),
+                        "dataset_batch_reuse_enabled": True,
+                        "dataset_batch_ordinal": launch.get(
+                            "batch_ordinal", batch_group_ordinals[batch_identity]
+                        ),
+                        "dataset_batch_case_count": launch.get(
+                            "case_count", len(batch_groups[batch_identity])
+                        ),
+                        "dataset_batch_executed_case_count": launch.get(
+                            "executed_case_count", 0
+                        ),
+                        "dataset_batch_elapsed_seconds": launch.get(
+                            "elapsed_seconds", 0.0
+                        ),
                     })
-                    print(f"[Stage 1/{item['case_id']}] {status}: {reason or ('resumed' if reused else 'executed')}")
+                    print(
+                        f"[Stage 1/{item['case_id']}] {status}: "
+                        f"{reason or ('resumed' if reused else 'batch-executed')}"
+                    )
                 return completed_items
 
             def collect_literature_baseline_summaries(items):
@@ -6085,7 +6202,7 @@ def build_notebook() -> dict:
             stage1_family_parameter_sweep_complete = bool(
                 not RUN_STAGE1_FAMILY_PARAMETER_SWEEP
                 or (
-                    len(stage1_family_parameter_sweep_plan) == 144
+                    len(stage1_family_parameter_sweep_plan) == 72
                     and len(completed_stage1_family_parameter_sweep_items)
                     == len(stage1_family_parameter_sweep_plan)
                     and len(stage1_family_parameter_sweep_job_rows)

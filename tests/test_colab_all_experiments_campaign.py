@@ -80,11 +80,8 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
     assert "RUN_ALL_FORMAL_EXPERIMENTS = True" in source
     assert "RUN_STAGE1_END_TO_END_KRR = RUN_ALL_FORMAL_EXPERIMENTS" in source
     assert "RUN_STAGE1_FAMILY_PARAMETER_SWEEP = RUN_ALL_FORMAL_EXPERIMENTS" in source
-    assert "RUN_ORIGINAL_KRR_PROXY_FEASIBILITY = RUN_ALL_FORMAL_EXPERIMENTS" in source
-    assert (
-        "RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT = RUN_ALL_FORMAL_EXPERIMENTS"
-        in source
-    )
+    assert "RUN_ORIGINAL_KRR_PROXY_FEASIBILITY = False" in source
+    assert "RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT = False" in source
     assert "RUN_LITERATURE_BASELINE_PILOT = RUN_ALL_FORMAL_EXPERIMENTS" in source
     assert "RUN_LITERATURE_BASELINES_300M = RUN_ALL_FORMAL_EXPERIMENTS" in source
     assert "RUN_STAGE2_FIXED_AB_SOLVERS = RUN_ALL_FORMAL_EXPERIMENTS" in source
@@ -104,7 +101,12 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
     assert '"efgp-standard-jacobi", "efgp-standard-full-eig"' in source
     assert '"ours-binned-default"' in source
     assert "stage1_suite.build_profile_plan(" in source
-    assert "len(stage1_family_parameter_sweep_plan) != 144" in source
+    assert "len(stage1_family_parameter_sweep_plan) != 72" in source
+    assert "stage1_suite.dataset_execution_identity(" in stage1_source
+    assert "batch_groups.setdefault(batch_identity, []).append(item)" in stage1_source
+    assert '"cases": runtime_cases' in stage1_source
+    assert '"dataset_batch_reuse_enabled": True' in stage1_source
+    assert '"--no-resume"' not in stage1_source
     assert "or RUN_STAGE1_FAMILY_PARAMETER_SWEEP" in source
     assert "family_parameter_sweep_reporting.write_family_parameter_sweep_reports(" in source
     assert 'final_manifest["stage1_family_parameter_sweep"]' in source
@@ -186,6 +188,8 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
     assert "RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT" in configuration_source
     assert "RUN_LITERATURE_BASELINE_PILOT" in configuration_source
     assert "RUN_LITERATURE_BASELINES_300M" in configuration_source
+    assert 'synthetic_generation_args.append("--reuse-largest-prefix")' in source
+    assert "int(n_train) % 5_000_000 == 0" in source
     assert "if RUN_LITERATURE_BASELINES_300M:" in configuration_source
     assert 'stem = f"synthetic_true_func_2d_ntrain{int(n_train)}"' in formal_generator_source
     formal_validator_call = "validate_archived_synthetic_inputs(FORMAL_SCALE_SIZES)"
@@ -307,7 +311,7 @@ def test_formal_stage1_suite_matches_archived_noise03_generation_route() -> None
     )
 
 
-def test_matern_family_parameter_sweep_is_144_single_method_three_repeat_cases(
+def test_matern_family_parameter_sweep_is_72_single_method_three_repeat_cases(
     tmp_path: Path,
 ) -> None:
     suite = json.loads(STAGE1_SUITE_PATH.read_text(encoding="utf-8"))
@@ -319,7 +323,7 @@ def test_matern_family_parameter_sweep_is_144_single_method_three_repeat_cases(
         output_root=tmp_path / "outputs",
     )
 
-    assert len(plan) == 144
+    assert len(plan) == 72
     assert {item["dataset_family"] for item in plan} == {"Synthetic", "Winnebago"}
     assert {int(item["config"].n_train) for item in plan} == {
         10_000_000,

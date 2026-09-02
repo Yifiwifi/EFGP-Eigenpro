@@ -71,23 +71,42 @@ check. Canonical Stage-1 output reports configured/effective top-k, effective
 box size, selection rule, and the capacity-adaptation flag.
 
 The extension profile `matern_family_parameter_sweep_10m_300m` is a separate,
-predeclared parameter study. It expands to 144 single-method cases covering
+archived-A100-informed parameter study. It expands to 72 single-method cases covering
 Synthetic and Winnebago at 10M, 30M, 100M, and 300M. The inverse branch varies
 the asserted active box, while the active-eigenpair branch varies both the box
-and `q`, including the full-grid endpoint. Every point uses one warm-up and
+and `q`. Every point uses one warm-up and
 three measured repeats. The companion reporter writes `all_candidates` and
 `selected_winners` CSV/JSON artifacts; a winner must have exactly three
 successful repeats and minimizes median training total. RMSE is retained but
 is never used to filter or rank sweep candidates.
 
 The exact shortlist is size-stratified. At N={10M,30M}, the inverse family
-uses |B|={625,961,1369,2601,5329}; the eigen family uses
-(|B|,q)={(2601,192),(5329,192),(5329,256),
-(10609,192/256/320),(21025,192/256/320),
-(35721,128/192/256/320)}. At N={100M,300M}, the inverse family uses
-|B|={5329,10609,15625}; the eigen family uses
-|B|={25921,32761,35721} crossed with q={192,256,320,384,448}.
-The same declared list is used for Synthetic and Winnebago.
+uses |B|={625,2601,5329,7921}; the eigen family uses
+(|B|,q)={(5329,256),(10609,256/320),(35721,128/256/320)}.
+At N={100M,300M}, the inverse family uses |B|={5329,7921}; the eigen family
+uses |B|={32761,35721} crossed with q={256,320,384}. The same declared list is
+used for Synthetic and Winnebago. The B=7921 point is a prospective interpolation
+control (`topk=6250`), not an archived A100 winner. A CPU-only Fourier-weight
+geometry preflight verifies every declared top-k-to-box mapping, including
+`6250 -> 7921`, before dataset loading, CUDA initialization, or GPU work.
+
+Execution is ordered by exact `(dataset directory, stem, N, subset rule,
+test cap)` identity. In the 72-case sweep this reduces NPZ loads from 72 to
+8 and training-array host-to-device staging from at most 288 operations
+(`1 warm-up + 3 measured` per case) to 8. Only immutable host data and the
+staged training `x/y` arrays are reused. Every case still rebuilds and times
+its own Fourier system, preconditioner, solve, and prediction, and retains an
+independent output directory/checkpoint. Resume remains enabled inside each
+batch so a late failure does not rerun completed candidates.
+
+When multiple formal Synthetic sizes are missing, the notebook uses the
+chunk-aligned `--reuse-largest-prefix` route: it generates the largest training
+RNG stream once and serializes the smaller exact prefixes. For
+10M/30M/100M/300M with 5M chunks this reduces generated training rows from
+440M to 300M. The generator rejects an unaligned non-maximum size before
+creating work files; optional unaligned legacy sizes fall back to independent
+generation. The largest 300M training memmaps require about 6 GB of temporary
+local disk while the final NPZ files are written.
 
 Section 4.4 adds four independently constructed literature comparisons:
 `native-falkon-krr`, the published two-Cholesky FALKON preconditioner;
@@ -113,8 +132,15 @@ candidate through the recorded selection CSV/manifest. The final 300M
 comparison uses eight isolated single-method cases (Synthetic/Winnebago × four
 methods), so a failure can resume independently. Both profiles use one warm-up
 and three measured repeats and report prediction time separately from training.
+The notebook schedules all candidates for one dataset/N in one subprocess:
+the 10M pilot therefore uses two dataset batches and the gated 300M comparison
+uses two, while method outputs and resume checkpoints remain case-local.
 
-`original-krr-nystrom-pcg` is kept outside that scalable four-method gate. It
+`original-krr-nystrom-pcg` is kept outside that scalable four-method gate and
+is disabled by default in both one-click notebooks. Set
+`RUN_ORIGINAL_KRR_PROXY_FEASIBILITY=True` and/or
+`RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT=True` only for an explicit,
+isolated reproduction. It
 applies randomized column Nyström only as a PCG preconditioner while every
 operator application remains the exact blocked original data-space Matérn KRR
 matrix. `original_krr_proxy_feasibility` runs prefix subsets at N={10k,25k}

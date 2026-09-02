@@ -52,8 +52,6 @@ def test_extension_enables_only_requested_workloads() -> None:
     assert enabled == {
         "RUN_PLUMBING_SMOKE",
         "RUN_STAGE1_FAMILY_PARAMETER_SWEEP",
-        "RUN_ORIGINAL_KRR_PROXY_FEASIBILITY",
-        "RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT",
         "RUN_LITERATURE_BASELINE_PILOT",
         "RUN_LITERATURE_BASELINES_300M",
     }
