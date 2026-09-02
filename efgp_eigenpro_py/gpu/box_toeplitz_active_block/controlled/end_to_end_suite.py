@@ -72,6 +72,23 @@ FAMILY_SWEEP_METHODS = {
     "inverse": "ours-binned-inverse",
     "active_eig": "ours-binned-active-eig",
 }
+PUBLIC_100M_DATASET_FAMILIES = ("Synthetic", "Winnebago")
+PUBLIC_100M_METHODS = (
+    "efgp-standard-cg",
+    "ours-binned-inverse",
+    "ours-binned-active-eig",
+    "native-falkon-krr",
+    "matern-rff-ridge",
+    "randomized-nystrom-fourier-pcg",
+    "ski-kissgp-krr",
+)
+PUBLIC_RMSE_TIME_FIELDS = (
+    "dataset_family",
+    "n_train",
+    "method",
+    "median_time_seconds",
+    "rmse",
+)
 
 
 class TargetSelectionError(RuntimeError):
@@ -456,6 +473,11 @@ def build_profile_plan(
         )
     base = dict(suite["base"])
     base.update(profile_payload.get("overrides", {}))
+    post_case_overrides = profile_payload.get("post_case_overrides", {})
+    if not isinstance(post_case_overrides, dict):
+        raise ValueError(
+            f"profile {profile!r} post_case_overrides must be an object."
+        )
     plan: list[dict[str, Any]] = []
     is_family_sweep = "family_parameter_sweep" in profile_payload
     cases = _expand_family_parameter_sweep(
@@ -473,6 +495,11 @@ def build_profile_plan(
                 if key not in {"id", "dataset_family"}
             }
         )
+        # A source profile may carry method-specific historical fields on each
+        # case.  Dedicated reference profiles can explicitly replace those
+        # fields after source-case expansion without duplicating the dataset
+        # grid in JSON.
+        merged.update(post_case_overrides)
         merged["dataset_dir"] = str(dataset_dir)
         merged["output_dir"] = str(Path(output_root) / str(profile) / case_id)
         config = _normalize_config(merged)
@@ -860,6 +887,267 @@ def _write_index(path: Path, rows: list[dict[str, Any]]) -> None:
                         for key, value in row.items()
                     }
                 )
+
+
+def write_public_100m_rmse_time_table(
+    rows: Iterable[dict[str, Any]],
+    *,
+    output_base: str | Path,
+    internal_manifest_path: str | Path,
+) -> dict[str, Any]:
+    """Write the strict 100M RMSE--time table only when all 14 rows validate.
+
+    Detailed statuses, repeat counts, and configured/effective parameters are
+    retained solely in the internal manifest.  The public CSV and JSON use the
+    same exact five-field schema and are never produced from partial cases.
+    """
+
+    source_rows = [dict(row) for row in rows]
+    output_stem = Path(output_base)
+    csv_path = output_stem.with_suffix(".csv")
+    json_path = output_stem.with_suffix(".json")
+    manifest_path = Path(internal_manifest_path)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    # A rerun must never leave a previously valid-looking public table behind
+    # when the new internal validation fails.
+    for stale_public_path in (csv_path, json_path):
+        stale_public_path.unlink(missing_ok=True)
+
+    def normalize_family(row: dict[str, Any]) -> str:
+        raw = str(row.get("dataset_family", "")).strip()
+        key = raw.lower()
+        stem = str(row.get("dataset_stem", "")).lower()
+        joined = f"{key} {stem}"
+        if "synthetic" in joined:
+            return "Synthetic"
+        if "winnebago" in joined or "usgs" in joined:
+            return "Winnebago"
+        return raw
+
+    def finite_alias(row: dict[str, Any], aliases: Sequence[str]) -> float | None:
+        for name in aliases:
+            if name not in row:
+                continue
+            try:
+                value = float(row[name])
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(value):
+                return value
+        return None
+
+    expected_keys = {
+        (family, method)
+        for family in PUBLIC_100M_DATASET_FAMILIES
+        for method in PUBLIC_100M_METHODS
+    }
+    public_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    checks: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for index, row in enumerate(source_rows):
+        family = normalize_family(row)
+        method = str(row.get("method", "")).strip()
+        key = (family, method)
+        try:
+            n_train = int(row.get("n_train"))
+        except (TypeError, ValueError):
+            n_train = -1
+        median_time = finite_alias(
+            row,
+            ("median_time_seconds", "train_total_seconds_median"),
+        )
+        rmse = finite_alias(
+            row,
+            ("rmse", "test_rmse_median", "rmse_median"),
+        )
+        max_repeat_time = finite_alias(
+            row,
+            ("train_total_seconds_max", "max_time_seconds"),
+        )
+        if max_repeat_time is None and row.get("summary_path"):
+            try:
+                summary_path = Path(str(row["summary_path"]))
+                if summary_path.suffix.lower() == ".csv":
+                    with summary_path.open(
+                        "r", newline="", encoding="utf-8-sig"
+                    ) as handle:
+                        summary_payload = [dict(item) for item in csv.DictReader(handle)]
+                else:
+                    summary_payload = json.loads(
+                        summary_path.read_text(encoding="utf-8")
+                    )
+                summary_index = int(row.get("summary_row_index", 0))
+                summary_row = summary_payload[summary_index]
+                max_repeat_time = finite_alias(
+                    summary_row,
+                    ("train_total_seconds_max", "max_time_seconds"),
+                )
+            except (
+                OSError,
+                ValueError,
+                TypeError,
+                IndexError,
+                KeyError,
+                json.JSONDecodeError,
+            ):
+                max_repeat_time = None
+        status = str(row.get("status", "")).strip().lower()
+        try:
+            successful_repeats = int(row.get("successful_repeats"))
+        except (TypeError, ValueError):
+            successful_repeats = -1
+        configured_budget = finite_alias(
+            row,
+            ("configured_literature_baseline_case_time_budget_seconds",),
+        )
+        row_errors: list[str] = []
+        if key not in expected_keys:
+            row_errors.append(f"unexpected dataset/method {key!r}")
+        if n_train != 100_000_000:
+            row_errors.append(f"n_train={n_train}, expected 100000000")
+        if status != "ok":
+            row_errors.append(f"status={status!r}, expected 'ok'")
+        if successful_repeats != 3:
+            row_errors.append(
+                f"successful_repeats={successful_repeats}, expected 3"
+            )
+        if median_time is None or median_time <= 0.0:
+            row_errors.append("median time is missing, non-finite, or non-positive")
+        if rmse is None or rmse < 0.0:
+            row_errors.append("RMSE is missing, non-finite, or negative")
+        literature_method = method in {
+            "native-falkon-krr",
+            "matern-rff-ridge",
+            "randomized-nystrom-fourier-pcg",
+            "ski-kissgp-krr",
+        }
+        if max_repeat_time is None or max_repeat_time <= 0.0:
+            row_errors.append(
+                "maximum measured-repeat time is missing, non-finite, or non-positive"
+            )
+        if (
+            literature_method
+            and max_repeat_time is not None
+            and max_repeat_time > 300.0
+        ):
+            row_errors.append(
+                "literature baseline maximum measured-repeat time exceeds 300s"
+            )
+        if literature_method and configured_budget != 300.0:
+            row_errors.append(
+                "literature baseline configured shared case budget is not 300s"
+            )
+        if key in public_by_key:
+            row_errors.append(f"duplicate dataset/method {key!r}")
+        if row_errors:
+            errors.extend(f"row {index}: {message}" for message in row_errors)
+        elif key in expected_keys:
+            public_by_key[key] = {
+                "dataset_family": family,
+                "n_train": n_train,
+                "method": method,
+                "median_time_seconds": median_time,
+                "rmse": rmse,
+            }
+        parameters = {
+            name: value
+            for name, value in row.items()
+            if name.startswith("configured_")
+            or name.startswith("effective_")
+            or name
+            in {
+                "parameter_selection_policy",
+                "parameter_source",
+                "iterations_median",
+            }
+        }
+        checks.append(
+            {
+                "dataset_family": family,
+                "method": method,
+                "n_train": n_train,
+                "status": status,
+                "successful_repeats": successful_repeats,
+                "max_measured_repeat_time_seconds": max_repeat_time,
+                "parameters": parameters,
+                "errors": row_errors,
+            }
+        )
+
+    missing = sorted(expected_keys.difference(public_by_key))
+    if missing:
+        errors.append(f"missing required dataset/method rows: {missing!r}")
+    if len(source_rows) != len(expected_keys):
+        errors.append(
+            f"received {len(source_rows)} rows, expected {len(expected_keys)}"
+        )
+    complete = not errors and set(public_by_key) == expected_keys
+    internal_manifest = {
+        "schema": "internal_100m_rmse_time_comparison_v1",
+        "complete": complete,
+        "expected_n_train": 100_000_000,
+        "expected_dataset_families": list(PUBLIC_100M_DATASET_FAMILIES),
+        "expected_methods": list(PUBLIC_100M_METHODS),
+        "expected_rows": len(expected_keys),
+        "received_rows": len(source_rows),
+        "public_fields": list(PUBLIC_RMSE_TIME_FIELDS),
+        "public_rmse_time_table_csv_path": str(csv_path),
+        "public_rmse_time_table_json_path": str(json_path),
+        "row_checks": checks,
+        "errors": errors,
+    }
+    if not complete:
+        manifest_path.write_text(
+            json.dumps(internal_manifest, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+        raise RuntimeError(
+            "100M public RMSE-time table is incomplete; see internal manifest: "
+            f"{manifest_path}"
+        )
+
+    method_order = {method: index for index, method in enumerate(PUBLIC_100M_METHODS)}
+    family_order = {
+        family: index for index, family in enumerate(PUBLIC_100M_DATASET_FAMILIES)
+    }
+    public_rows = sorted(
+        public_by_key.values(),
+        key=lambda row: (
+            family_order[str(row["dataset_family"])],
+            method_order[str(row["method"])],
+        ),
+    )
+    try:
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with csv_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(PUBLIC_RMSE_TIME_FIELDS))
+            writer.writeheader()
+            writer.writerows(public_rows)
+        json_path.write_text(
+            json.dumps(public_rows, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception as exc:
+        for partial_public_path in (csv_path, json_path):
+            partial_public_path.unlink(missing_ok=True)
+        internal_manifest["complete"] = False
+        internal_manifest["errors"].append(
+            f"public artifact write failed: {type(exc).__name__}: {exc}"
+        )
+        manifest_path.write_text(
+            json.dumps(internal_manifest, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+        raise
+    manifest_path.write_text(
+        json.dumps(internal_manifest, indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+    return {
+        "csv_path": str(csv_path),
+        "json_path": str(json_path),
+        "internal_manifest_path": str(manifest_path),
+        "row_count": len(public_rows),
+    }
 
 
 def _load_completed_case(cfg: EndToEndConfig) -> dict[str, Any] | None:

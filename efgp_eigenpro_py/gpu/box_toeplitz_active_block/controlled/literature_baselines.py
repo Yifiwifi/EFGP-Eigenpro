@@ -109,6 +109,7 @@ class NativeFalkonKRRConfig:
     precision: str = "fp64"
     backend: str = "auto"
     preconditioner_jitter: float | None = None
+    time_budget_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -125,6 +126,7 @@ class MaternRFFRidgeConfig:
     prediction_chunk_size: int = 250_000
     precision: str = "fp64"
     backend: str = "auto"
+    time_budget_seconds: float | None = None
 
 
 @dataclass
@@ -565,6 +567,7 @@ def _validate_rff_config(cfg: MaternRFFRidgeConfig) -> None:
     _precision_dtypes(cfg.precision)
     if str(cfg.backend).strip().lower() not in {"auto", "numpy", "cupy"}:
         raise ValueError("backend must be 'auto', 'numpy', or 'cupy'.")
+    _validate_time_budget(cfg.time_budget_seconds)
 
 
 def sample_matern_rff_parameters(
@@ -643,6 +646,23 @@ def _sync_array_module(xp: Any) -> None:
         cuda.Stream.null.synchronize()
 
 
+def _validate_time_budget(value: float | None) -> None:
+    if value is not None and (
+        not math.isfinite(float(value)) or float(value) <= 0.0
+    ):
+        raise ValueError("time_budget_seconds must be positive or None.")
+
+
+def _check_deadline(
+    deadline: float | None,
+    timer: Callable[[], float],
+    *,
+    stage: str,
+) -> None:
+    if deadline is not None and timer() >= float(deadline):
+        raise TimeoutError(f"literature baseline time budget exhausted during {stage}")
+
+
 def _xp_dtype(xp: Any, precision: str) -> Any:
     _, dtype_name = _precision_dtypes(precision)
     return getattr(xp, dtype_name)
@@ -681,6 +701,7 @@ def _validate_native_falkon_config(cfg: NativeFalkonKRRConfig) -> None:
         or float(cfg.preconditioner_jitter) <= 0.0
     ):
         raise ValueError("preconditioner_jitter must be positive or None.")
+    _validate_time_budget(cfg.time_budget_seconds)
 
 
 def _native_kernel_cross(
@@ -766,6 +787,7 @@ def fit_native_falkon_krr(
     *,
     array_module: Any | None = None,
     timer: Callable[[], float] = time.perf_counter,
+    _deadline: float | None = None,
 ) -> tuple[NativeFalkonModel, dict[str, Any]]:
     """Fit restricted KRR with the native two-Cholesky FALKON solver.
 
@@ -782,6 +804,16 @@ def fit_native_falkon_krr(
     """
 
     _validate_native_falkon_config(cfg)
+    deadline = (
+        _deadline
+        if _deadline is not None
+        else (
+            None
+            if cfg.time_budget_seconds is None
+            else timer() + float(cfg.time_budget_seconds)
+        )
+    )
+    _check_deadline(deadline, timer, stage="native FALKON setup")
     n_train, dim = _validate_xy_shapes(x_train, y_train, prefix="train")
     xp = _resolve_backend(cfg.backend, array_module)
     dtype = _xp_dtype(xp, cfg.precision)
@@ -842,6 +874,7 @@ def fit_native_falkon_krr(
     chunk_size = int(cfg.train_chunk_size)
     chunks_per_pass = 0
     for start in range(0, n_train, chunk_size):
+        _check_deadline(deadline, timer, stage="native FALKON rhs accumulation")
         stop = min(n_train, start + chunk_size)
         kernel_block = _native_kernel_cross(
             xp, x_train[start:stop], centers, **kernel_kwargs
@@ -860,6 +893,7 @@ def fit_native_falkon_krr(
         nonlocal matvec_passes
         out = xp.zeros(center_count, dtype=dtype)
         for start in range(0, n_train, chunk_size):
+            _check_deadline(deadline, timer, stage="native FALKON streamed matvec")
             stop = min(n_train, start + chunk_size)
             kernel_block = _native_kernel_cross(
                 xp, x_train[start:stop], centers, **kernel_kwargs
@@ -899,6 +933,7 @@ def fit_native_falkon_krr(
     iterations = 0
     converged = relative_residual <= float(cfg.tolerance)
     while iterations < int(cfg.maxiter) and not converged:
+        _check_deadline(deadline, timer, stage="native FALKON CG")
         operator_direction = preconditioned_operator(direction)
         denominator = _device_scalar(xp.real(xp.vdot(direction, operator_direction)))
         if not math.isfinite(denominator) or denominator <= 0.0:
@@ -969,6 +1004,7 @@ def score_native_falkon_krr(
     *,
     prediction_chunk_size: int,
     timer: Callable[[], float] = time.perf_counter,
+    _deadline: float | None = None,
 ) -> dict[str, Any]:
     """Stream native FALKON prediction and regression metrics."""
 
@@ -995,6 +1031,7 @@ def score_native_falkon_krr(
     _sync_array_module(xp)
     prediction_start = timer()
     for start in range(0, n_test, chunk_size):
+        _check_deadline(_deadline, timer, stage="native FALKON prediction")
         stop = min(n_test, start + chunk_size)
         kernel_block = _native_kernel_cross(
             xp, x_test[start:stop], model.centers, **kernel_kwargs
@@ -1039,12 +1076,19 @@ def run_native_falkon_krr(
     n_test, test_dim = _validate_xy_shapes(x_test, y_test, prefix="test")
     if dim != test_dim:
         raise ValueError("training and test feature counts differ.")
+    _validate_time_budget(cfg.time_budget_seconds)
+    deadline = (
+        None
+        if cfg.time_budget_seconds is None
+        else timer() + float(cfg.time_budget_seconds)
+    )
     model, fit_diagnostics = fit_native_falkon_krr(
         x_train,
         y_train,
         cfg,
         array_module=array_module,
         timer=timer,
+        _deadline=deadline,
     )
     score = score_native_falkon_krr(
         model,
@@ -1052,6 +1096,7 @@ def run_native_falkon_krr(
         y_test,
         prediction_chunk_size=int(cfg.prediction_chunk_size),
         timer=timer,
+        _deadline=deadline,
     )
     canonical_family = (
         "matern"
@@ -1128,10 +1173,21 @@ def fit_matern_rff_ridge(
     *,
     array_module: Any | None = None,
     timer: Callable[[], float] = time.perf_counter,
+    _deadline: float | None = None,
 ) -> tuple[MaternRFFModel, dict[str, Any]]:
     """Fit RFF ridge while retaining only ``D x D`` sufficient statistics."""
 
     _validate_rff_config(cfg)
+    deadline = (
+        _deadline
+        if _deadline is not None
+        else (
+            None
+            if cfg.time_budget_seconds is None
+            else timer() + float(cfg.time_budget_seconds)
+        )
+    )
+    _check_deadline(deadline, timer, stage="Matérn RFF setup")
     n_train, dim = _validate_xy_shapes(x_train, y_train, prefix="train")
     xp = _resolve_array_module(cfg, array_module)
     dtype = _xp_dtype(xp, cfg.precision)
@@ -1153,6 +1209,7 @@ def fit_matern_rff_ridge(
     train_chunks = 0
     chunk_size = int(cfg.train_chunk_size)
     for start in range(0, n_train, chunk_size):
+        _check_deadline(deadline, timer, stage="Matérn RFF accumulation")
         stop = min(n_train, start + chunk_size)
         features = matern_rff_features(
             x_train[start:stop],
@@ -1169,6 +1226,7 @@ def fit_matern_rff_ridge(
     _sync_array_module(xp)
     accumulation_seconds = float(timer() - accumulation_start)
 
+    _check_deadline(deadline, timer, stage="Matérn RFF dense solve")
     solve_start = timer()
     diagonal = xp.arange(count)
     gram[diagonal, diagonal] += float(cfg.absolute_ridge)
@@ -1207,6 +1265,7 @@ def score_matern_rff_ridge(
     prediction_chunk_size: int,
     kernel_variance: float,
     timer: Callable[[], float] = time.perf_counter,
+    _deadline: float | None = None,
 ) -> dict[str, Any]:
     """Compute RMSE without materializing all RFF predictions or features."""
 
@@ -1226,6 +1285,7 @@ def score_matern_rff_ridge(
     _sync_array_module(xp)
     prediction_start = timer()
     for start in range(0, n_test, chunk_size):
+        _check_deadline(_deadline, timer, stage="Matérn RFF prediction")
         stop = min(n_test, start + chunk_size)
         features = matern_rff_features(
             x_test[start:stop],
@@ -1279,12 +1339,19 @@ def run_matern_rff_ridge(
     n_test, test_dim = _validate_xy_shapes(x_test, y_test, prefix="test")
     if dim != test_dim:
         raise ValueError("training and test feature counts differ.")
+    _validate_time_budget(cfg.time_budget_seconds)
+    deadline = (
+        None
+        if cfg.time_budget_seconds is None
+        else timer() + float(cfg.time_budget_seconds)
+    )
     model, fit_diagnostics = fit_matern_rff_ridge(
         x_train,
         y_train,
         cfg,
         array_module=array_module,
         timer=timer,
+        _deadline=deadline,
     )
     score = score_matern_rff_ridge(
         model,
@@ -1293,6 +1360,7 @@ def run_matern_rff_ridge(
         prediction_chunk_size=int(cfg.prediction_chunk_size),
         kernel_variance=float(cfg.kernel_variance),
         timer=timer,
+        _deadline=deadline,
     )
     return {
         "status": "ok",

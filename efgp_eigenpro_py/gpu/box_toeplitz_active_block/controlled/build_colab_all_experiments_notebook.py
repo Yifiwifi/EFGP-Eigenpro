@@ -95,6 +95,10 @@ def build_notebook() -> dict:
             RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT = False
             RUN_LITERATURE_BASELINE_PILOT = RUN_ALL_FORMAL_EXPERIMENTS
             RUN_LITERATURE_BASELINES_300M = RUN_ALL_FORMAL_EXPERIMENTS
+            # Focused Matérn extension only: these remain opt-in in the general
+            # one-click notebook so existing campaigns retain their old workload.
+            RUN_MATERN_UNBINNED_CG = False
+            RUN_LITERATURE_BASELINES_100M = False
             RUN_STAGE1_FAMILY_ROBUSTNESS = RUN_ALL_FORMAL_EXPERIMENTS
             RUN_STAGE1_FAMILY_KERNEL = RUN_ALL_FORMAL_EXPERIMENTS
             RUN_STAGE2_FIXED_AB_SOLVERS = RUN_ALL_FORMAL_EXPERIMENTS
@@ -105,6 +109,8 @@ def build_notebook() -> dict:
             ORIGINAL_KRR_RESOURCE_AUDIT_PROFILE = "original_krr_full_scale_resource_audit"
             LITERATURE_BASELINE_PILOT_PROFILE = "literature_baseline_pilot_10m"
             LITERATURE_BASELINES_300M_PROFILE = "literature_baselines_300m"
+            MATERN_UNBINNED_CG_PROFILE = "matern_unbinned_cg_10m_300m"
+            LITERATURE_BASELINES_100M_PROFILE = "literature_baselines_100m"
             STAGE1_FAMILY_KERNEL_PROFILE = "family_kernel_at_30m"
             STAGE1_METHODS = [
                 "nystrom-krr", "rpcholesky-krr", "efgp-standard-cg",
@@ -148,12 +154,15 @@ def build_notebook() -> dict:
                 RUN_ALL_FORMAL_EXPERIMENTS
                 or RUN_STAGE1_FAMILY_PARAMETER_SWEEP
                 or RUN_LITERATURE_BASELINES_300M
+                or RUN_MATERN_UNBINNED_CG
+                or RUN_LITERATURE_BASELINES_100M
             )
             ALLOW_300M = (
                 RUN_ALL_FORMAL_EXPERIMENTS
                 or RUN_STAGE1_FAMILY_PARAMETER_SWEEP
                 or RUN_LITERATURE_BASELINES_300M
                 or RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT
+                or RUN_MATERN_UNBINNED_CG
             )
             PREDICTION_AUDIT_MAX_TEST_N = 2_500_000
             PREDICTION_AUDIT_PROFILES = ["fixed_ab_selected_target"]
@@ -170,6 +179,8 @@ def build_notebook() -> dict:
                 or RUN_ORIGINAL_KRR_PROXY_FEASIBILITY
                 or RUN_LITERATURE_BASELINE_PILOT
                 or RUN_LITERATURE_BASELINES_300M
+                or RUN_MATERN_UNBINNED_CG
+                or RUN_LITERATURE_BASELINES_100M
             )
             GENERATE_ARCHIVED_SYNTHETIC_SIZES = []  # noise=.3 / chunk=5M / _ntrainN
             GENERATE_MANITOWOC_300M = False
@@ -183,6 +194,8 @@ def build_notebook() -> dict:
                 or RUN_ORIGINAL_KRR_PROXY_FEASIBILITY
                 or RUN_LITERATURE_BASELINE_PILOT
                 or RUN_LITERATURE_BASELINES_300M
+                or RUN_MATERN_UNBINNED_CG
+                or RUN_LITERATURE_BASELINES_100M
             ):
                 # Winnebago exact artifacts come from the catalog. Synthetic
                 # exact per-N files are generated locally if not already selected.
@@ -216,6 +229,10 @@ def build_notebook() -> dict:
                 requested_size_hints.extend([10_000_000, 100_000_000, 300_000_000])
             if RUN_LITERATURE_BASELINES_300M:
                 requested_size_hints.append(300_000_000)
+            if RUN_LITERATURE_BASELINES_100M:
+                requested_size_hints.append(100_000_000)
+            if RUN_MATERN_UNBINNED_CG:
+                requested_size_hints.extend(FORMAL_SCALE_SIZES)
             if RUN_STAGE1_FAMILY_PARAMETER_SWEEP:
                 requested_size_hints.append(300_000_000)
             MAX_REQUESTED_N = max(requested_size_hints or [0])
@@ -271,10 +288,12 @@ def build_notebook() -> dict:
     cells.append(
         _code(
             r"""
-            def run_cmd(args, *, cwd=None, env=None, check=True):
+            def run_cmd(args, *, cwd=None, env=None, check=True, timeout=None):
                 args = [str(x) for x in args]
                 print("+", " ".join(args))
-                return subprocess.run(args, cwd=cwd, env=env, check=check)
+                return subprocess.run(
+                    args, cwd=cwd, env=env, check=check, timeout=timeout
+                )
 
             if not LOCAL_REPO.exists():
                 run_cmd(["git", "clone", REPO_URL, str(LOCAL_REPO)])
@@ -1053,6 +1072,15 @@ def build_notebook() -> dict:
             STAGE1_FAMILY_PARAMETER_SWEEP_REPORT_ROOT = (
                 STAGE1_OUTPUT_ROOT / "matern_family_parameter_sweep_reports"
             )
+            STAGE1_MATERN_UNBINNED_CG_REPORT_ROOT = (
+                STAGE1_OUTPUT_ROOT / "matern_unbinned_cg_reports"
+            )
+            LITERATURE_BASELINES_100M_OUTPUT_BASE = (
+                STAGE1_OUTPUT_ROOT / "literature_baselines_100m_rmse_time"
+            )
+            LITERATURE_BASELINES_100M_INTERNAL_MANIFEST_PATH = (
+                STAGE1_OUTPUT_ROOT / "literature_baselines_100m_internal_manifest.json"
+            )
             STAGE1_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
             STAGE1_RUNTIME_CONFIG_ROOT.mkdir(parents=True, exist_ok=True)
             STAGE1_TARGET_PATH = STAGE1_OUTPUT_ROOT / "selected_target_regime.json"
@@ -1074,6 +1102,8 @@ def build_notebook() -> dict:
                 or RUN_ORIGINAL_KRR_PROXY_FEASIBILITY
                 or RUN_LITERATURE_BASELINE_PILOT
                 or RUN_LITERATURE_BASELINES_300M
+                or RUN_MATERN_UNBINNED_CG
+                or RUN_LITERATURE_BASELINES_100M
             ):
                 stage1_synthetic_inputs = validate_archived_synthetic_inputs(FORMAL_SCALE_SIZES)
                 if synthetic_family_manifest_path.is_file():
@@ -1143,6 +1173,18 @@ def build_notebook() -> dict:
                 dataset_dir=str(LOCAL_DATA_DIR),
                 output_root=STAGE1_OUTPUT_ROOT,
             )
+            matern_unbinned_cg_plan = stage1_suite.build_profile_plan(
+                stage1_config,
+                MATERN_UNBINNED_CG_PROFILE,
+                dataset_dir=str(LOCAL_DATA_DIR),
+                output_root=STAGE1_OUTPUT_ROOT,
+            )
+            literature_baselines_100m_plan = stage1_suite.build_profile_plan(
+                stage1_config,
+                LITERATURE_BASELINES_100M_PROFILE,
+                dataset_dir=str(LOCAL_DATA_DIR),
+                output_root=STAGE1_OUTPUT_ROOT,
+            )
             literature_expected_dataset_families = ("Synthetic", "Winnebago")
             literature_pilot_candidates_per_method = {
                 "native-falkon-krr": 2,
@@ -1197,6 +1239,25 @@ def build_notebook() -> dict:
             observed_literature_final_groups = {
                 (str(item.get("dataset_family")), str(item["config"].methods[0]))
                 for item in literature_baselines_300m_plan
+                if len(item["config"].methods) == 1
+            }
+            expected_matern_unbinned_cg_groups = {
+                (dataset_family, n_train)
+                for dataset_family in literature_expected_dataset_families
+                for n_train in FORMAL_SCALE_SIZES
+            }
+            observed_matern_unbinned_cg_groups = {
+                (str(item.get("dataset_family")), int(item["config"].n_train))
+                for item in matern_unbinned_cg_plan
+            }
+            expected_literature_100m_groups = {
+                (dataset_family, method)
+                for dataset_family in literature_expected_dataset_families
+                for method in SCALABLE_LITERATURE_END_TO_END_METHODS
+            }
+            observed_literature_100m_groups = {
+                (str(item.get("dataset_family")), str(item["config"].methods[0]))
+                for item in literature_baselines_100m_plan
                 if len(item["config"].methods) == 1
             }
             stage1_family_kernel_plan = stage1_suite.build_profile_plan(
@@ -1324,6 +1385,44 @@ def build_notebook() -> dict:
                     "per-method 10M pilot counts and dataset×method 300M cases; "
                     "all using one warmup and three measured repeats."
                 )
+            if (
+                len(matern_unbinned_cg_plan) != 8
+                or observed_matern_unbinned_cg_groups
+                != expected_matern_unbinned_cg_groups
+                or any(
+                    tuple(item["config"].methods) != ("efgp-standard-cg",)
+                    or str(item["config"].kernel_family) != "matern"
+                    or int(item["config"].warmup_repeats) != 1
+                    or int(item["config"].measured_repeats) != 3
+                    for item in matern_unbinned_cg_plan
+                )
+            ):
+                raise RuntimeError(
+                    "The Matérn unbinned-CG profile must contain exactly eight "
+                    "dataset×N single-method cases with one warmup and three "
+                    "measured repeats."
+                )
+            if (
+                len(literature_baselines_100m_plan) != 8
+                or observed_literature_100m_groups
+                != expected_literature_100m_groups
+                or any(
+                    int(item["config"].n_train) != 100_000_000
+                    or len(item["config"].methods) != 1
+                    or str(item["config"].methods[0])
+                    not in SCALABLE_LITERATURE_END_TO_END_METHODS
+                    or int(item["config"].measured_repeats) != 3
+                    or float(
+                        item["config"].literature_baseline_case_time_budget_seconds
+                    ) != 300.0
+                    for item in literature_baselines_100m_plan
+                )
+            ):
+                raise RuntimeError(
+                    "The final literature comparison must contain exactly eight "
+                    "dataset×method cases at N=100M, with three measured repeats "
+                    "inside one shared five-minute case budget."
+                )
 
             stage1_campaign_rows = []
             stage1_selected_case_records = []
@@ -1449,6 +1548,21 @@ def build_notebook() -> dict:
                         and not bool(globals().get("CAN_RUN_300M", False))
                     )
 
+                def stage1_batch_identity(item):
+                    dataset_identity = stage1_suite.dataset_execution_identity(
+                        item["config"]
+                    )
+                    if profile_label == LITERATURE_BASELINES_100M_PROFILE:
+                        # The final 100M baselines are deliberately isolated so
+                        # one stalled CUDA call cannot consume the timeout budget
+                        # of the other three methods for the same dataset.
+                        return (
+                            "isolated_100m_literature_case",
+                            item["case_id"],
+                            dataset_identity,
+                        )
+                    return dataset_identity
+
                 # Freeze resume state before launching any group. Otherwise later
                 # cases completed by the first batch subprocess would be mislabeled
                 # as pre-existing artifacts. Grouping is exact on dataset identity;
@@ -1461,9 +1575,7 @@ def build_notebook() -> dict:
                     initial_reuse_by_case[item["case_id"]] = (
                         stage1_completion_is_reusable(item)
                     )
-                    batch_identity = stage1_suite.dataset_execution_identity(
-                        item["config"]
-                    )
+                    batch_identity = stage1_batch_identity(item)
                     batch_groups.setdefault(batch_identity, []).append(item)
                 batch_group_ordinals = {
                     identity: index
@@ -1505,9 +1617,7 @@ def build_notebook() -> dict:
                         print(f"[Stage 1/{item['case_id']}] SKIPPED_HARDWARE")
                         continue
                     reused = bool(initial_reuse_by_case[item["case_id"]])
-                    batch_identity = stage1_suite.dataset_execution_identity(
-                        item["config"]
-                    )
+                    batch_identity = stage1_batch_identity(item)
                     status = "execution_error"
                     reason = ""
                     artifact_complete = False
@@ -1546,7 +1656,8 @@ def build_notebook() -> dict:
                                 "profiles": {
                                     profile_label: {
                                         "description": (
-                                            "Notebook runtime batch grouped by exact dataset identity"
+                                            "Notebook runtime batch grouped by exact dataset identity; "
+                                            "100M literature cases are hard-timeout isolated"
                                         ),
                                         "cases": runtime_cases,
                                     }
@@ -1563,6 +1674,50 @@ def build_notebook() -> dict:
                             batch_started = time.perf_counter()
                             batch_error = None
                             batch_return_code = None
+                            budgeted_batch_items = [
+                                batch_item
+                                for batch_item in batch_items
+                                if batch_item[
+                                    "config"
+                                ].literature_baseline_case_time_budget_seconds
+                                is not None
+                            ]
+                            isolated_100m_literature_case = (
+                                profile_label == LITERATURE_BASELINES_100M_PROFILE
+                            )
+                            # The 100M comparison gets an exact five-minute
+                            # process-level ceiling per dataset×method case,
+                            # covering data load, three repeats, export, and a
+                            # CUDA call that ignores cooperative deadlines.
+                            batch_hard_timeout_seconds = (
+                                None
+                                if not budgeted_batch_items
+                                else float(
+                                    budgeted_batch_items[0][
+                                        "config"
+                                    ].literature_baseline_case_time_budget_seconds
+                                )
+                                if isolated_100m_literature_case
+                                else float(
+                                    sum(
+                                        float(
+                                            batch_item[
+                                                "config"
+                                            ].literature_baseline_case_time_budget_seconds
+                                        )
+                                        for batch_item in budgeted_batch_items
+                                    )
+                                    + 300.0
+                                )
+                            )
+                            if (
+                                isolated_100m_literature_case
+                                and len(batch_items) != 1
+                            ):
+                                raise RuntimeError(
+                                    "100M literature hard-timeout isolation drifted: "
+                                    f"expected one case, got {len(batch_items)}."
+                                )
                             try:
                                 completed = run_cmd([
                                     sys.executable, "-m",
@@ -1571,7 +1726,8 @@ def build_notebook() -> dict:
                                     "--profile", profile_label,
                                     "--dataset-dir", str(LOCAL_DATA_DIR),
                                     "--output-root", str(STAGE1_OUTPUT_ROOT),
-                                ], cwd=LOCAL_REPO, check=False)
+                                ], cwd=LOCAL_REPO, check=False,
+                                    timeout=batch_hard_timeout_seconds)
                                 batch_return_code = int(completed.returncode)
                             except Exception as exc:
                                 batch_error = f"{type(exc).__name__}: {exc}"
@@ -1585,6 +1741,12 @@ def build_notebook() -> dict:
                                 "elapsed_seconds": time.perf_counter() - batch_started,
                                 "return_code": batch_return_code,
                                 "error": batch_error,
+                                "hard_timeout_seconds": batch_hard_timeout_seconds,
+                                "hard_timeout_scope": (
+                                    "single_100m_dataset_method_case_total_wall"
+                                    if isolated_100m_literature_case
+                                    else "dataset_batch_total_wall"
+                                ),
                                 "runtime_path": str(runtime_path),
                             }
                         completion_payload = load_matching_stage1_artifact(item)
@@ -1707,7 +1869,9 @@ def build_notebook() -> dict:
                         "invocation_mode": "resumed_existing" if reused else "executed",
                         "resumed_case_count": int(reused),
                         "executed_case_count": int(not reused),
-                        "dataset_batch_reuse_enabled": True,
+                        "dataset_batch_reuse_enabled": (
+                            profile_label != LITERATURE_BASELINES_100M_PROFILE
+                        ),
                         "dataset_batch_ordinal": launch.get(
                             "batch_ordinal", batch_group_ordinals[batch_identity]
                         ),
@@ -1719,6 +1883,12 @@ def build_notebook() -> dict:
                         ),
                         "dataset_batch_elapsed_seconds": launch.get(
                             "elapsed_seconds", 0.0
+                        ),
+                        "dataset_batch_hard_timeout_seconds": launch.get(
+                            "hard_timeout_seconds"
+                        ),
+                        "dataset_batch_hard_timeout_scope": launch.get(
+                            "hard_timeout_scope"
                         ),
                     })
                     print(
@@ -1738,6 +1908,15 @@ def build_notebook() -> dict:
                     frame["suite_profile"] = item["profile"]
                     frame["case_id"] = item["case_id"]
                     frame["dataset_family"] = declared_stage1_dataset_family(item)
+                    frame[
+                        "configured_literature_baseline_case_time_budget_seconds"
+                    ] = (
+                        None
+                        if cfg.literature_baseline_case_time_budget_seconds is None
+                        else float(
+                            cfg.literature_baseline_case_time_budget_seconds
+                        )
+                    )
                     frame["configured_native_falkon_nystrom_centers"] = (
                         int(cfg.native_falkon_nystrom_centers)
                     )
@@ -2253,17 +2432,166 @@ def build_notebook() -> dict:
 
             completed_stage1_family_parameter_sweep_items = []
             STAGE1_FAMILY_PARAMETER_SWEEP_REPORT_RESULT = None
+            FOCUSED_EXTENSION_REPORT_ERRORS = []
+
+            def record_focused_extension_error(stage, exc):
+                payload = {
+                    "stage": str(stage),
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                }
+                FOCUSED_EXTENSION_REPORT_ERRORS.append(payload)
+                print(
+                    "FOCUSED EXTENSION FAIL-CLOSED: "
+                    f"{payload['stage']}: {payload['error_type']}: "
+                    f"{payload['error_message']}"
+                )
+
             if RUN_STAGE1_FAMILY_PARAMETER_SWEEP:
                 completed_stage1_family_parameter_sweep_items = run_stage1_items(
                     stage1_family_parameter_sweep_plan,
                     profile_label=STAGE1_FAMILY_PARAMETER_SWEEP_PROFILE,
                 )
-                STAGE1_FAMILY_PARAMETER_SWEEP_REPORT_RESULT = (
-                    family_parameter_sweep_reporting.write_family_parameter_sweep_reports(
-                        stage1_family_parameter_sweep_plan,
-                        STAGE1_FAMILY_PARAMETER_SWEEP_REPORT_ROOT,
+                try:
+                    sweep_campaign_rows = [
+                        row
+                        for row in stage1_campaign_rows
+                        if row.get("profile")
+                        == STAGE1_FAMILY_PARAMETER_SWEEP_PROFILE
+                    ]
+                    if (
+                        len(completed_stage1_family_parameter_sweep_items) != 72
+                        or len(sweep_campaign_rows) != 72
+                        or any(
+                            not bool(row.get("artifact_complete"))
+                            or not bool(row.get("scientific_eligible"))
+                            for row in sweep_campaign_rows
+                        )
+                    ):
+                        raise RuntimeError(
+                            "B/q sweep must finish all 72 current-run cases before "
+                            "unbinned CG or 100M literature baselines may start."
+                        )
+                    STAGE1_FAMILY_PARAMETER_SWEEP_REPORT_RESULT = (
+                        family_parameter_sweep_reporting.write_family_parameter_sweep_reports(
+                            stage1_family_parameter_sweep_plan,
+                            STAGE1_FAMILY_PARAMETER_SWEEP_REPORT_ROOT,
+                        )
                     )
-                )
+                    if len(
+                        STAGE1_FAMILY_PARAMETER_SWEEP_REPORT_RESULT.get(
+                            "selected_winners", []
+                        )
+                    ) != 16:
+                        raise RuntimeError(
+                            "B/q sweep did not produce the required 16 current-run "
+                            "dataset/N/family winners."
+                        )
+                except Exception as exc:
+                    STAGE1_FAMILY_PARAMETER_SWEEP_REPORT_RESULT = None
+                    record_focused_extension_error("family_parameter_sweep_report", exc)
+
+            # Run the exact current-run unbinned Fourier-CG references immediately
+            # after a complete B/q report.  Validate all eight CG cases before
+            # spending GPU time on the final N=100M literature matrix.  Each profile
+            # is dataset-batched, so every dataset/N is loaded and staged once for
+            # all cases in that profile.
+            completed_matern_unbinned_cg_items = []
+            MATERN_UNBINNED_CG_REPORT_RESULT = None
+            if RUN_MATERN_UNBINNED_CG:
+                if STAGE1_FAMILY_PARAMETER_SWEEP_REPORT_RESULT is None:
+                    record_focused_extension_error(
+                        "unbinned_cg_gate",
+                        RuntimeError(
+                            "Matérn unbinned-CG requires all 16 current-run B/q winners."
+                        ),
+                    )
+                else:
+                    completed_matern_unbinned_cg_items = run_stage1_items(
+                        matern_unbinned_cg_plan,
+                        profile_label=MATERN_UNBINNED_CG_PROFILE,
+                    )
+                    try:
+                        MATERN_UNBINNED_CG_REPORT_RESULT = (
+                            family_parameter_sweep_reporting.write_unbinned_cg_comparison_reports(
+                                matern_unbinned_cg_plan,
+                                STAGE1_FAMILY_PARAMETER_SWEEP_REPORT_RESULT[
+                                    "selected_winners"
+                                ],
+                                STAGE1_MATERN_UNBINNED_CG_REPORT_ROOT,
+                                current_run_root=DRIVE_RUN_ROOT,
+                            )
+                        )
+                        if len(
+                            MATERN_UNBINNED_CG_REPORT_RESULT.get("comparisons", [])
+                        ) != 16:
+                            raise RuntimeError(
+                                "Unbinned-CG comparison did not cover all 16 "
+                                "dataset/N/family rows."
+                            )
+                    except Exception as exc:
+                        MATERN_UNBINNED_CG_REPORT_RESULT = None
+                        record_focused_extension_error(
+                            "unbinned_cg_comparison_report", exc
+                        )
+
+            completed_literature_baselines_100m_items = []
+            literature_baselines_100m_summary = pd.DataFrame()
+            LITERATURE_BASELINES_100M_PUBLIC_REPORT_RESULT = None
+            LITERATURE_BASELINES_100M_PUBLIC_REPORT_ATTEMPTED = False
+            if RUN_LITERATURE_BASELINES_100M:
+                if MATERN_UNBINNED_CG_REPORT_RESULT is None:
+                    record_focused_extension_error(
+                        "literature_baselines_100m_gate",
+                        RuntimeError(
+                            "Skipping the 100M literature matrix because the full "
+                            "16-row current-run CG comparison is unavailable."
+                        ),
+                    )
+                else:
+                    completed_literature_baselines_100m_items = run_stage1_items(
+                        literature_baselines_100m_plan,
+                        profile_label=LITERATURE_BASELINES_100M_PROFILE,
+                    )
+                    try:
+                        literature_baselines_100m_summary = (
+                            collect_literature_baseline_summaries(
+                                completed_literature_baselines_100m_items
+                            )
+                        )
+                        public_100m_rows = [
+                            *literature_baselines_100m_summary.to_dict("records"),
+                            *[
+                                row
+                                for row in STAGE1_FAMILY_PARAMETER_SWEEP_REPORT_RESULT[
+                                    "selected_winners"
+                                ]
+                                if int(row["n_train"]) == 100_000_000
+                            ],
+                            *[
+                                row
+                                for row in family_parameter_sweep_reporting.collect_unbinned_cg_reference_rows(
+                                    matern_unbinned_cg_plan,
+                                    current_run_root=DRIVE_RUN_ROOT,
+                                )
+                                if int(row["n_train"]) == 100_000_000
+                            ],
+                        ]
+                        LITERATURE_BASELINES_100M_PUBLIC_REPORT_ATTEMPTED = True
+                        LITERATURE_BASELINES_100M_PUBLIC_REPORT_RESULT = (
+                            stage1_suite.write_public_100m_rmse_time_table(
+                                public_100m_rows,
+                                output_base=LITERATURE_BASELINES_100M_OUTPUT_BASE,
+                                internal_manifest_path=(
+                                    LITERATURE_BASELINES_100M_INTERNAL_MANIFEST_PATH
+                                ),
+                            )
+                        )
+                    except Exception as exc:
+                        LITERATURE_BASELINES_100M_PUBLIC_REPORT_RESULT = None
+                        record_focused_extension_error(
+                            "literature_baselines_100m_public_report", exc
+                        )
 
             completed_literature_baselines_300m_items = []
             if RUN_LITERATURE_BASELINES_300M and literature_pilot_gate_ready:
@@ -5654,6 +5982,8 @@ def build_notebook() -> dict:
                     ORIGINAL_KRR_RESOURCE_AUDIT_PROFILE,
                     LITERATURE_BASELINE_PILOT_PROFILE,
                     LITERATURE_BASELINES_300M_PROFILE,
+                    MATERN_UNBINNED_CG_PROFILE,
+                    LITERATURE_BASELINES_100M_PROFILE,
                     STAGE1_FAMILY_KERNEL_PROFILE,
                     "family_robustness_at_selected_target",
                 }:
@@ -5744,6 +6074,9 @@ def build_notebook() -> dict:
                 ).hexdigest(),
                 "selected_data_bundles": DATA_BUNDLES,
                 "run_tag": RUN_TAG,
+                "focused_extension_report_errors": list(
+                    globals().get("FOCUSED_EXTENSION_REPORT_ERRORS", [])
+                ),
                 "active_sizes": [int(n) for n in ACTIVE_SIZES],
                 "independent_manitowoc_300m_status": (
                     "requested" if RUN_MANITOWOC_SCALE and 300_000_000 in ACTIVE_SIZES
@@ -6256,6 +6589,53 @@ def build_notebook() -> dict:
                 "complete": stage1_family_parameter_sweep_complete,
             }
             stage1_family_profiles_complete &= stage1_family_parameter_sweep_complete
+            matern_unbinned_cg_job_rows = [
+                row for row in stage1_campaign_rows
+                if row.get("profile") == MATERN_UNBINNED_CG_PROFILE
+            ]
+            matern_unbinned_cg_report_paths = {
+                key: str(path)
+                for key, path in (
+                    MATERN_UNBINNED_CG_REPORT_RESULT.get("paths", {}).items()
+                    if MATERN_UNBINNED_CG_REPORT_RESULT is not None
+                    else []
+                )
+            }
+            matern_unbinned_cg_complete = bool(
+                not RUN_MATERN_UNBINNED_CG
+                or (
+                    len(matern_unbinned_cg_plan) == 8
+                    and len(completed_matern_unbinned_cg_items)
+                    == len(matern_unbinned_cg_plan)
+                    and len(matern_unbinned_cg_job_rows)
+                    == len(matern_unbinned_cg_plan)
+                    and all(
+                        formal_campaign_job_passed(row)
+                        for row in matern_unbinned_cg_job_rows
+                    )
+                    and MATERN_UNBINNED_CG_REPORT_RESULT is not None
+                    and len(
+                        MATERN_UNBINNED_CG_REPORT_RESULT.get("comparisons", [])
+                    ) == 16
+                    and all(
+                        Path(path).is_file()
+                        for path in matern_unbinned_cg_report_paths.values()
+                    )
+                )
+            )
+            final_manifest["matern_unbinned_cg"] = {
+                "enabled": bool(RUN_MATERN_UNBINNED_CG),
+                "profile": MATERN_UNBINNED_CG_PROFILE,
+                "planned_cases": len(matern_unbinned_cg_plan),
+                "completed_cases": len(completed_matern_unbinned_cg_items),
+                "comparison_rows": (
+                    len(MATERN_UNBINNED_CG_REPORT_RESULT.get("comparisons", []))
+                    if MATERN_UNBINNED_CG_REPORT_RESULT is not None
+                    else 0
+                ),
+                "report_paths": matern_unbinned_cg_report_paths,
+                "complete": matern_unbinned_cg_complete,
+            }
             original_krr_proxy_job_rows = [
                 row for row in stage1_campaign_rows
                 if row.get("profile") == ORIGINAL_KRR_PROXY_PROFILE
@@ -6431,6 +6811,10 @@ def build_notebook() -> dict:
                 row for row in stage1_campaign_rows
                 if row.get("profile") == LITERATURE_BASELINES_300M_PROFILE
             ]
+            literature_baselines_100m_job_rows = [
+                row for row in stage1_campaign_rows
+                if row.get("profile") == LITERATURE_BASELINES_100M_PROFILE
+            ]
             literature_baseline_pilot_complete = bool(
                 not RUN_LITERATURE_BASELINE_PILOT
                 or (
@@ -6472,6 +6856,36 @@ def build_notebook() -> dict:
                     and LITERATURE_BASELINES_300M_SUMMARY_PATH.is_file()
                 )
             )
+            literature_baselines_100m_complete = bool(
+                not RUN_LITERATURE_BASELINES_100M
+                or (
+                    len(literature_baselines_100m_plan) == 8
+                    and len(completed_literature_baselines_100m_items)
+                    == len(literature_baselines_100m_plan)
+                    and len(literature_baselines_100m_summary)
+                    == len(literature_baselines_100m_plan)
+                    and len(literature_baselines_100m_job_rows)
+                    == len(literature_baselines_100m_plan)
+                    and all(
+                        formal_campaign_job_passed(row)
+                        for row in literature_baselines_100m_job_rows
+                    )
+                    and LITERATURE_BASELINES_100M_PUBLIC_REPORT_RESULT is not None
+                    and int(
+                        LITERATURE_BASELINES_100M_PUBLIC_REPORT_RESULT.get(
+                            "row_count", 0
+                        )
+                    ) == 14
+                    and all(
+                        Path(
+                            LITERATURE_BASELINES_100M_PUBLIC_REPORT_RESULT[key]
+                        ).is_file()
+                        for key in (
+                            "csv_path", "json_path", "internal_manifest_path"
+                        )
+                    )
+                )
+            )
             final_manifest["literature_baselines"] = {
                 "pilot": {
                     "enabled": bool(RUN_LITERATURE_BASELINE_PILOT),
@@ -6498,6 +6912,43 @@ def build_notebook() -> dict:
                     "single_method_cases": True,
                     "pilot_selection_gate_ready": bool(literature_pilot_gate_ready),
                     "complete": literature_baselines_300m_complete,
+                },
+                "final_100m": {
+                    "enabled": bool(RUN_LITERATURE_BASELINES_100M),
+                    "profile": LITERATURE_BASELINES_100M_PROFILE,
+                    "planned_cases": len(literature_baselines_100m_plan),
+                    "completed_cases": len(completed_literature_baselines_100m_items),
+                    "summary_rows": len(literature_baselines_100m_summary),
+                    "methods": list(SCALABLE_LITERATURE_END_TO_END_METHODS),
+                    "single_method_cases": True,
+                    "n_train": 100_000_000,
+                    "measured_repeats": 3,
+                    "shared_case_work_budget_seconds": 300.0,
+                    "isolated_subprocess_hard_timeout_seconds": 300.0,
+                    "public_rmse_time_table_csv_path": (
+                        str(LITERATURE_BASELINES_100M_PUBLIC_REPORT_RESULT["csv_path"])
+                        if LITERATURE_BASELINES_100M_PUBLIC_REPORT_RESULT is not None
+                        else None
+                    ),
+                    "public_rmse_time_table_json_path": (
+                        str(LITERATURE_BASELINES_100M_PUBLIC_REPORT_RESULT["json_path"])
+                        if LITERATURE_BASELINES_100M_PUBLIC_REPORT_RESULT is not None
+                        else None
+                    ),
+                    "internal_manifest_path": (
+                        str(LITERATURE_BASELINES_100M_INTERNAL_MANIFEST_PATH)
+                        if (
+                            LITERATURE_BASELINES_100M_PUBLIC_REPORT_ATTEMPTED
+                            and LITERATURE_BASELINES_100M_INTERNAL_MANIFEST_PATH.is_file()
+                        )
+                        else None
+                    ),
+                    "public_row_count": (
+                        int(LITERATURE_BASELINES_100M_PUBLIC_REPORT_RESULT["row_count"])
+                        if LITERATURE_BASELINES_100M_PUBLIC_REPORT_RESULT is not None
+                        else 0
+                    ),
+                    "complete": literature_baselines_100m_complete,
                 },
             }
             stage2_formal_complete = bool(
@@ -6534,6 +6985,7 @@ def build_notebook() -> dict:
                 or RUN_ORIGINAL_KRR_PROXY_FEASIBILITY
                 or RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT
                 or RUN_LITERATURE_BASELINE_PILOT or RUN_LITERATURE_BASELINES_300M
+                or RUN_MATERN_UNBINNED_CG or RUN_LITERATURE_BASELINES_100M
                 or RUN_LEGACY_GROUPS or selected_profiles or extra_suites
                 or RUN_PREDICTION_AUDIT
             )
@@ -6548,6 +7000,8 @@ def build_notebook() -> dict:
                 and original_krr_resource_audit_complete
                 and literature_baseline_pilot_complete
                 and literature_baselines_300m_complete
+                and matern_unbinned_cg_complete
+                and literature_baselines_100m_complete
                 and stage2_formal_complete
                 and two_stage_report_complete
                 and legacy_complete and controlled_complete

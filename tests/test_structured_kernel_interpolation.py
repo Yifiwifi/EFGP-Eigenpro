@@ -41,6 +41,27 @@ def _small_problem(seed: int = 0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return x_train, y_train, x_test
 
 
+def test_cg_can_stop_on_declared_original_system_residual() -> None:
+    diagonal = np.asarray([1.0, 2.0, 4.0], dtype=np.float64)
+    rhs = np.ones(3, dtype=np.float64)
+
+    _solution, diagnostics = ski._conjugate_gradient(
+        lambda vector: diagonal * vector,
+        rhs,
+        tolerance=1e-15,
+        maxiter=100,
+        preconditioner=None,
+        external_residual=lambda _candidate: 5e-4,
+        external_tolerance=1e-3,
+        external_check_interval=25,
+    )
+
+    assert diagnostics["iterations"] == 1
+    assert diagnostics["stopped_by_external_criterion"] is True
+    assert diagnostics["external_residual_checks"] == 1
+    assert diagnostics["external_relative_residual"] == pytest.approx(5e-4)
+
+
 def test_grid_covers_declared_domain_with_two_cubic_padding_points() -> None:
     grid = build_ski_grid_2d(
         ((0.0, 5.0 / 7.0), (0.0, 1.0)),

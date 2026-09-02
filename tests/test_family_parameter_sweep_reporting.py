@@ -14,9 +14,11 @@ from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.family_parameter_
     EXPECTED_SUCCESSFUL_REPEATS,
     SELECTION_RULE,
     collect_family_parameter_sweep_candidates,
+    collect_unbinned_cg_reference_rows,
     load_pipeline_summary,
     main,
     select_fastest_successful_medians,
+    write_unbinned_cg_comparison_reports,
     write_family_parameter_sweep_reports,
 )
 
@@ -281,6 +283,166 @@ class FamilyParameterSweepReportingTests(unittest.TestCase):
             self.assertEqual(len(csv_rows), 1)
             self.assertEqual(csv_rows[0]["B"], "289")
             self.assertEqual(csv_rows[0]["q"], "12")
+
+    def test_unbinned_cg_writer_aligns_current_run_time_rmse_and_speedup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_root = Path(tmp) / "current-run"
+            cg_dir = run_root / "cg" / "synthetic-n100m"
+            inverse_dir = run_root / "sweep" / "inverse"
+            eigen_dir = run_root / "sweep" / "eigen"
+            report_dir = run_root / "reports"
+            for path in (cg_dir, inverse_dir, eigen_dir):
+                path.mkdir(parents=True)
+
+            cg_summary_path = cg_dir / "pipeline_summary.json"
+            cg_summary_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "method": "efgp-standard-cg",
+                            "status": "ok",
+                            "successful_repeats": 3,
+                            "n_train": 100_000_000,
+                            "train_total_seconds_median": 10.0,
+                            "train_total_seconds_max": 10.5,
+                            "test_rmse_median": 0.2,
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            inverse_source = inverse_dir / "pipeline_summary.json"
+            eigen_source = eigen_dir / "pipeline_summary.json"
+            inverse_source.write_text("[]", encoding="utf-8")
+            eigen_source.write_text("[]", encoding="utf-8")
+            cg_plan = [
+                {
+                    "profile": "matern_unbinned_cg_10m_300m",
+                    "case_id": "synthetic-n100m",
+                    "dataset_family": "Synthetic",
+                    "config": {
+                        "methods": ["efgp-standard-cg"],
+                        "measured_repeats": 3,
+                        "n_train": 100_000_000,
+                        "output_dir": str(cg_dir),
+                    },
+                }
+            ]
+            shared_winner = {
+                "dataset_family": "Synthetic",
+                "n_train": 100_000_000,
+                "status": "ok",
+                "successful_repeats": 3,
+                "selection_eligible": True,
+                "selection_rank": 1,
+                "test_rmse_median": 0.21,
+            }
+            winners = [
+                {
+                    **shared_winner,
+                    "parameter_family": "inverse",
+                    "method": "ours-binned-inverse",
+                    "B": 5329,
+                    "q": None,
+                    "active_topk": 4096,
+                    "train_total_seconds_median": 2.0,
+                    "summary_path": str(inverse_source),
+                },
+                {
+                    **shared_winner,
+                    "parameter_family": "eigen",
+                    "method": "ours-binned-active-eig",
+                    "B": 35721,
+                    "q": 320,
+                    "active_topk": 35721,
+                    "train_total_seconds_median": 4.0,
+                    "summary_path": str(eigen_source),
+                },
+            ]
+
+            reference_rows = collect_unbinned_cg_reference_rows(
+                cg_plan,
+                current_run_root=run_root,
+            )
+            self.assertEqual(reference_rows[0]["status"], "ok")
+            self.assertEqual(reference_rows[0]["train_total_seconds_max"], 10.5)
+            self.assertEqual(reference_rows[0]["summary_row_index"], 0)
+
+            result = write_unbinned_cg_comparison_reports(
+                cg_plan,
+                winners,
+                report_dir,
+                current_run_root=run_root,
+            )
+
+            self.assertEqual(len(result["comparisons"]), 2)
+            by_family = {
+                row["parameter_family"]: row for row in result["comparisons"]
+            }
+            self.assertEqual(
+                by_family["inverse"]["speedup_unbinned_cg_over_family"], 5.0
+            )
+            self.assertEqual(
+                by_family["eigen"]["speedup_unbinned_cg_over_family"], 2.5
+            )
+            self.assertEqual(
+                by_family["inverse"]["unbinned_cg_test_rmse_median"], 0.2
+            )
+            self.assertEqual(
+                by_family["inverse"]["family_test_rmse_median"], 0.21
+            )
+            csv_rows = load_pipeline_summary(result["paths"]["comparison_csv"])
+            self.assertEqual(len(csv_rows), 2)
+            self.assertNotIn("status", csv_rows[0])
+            manifest = json.loads(
+                result["paths"]["manifest_json"].read_text(encoding="utf-8")
+            )
+            self.assertFalse(manifest["paired_repeats"])
+            self.assertEqual(manifest["comparison_row_count"], 2)
+            self.assertIn("values above 1", manifest["speedup_definition"])
+
+    def test_unbinned_cg_writer_rejects_archived_summary_outside_current_run(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            current_run = root / "current"
+            archived_case = root / "archive" / "cg"
+            archived_case.mkdir(parents=True)
+            current_run.mkdir()
+            (archived_case / "pipeline_summary.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "method": "efgp-standard-cg",
+                            "status": "ok",
+                            "successful_repeats": 3,
+                            "n_train": 10_000_000,
+                            "train_total_seconds_median": 1.0,
+                            "test_rmse_median": 0.1,
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            plan = [
+                {
+                    "dataset_family": "Synthetic",
+                    "config": {
+                        "methods": ["efgp-standard-cg"],
+                        "measured_repeats": 3,
+                        "n_train": 10_000_000,
+                        "output_dir": str(archived_case),
+                    },
+                }
+            ]
+            with self.assertRaisesRegex(ValueError, "outside current_run_root"):
+                write_unbinned_cg_comparison_reports(
+                    plan,
+                    [],
+                    current_run / "reports",
+                    current_run_root=current_run,
+                )
 
     def test_cli_accepts_serialized_plan_and_writes_required_filenames(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

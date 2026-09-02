@@ -119,6 +119,7 @@ class StructuredKernelInterpolationConfig:
     circulant_spectral_floor_relative: float = 1e-10
     require_convergence: bool = True
     backend: str = "numpy"
+    time_budget_seconds: float | None = None
 
 
 @dataclass
@@ -786,12 +787,26 @@ def fit_structured_kernel_interpolation(
     x_train: np.ndarray,
     y_train: np.ndarray,
     config: StructuredKernelInterpolationConfig,
+    *,
+    _deadline: float | None = None,
 ) -> StructuredKernelInterpolationModel:
     """Fit the fixed isotropic-Matérn SKI posterior mean/KRR model."""
 
     _validate_config(config)
+    deadline = (
+        _deadline
+        if _deadline is not None
+        else (
+            None
+            if config.time_budget_seconds is None
+            else time.perf_counter() + float(config.time_budget_seconds)
+        )
+    )
+    _check_deadline(deadline, stage="SKI setup")
     if str(config.backend).strip().lower() == "cupy":
-        return _fit_structured_kernel_interpolation_cupy(x_train, y_train, config)
+        return _fit_structured_kernel_interpolation_cupy(
+            x_train, y_train, config, _deadline=deadline
+        )
     points = _validate_x(x_train)
     targets = np.asarray(y_train).reshape(-1)
     if int(points.shape[0]) != int(targets.size):
@@ -844,32 +859,49 @@ def fit_structured_kernel_interpolation(
 
     system_setup_seconds = float(time.perf_counter() - system_setup_start)
     setup_seconds = float(time.perf_counter() - setup_start)
+    original_denominator = max(
+        float(np.linalg.norm(normal.rhs)), np.finfo(np.float64).tiny
+    )
+
+    def original_relative_residual_at(candidate: np.ndarray) -> float:
+        inducing_values = kernel_operator.matvec(candidate)
+        candidate_residual = normal.rhs - (
+            normal.matvec(inducing_values) + ridge * candidate
+        )
+        return float(np.linalg.norm(candidate_residual) / original_denominator)
+
     solve_start = time.perf_counter()
     beta, cg_diagnostics = _conjugate_gradient(
         symmetric_system_matvec,
         rhs,
         # The symmetric residual can modestly understate the residual of the
         # original inducing equation when K_UU is ill-conditioned.  Solve the
-        # symmetric system two decimal orders tighter, then audit the equation
+        # symmetric system at least two orders tighter and never looser than
+        # 1e-9, then audit the equation
         # that actually defines the SKI posterior mean below.
-        tolerance=max(float(config.cg_tolerance) * 0.01, np.finfo(float).eps),
+        tolerance=max(
+            min(float(config.cg_tolerance) * 0.01, 1e-9),
+            np.finfo(float).eps,
+        ),
         maxiter=int(config.cg_maxiter),
         preconditioner=preconditioner,
+        deadline=deadline,
+        external_residual=original_relative_residual_at,
+        external_tolerance=float(config.cg_tolerance),
+        external_check_interval=25,
     )
     inducing_prediction_values = kernel_operator.matvec(beta)
     original_residual = normal.rhs - (
         normal.matvec(inducing_prediction_values) + ridge * beta
     )
-    original_denominator = max(
-        float(np.linalg.norm(normal.rhs)), np.finfo(np.float64).tiny
-    )
     original_relative_residual = float(
         np.linalg.norm(original_residual) / original_denominator
     )
     solving_phase_seconds = float(time.perf_counter() - solve_start)
+    # The declared convergence contract is the original inducing equation.
+    # The tighter symmetric solve is an implementation aid, not a second gate.
     converged = bool(
-        cg_diagnostics["converged"]
-        and math.isfinite(original_relative_residual)
+        math.isfinite(original_relative_residual)
         and original_relative_residual <= float(config.cg_tolerance)
     )
     if bool(config.require_convergence) and not converged:
@@ -923,6 +955,12 @@ def fit_structured_kernel_interpolation(
         "cg_maxiter": int(config.cg_maxiter),
         "cg_iterations": int(cg_diagnostics["iterations"]),
         "cg_symmetric_relative_residual": float(cg_diagnostics["relative_residual"]),
+        "cg_original_residual_checks": int(
+            cg_diagnostics.get("external_residual_checks", 0)
+        ),
+        "cg_stopped_by_original_residual": bool(
+            cg_diagnostics.get("stopped_by_external_criterion", False)
+        ),
         "original_inducing_relative_residual": original_relative_residual,
         "converged": converged,
         "preconditioner": preconditioner_diagnostics,
@@ -955,10 +993,13 @@ def _fit_structured_kernel_interpolation_cupy(
     x_train: Any,
     y_train: Any,
     config: StructuredKernelInterpolationConfig,
+    *,
+    _deadline: float | None = None,
 ) -> StructuredKernelInterpolationModel:
     """Fit the production linear-SKI path entirely with CuPy/CuPyX operators."""
 
     cp, cupy_sparse = _load_cupy_backend()
+    _check_deadline(_deadline, stage="SKI GPU setup")
     n_train = _validate_paired_row_shapes(x_train, y_train, label="train")
     if n_train <= 0:
         raise ValueError("SKI fit requires at least one training row.")
@@ -988,6 +1029,7 @@ def _fit_structured_kernel_interpolation_cupy(
         chunk_size=int(config.train_chunk_size),
         array_module=cp,
         sparse_module=cupy_sparse,
+        deadline=_deadline,
     )
     _synchronize_cupy(cp)
     statistics_seconds = float(time.perf_counter() - statistics_start)
@@ -1014,30 +1056,48 @@ def _fit_structured_kernel_interpolation_cupy(
     _synchronize_cupy(cp)
     system_setup_seconds = float(time.perf_counter() - system_setup_start)
     setup_seconds = float(time.perf_counter() - setup_start)
+    original_denominator = max(
+        _cupy_scalar(cp.linalg.norm(normal.rhs)), np.finfo(np.float64).tiny
+    )
+
+    def original_relative_residual_at(candidate: Any) -> float:
+        inducing_values = kernel_operator.matvec(candidate)
+        candidate_residual = normal.rhs - (
+            normal.matvec(inducing_values) + ridge * candidate
+        )
+        return float(
+            _cupy_scalar(cp.linalg.norm(candidate_residual)) / original_denominator
+        )
+
     solve_start = time.perf_counter()
     beta, cg_diagnostics = _conjugate_gradient_cupy(
         symmetric_system_matvec,
         rhs,
-        tolerance=max(float(config.cg_tolerance) * 0.01, np.finfo(float).eps),
+        tolerance=max(
+            min(float(config.cg_tolerance) * 0.01, 1e-9),
+            np.finfo(float).eps,
+        ),
         maxiter=int(config.cg_maxiter),
         preconditioner=preconditioner,
         array_module=cp,
+        deadline=_deadline,
+        external_residual=original_relative_residual_at,
+        external_tolerance=float(config.cg_tolerance),
+        external_check_interval=25,
     )
     inducing_prediction_values = kernel_operator.matvec(beta)
     original_residual = normal.rhs - (
         normal.matvec(inducing_prediction_values) + ridge * beta
-    )
-    original_denominator = max(
-        _cupy_scalar(cp.linalg.norm(normal.rhs)), np.finfo(np.float64).tiny
     )
     original_relative_residual = float(
         _cupy_scalar(cp.linalg.norm(original_residual)) / original_denominator
     )
     _synchronize_cupy(cp)
     solving_phase_seconds = float(time.perf_counter() - solve_start)
+    # The user-facing convergence criterion is the residual of the original
+    # inducing equation; the tighter symmetric solve is only an internal aid.
     converged = bool(
-        cg_diagnostics["converged"]
-        and math.isfinite(original_relative_residual)
+        math.isfinite(original_relative_residual)
         and original_relative_residual <= float(config.cg_tolerance)
     )
     if bool(config.require_convergence) and not converged:
@@ -1091,6 +1151,12 @@ def _fit_structured_kernel_interpolation_cupy(
         "cg_maxiter": int(config.cg_maxiter),
         "cg_iterations": int(cg_diagnostics["iterations"]),
         "cg_symmetric_relative_residual": float(cg_diagnostics["relative_residual"]),
+        "cg_original_residual_checks": int(
+            cg_diagnostics.get("external_residual_checks", 0)
+        ),
+        "cg_stopped_by_original_residual": bool(
+            cg_diagnostics.get("stopped_by_external_criterion", False)
+        ),
         "original_inducing_relative_residual": original_relative_residual,
         "converged": converged,
         "preconditioner": preconditioner_diagnostics,
@@ -1128,10 +1194,21 @@ def run_structured_kernel_interpolation(
 ) -> dict[str, Any]:
     """Fit and evaluate SKI with streamed test metrics and explicit timing scope."""
 
-    model = fit_structured_kernel_interpolation(x_train, y_train, config)
+    deadline = (
+        None
+        if config.time_budget_seconds is None
+        else time.perf_counter() + float(config.time_budget_seconds)
+    )
+    model = fit_structured_kernel_interpolation(
+        x_train, y_train, config, _deadline=deadline
+    )
     if model.array_module is not np:
         return _evaluate_cupy_model(
-            model, x_train=x_train, x_test=x_test, y_test=y_test
+            model,
+            x_train=x_train,
+            x_test=x_test,
+            y_test=y_test,
+            deadline=deadline,
         )
     test_points = _validate_x(x_test)
     test_targets = np.asarray(y_test).reshape(-1)
@@ -1149,6 +1226,7 @@ def run_structured_kernel_interpolation(
     prediction_start = time.perf_counter()
     chunk = int(config.prediction_chunk_size)
     for start in range(0, int(test_points.shape[0]), chunk):
+        _check_deadline(deadline, stage="SKI prediction")
         stop = min(start + chunk, int(test_points.shape[0]))
         prediction = model.predict_chunk(test_points[start:stop])
         truth = np.asarray(test_targets[start:stop], dtype=np.float64)
@@ -1284,6 +1362,7 @@ def _accumulate_cupy_linear_normal_equations(
     chunk_size: int,
     array_module: Any,
     sparse_module: Any,
+    deadline: float | None = None,
 ) -> CuPyInterpolationNormalEquations2D:
     """Reduce 13 exact bilinear moments per row with GPU bincount kernels."""
 
@@ -1293,6 +1372,7 @@ def _accumulate_cupy_linear_normal_equations(
     gram_moments = cp.zeros((n_cells, 3, 3), dtype=cp.float64)
     rhs_moments = cp.zeros((n_cells, 2, 2), dtype=cp.float64)
     for start in range(0, n_rows, int(chunk_size)):
+        _check_deadline(deadline, stage="SKI sufficient-statistic accumulation")
         stop = min(start + int(chunk_size), n_rows)
         _left_x, _left_y, cell_ids, tx, ty = _cupy_linear_cell_coordinates(
             grid, x[start:stop], cp
@@ -1375,6 +1455,10 @@ def _conjugate_gradient_cupy(
     maxiter: int,
     preconditioner: Callable[[Any], Any] | None,
     array_module: Any,
+    deadline: float | None = None,
+    external_residual: Callable[[Any], float] | None = None,
+    external_tolerance: float | None = None,
+    external_check_interval: int = 25,
 ) -> tuple[Any, dict[str, Any]]:
     cp = array_module
     vector = cp.asarray(rhs, dtype=cp.float64).reshape(-1)
@@ -1396,7 +1480,21 @@ def _conjugate_gradient_cupy(
     direction = preconditioned.copy()
     relative_residual = 1.0
     iterations = 0
+    external_relative_residual = math.nan
+    external_checks = 0
+    stopped_by_external_criterion = False
+    if external_residual is not None and (
+        external_tolerance is None
+        or not math.isfinite(float(external_tolerance))
+        or float(external_tolerance) <= 0.0
+    ):
+        raise ValueError(
+            "external_tolerance must be finite and positive when supplied."
+        )
+    if int(external_check_interval) <= 0:
+        raise ValueError("external_check_interval must be positive.")
     for iteration in range(1, int(maxiter) + 1):
+        _check_deadline(deadline, stage="SKI CG")
         product = matvec(direction)
         denominator = _cupy_scalar(cp.dot(direction, product))
         scale = max(
@@ -1411,6 +1509,24 @@ def _conjugate_gradient_cupy(
         residual -= alpha * product
         relative_residual = _cupy_scalar(cp.linalg.norm(residual)) / rhs_norm
         iterations = iteration
+        should_check_external = bool(
+            external_residual is not None
+            and (
+                iteration == 1
+                or iteration % int(external_check_interval) == 0
+                or iteration == int(maxiter)
+                or relative_residual <= float(tolerance)
+            )
+        )
+        if should_check_external:
+            external_relative_residual = float(external_residual(solution))
+            external_checks += 1
+            if (
+                math.isfinite(external_relative_residual)
+                and external_relative_residual <= float(external_tolerance)
+            ):
+                stopped_by_external_criterion = True
+                break
         if relative_residual <= float(tolerance):
             break
         next_preconditioned = (
@@ -1422,9 +1538,15 @@ def _conjugate_gradient_cupy(
         direction = next_preconditioned + (next_rho / rho) * direction
         rho = next_rho
     return solution, {
-        "converged": bool(relative_residual <= float(tolerance)),
+        "converged": bool(
+            relative_residual <= float(tolerance)
+            or stopped_by_external_criterion
+        ),
         "iterations": int(iterations),
         "relative_residual": float(relative_residual),
+        "external_relative_residual": float(external_relative_residual),
+        "external_residual_checks": int(external_checks),
+        "stopped_by_external_criterion": bool(stopped_by_external_criterion),
     }
 
 
@@ -1454,6 +1576,7 @@ def _evaluate_cupy_model(
     x_train: Any,
     x_test: Any,
     y_test: Any,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     cp = model.array_module
     n_test = _validate_paired_row_shapes(x_test, y_test, label="test")
@@ -1467,6 +1590,7 @@ def _evaluate_cupy_model(
     prediction_start = time.perf_counter()
     chunk = int(model.config.prediction_chunk_size)
     for start in range(0, n_test, chunk):
+        _check_deadline(deadline, stage="SKI prediction")
         stop = min(start + chunk, n_test)
         prediction = model.predict_chunk(x_test[start:stop])
         truth = cp.asarray(y_test[start:stop], dtype=cp.float64).reshape(-1)
@@ -1542,6 +1666,11 @@ def _synchronize_cupy(array_module: Any) -> None:
     array_module.cuda.Stream.null.synchronize()
 
 
+def _check_deadline(deadline: float | None, *, stage: str) -> None:
+    if deadline is not None and time.perf_counter() >= float(deadline):
+        raise TimeoutError(f"SKI time budget exhausted during {stage}")
+
+
 def _validate_config(config: StructuredKernelInterpolationConfig) -> None:
     mode = _normalize_interpolation(config.interpolation)
     backend = str(config.backend).strip().lower()
@@ -1573,6 +1702,11 @@ def _validate_config(config: StructuredKernelInterpolationConfig) -> None:
     floor = float(config.circulant_spectral_floor_relative)
     if not math.isfinite(floor) or floor <= 0.0:
         raise ValueError("circulant_spectral_floor_relative must be positive.")
+    if config.time_budget_seconds is not None and (
+        not math.isfinite(float(config.time_budget_seconds))
+        or float(config.time_budget_seconds) <= 0.0
+    ):
+        raise ValueError("time_budget_seconds must be positive or None.")
     build_ski_grid_2d(
         config.grid_bounds,
         spacing=float(config.grid_spacing),
@@ -1721,6 +1855,10 @@ def _conjugate_gradient(
     tolerance: float,
     maxiter: int,
     preconditioner: Callable[[np.ndarray], np.ndarray] | None,
+    deadline: float | None = None,
+    external_residual: Callable[[np.ndarray], float] | None = None,
+    external_tolerance: float | None = None,
+    external_check_interval: int = 25,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     vector = np.asarray(rhs, dtype=np.float64).reshape(-1)
     solution = np.zeros_like(vector)
@@ -1737,7 +1875,21 @@ def _conjugate_gradient(
     direction = preconditioned.copy()
     relative_residual = 1.0
     iterations = 0
+    external_relative_residual = math.nan
+    external_checks = 0
+    stopped_by_external_criterion = False
+    if external_residual is not None and (
+        external_tolerance is None
+        or not math.isfinite(float(external_tolerance))
+        or float(external_tolerance) <= 0.0
+    ):
+        raise ValueError(
+            "external_tolerance must be finite and positive when supplied."
+        )
+    if int(external_check_interval) <= 0:
+        raise ValueError("external_check_interval must be positive.")
     for iteration in range(1, int(maxiter) + 1):
+        _check_deadline(deadline, stage="SKI CG")
         product = matvec(direction)
         denominator = float(np.dot(direction, product))
         scale = max(
@@ -1751,6 +1903,24 @@ def _conjugate_gradient(
         residual -= alpha * product
         relative_residual = float(np.linalg.norm(residual) / rhs_norm)
         iterations = iteration
+        should_check_external = bool(
+            external_residual is not None
+            and (
+                iteration == 1
+                or iteration % int(external_check_interval) == 0
+                or iteration == int(maxiter)
+                or relative_residual <= float(tolerance)
+            )
+        )
+        if should_check_external:
+            external_relative_residual = float(external_residual(solution))
+            external_checks += 1
+            if (
+                math.isfinite(external_relative_residual)
+                and external_relative_residual <= float(external_tolerance)
+            ):
+                stopped_by_external_criterion = True
+                break
         if relative_residual <= float(tolerance):
             break
         next_preconditioned = (
@@ -1763,9 +1933,15 @@ def _conjugate_gradient(
         preconditioned = next_preconditioned
         rho = next_rho
     return solution, {
-        "converged": bool(relative_residual <= float(tolerance)),
+        "converged": bool(
+            relative_residual <= float(tolerance)
+            or stopped_by_external_criterion
+        ),
         "iterations": int(iterations),
         "relative_residual": float(relative_residual),
+        "external_relative_residual": float(external_relative_residual),
+        "external_residual_checks": int(external_checks),
+        "stopped_by_external_criterion": bool(stopped_by_external_criterion),
     }
 
 

@@ -64,6 +64,7 @@ CANDIDATE_FIELDS = (
     "q",
     "active_topk",
     "train_total_seconds_median",
+    "train_total_seconds_max",
     "setup_seconds_median",
     "solving_phase_seconds_median",
     "test_rmse_median",
@@ -83,6 +84,28 @@ CANDIDATE_FIELDS = (
 WINNER_FIELDS = CANDIDATE_FIELDS + (
     "selection_rank",
     "fastest_time_tie_count",
+)
+
+UNBINNED_CG_METHOD = "efgp-standard-cg"
+UNBINNED_CG_SPEEDUP_DEFINITION = (
+    "unbinned_cg_train_total_seconds_median / "
+    "family_train_total_seconds_median; values above 1 mean the selected "
+    "preconditioner family is faster"
+)
+UNBINNED_CG_COMPARISON_FIELDS = (
+    "dataset_family",
+    "n_train",
+    "parameter_family",
+    "family_method",
+    "B",
+    "q",
+    "active_topk",
+    "unbinned_cg_method",
+    "unbinned_cg_train_total_seconds_median",
+    "unbinned_cg_test_rmse_median",
+    "family_train_total_seconds_median",
+    "family_test_rmse_median",
+    "speedup_unbinned_cg_over_family",
 )
 
 
@@ -131,6 +154,38 @@ def _optional_int(value: Any) -> int | None:
     if not math.isfinite(number) or not number.is_integer():
         return None
     return int(number)
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _require_finite_metric(
+    value: Any,
+    *,
+    label: str,
+    strictly_positive: bool = False,
+) -> float:
+    number = _optional_float(value)
+    if number is None or strictly_positive and number <= 0.0:
+        qualifier = "finite and positive" if strictly_positive else "finite"
+        raise ValueError(f"{label} must be {qualifier}, got {value!r}.")
+    return number
+
+
+def _require_path_within(path: str | Path, root: str | Path, *, label: str) -> Path:
+    resolved = Path(path).resolve()
+    resolved_root = Path(root).resolve()
+    try:
+        resolved.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ValueError(
+            f"{label} is outside current_run_root: {resolved} not under "
+            f"{resolved_root}."
+        ) from exc
+    return resolved
 
 
 def _resolve_summary_path(plan_entry: Mapping[str, Any], config: Mapping[str, Any]) -> Path:
@@ -342,6 +397,9 @@ def collect_family_parameter_sweep_candidates(
                 "q": q,
                 "active_topk": topk,
                 "train_total_seconds_median": train_total,
+                "train_total_seconds_max": _optional_float(
+                    row.get("train_total_seconds_max")
+                ),
                 "setup_seconds_median": _optional_float(
                     row.get("setup_seconds_median")
                 ),
@@ -543,6 +601,289 @@ def write_family_parameter_sweep_reports(
     }
 
 
+def collect_unbinned_cg_reference_rows(
+    suite_plan: Iterable[Mapping[str, Any] | Any],
+    *,
+    current_run_root: str | Path,
+) -> list[dict[str, Any]]:
+    """Load one complete three-repeat unbinned-CG median per dataset/size.
+
+    The run-root containment check prevents an extension notebook from silently
+    mixing the freshly measured family winners with an archived CG timing.  A
+    missing or incomplete CG row raises instead of creating a partial speedup
+    table.
+    """
+
+    references: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+    for entry_value in suite_plan:
+        entry = _mapping(entry_value)
+        config = _mapping(entry.get("config"))
+        methods = tuple(str(method) for method in config.get("methods", ()))
+        if methods != (UNBINNED_CG_METHOD,):
+            raise ValueError(
+                "unbinned-CG comparison plan must contain only "
+                f"{UNBINNED_CG_METHOD!r}; got {methods!r}."
+            )
+        if _optional_int(config.get("measured_repeats")) != EXPECTED_SUCCESSFUL_REPEATS:
+            raise ValueError(
+                "unbinned-CG comparison requires exactly three measured repeats."
+            )
+
+        source = _resolve_summary_path(entry, config)
+        source = _require_path_within(
+            source,
+            current_run_root,
+            label="unbinned-CG pipeline summary",
+        )
+        rows = load_pipeline_summary(source)
+        if len(rows) != 1 or str(rows[0].get("method", "")).strip() != UNBINNED_CG_METHOD:
+            raise ValueError(
+                "each unbinned-CG case must contain exactly one "
+                f"{UNBINNED_CG_METHOD!r} summary row: {source}"
+            )
+        row = rows[0]
+        status = str(row.get("status", "")).strip().lower()
+        successful_repeats = _optional_int(row.get("successful_repeats"))
+        if status != "ok" or successful_repeats != EXPECTED_SUCCESSFUL_REPEATS:
+            raise ValueError(
+                "unbinned-CG row is not a complete three-repeat measurement: "
+                f"{source}"
+            )
+
+        dataset_family = str(
+            _first_present(
+                entry.get("dataset_family"),
+                row.get("dataset_family"),
+                config.get("dataset_family"),
+            )
+            or ""
+        ).strip()
+        n_train = _optional_int(
+            _first_present(row.get("n_train"), config.get("n_train"))
+        )
+        if not dataset_family or n_train is None or n_train <= 0:
+            raise ValueError(
+                f"unbinned-CG row lacks a dataset family or positive N: {source}"
+            )
+        key = (dataset_family, n_train)
+        if key in seen:
+            raise ValueError(f"duplicate unbinned-CG dataset/size row: {key!r}.")
+        seen.add(key)
+
+        references.append(
+            {
+                "dataset_family": dataset_family,
+                "n_train": n_train,
+                "method": UNBINNED_CG_METHOD,
+                "status": status,
+                "train_total_seconds_median": _require_finite_metric(
+                    row.get("train_total_seconds_median"),
+                    label=f"{key!r} unbinned-CG training-time median",
+                    strictly_positive=True,
+                ),
+                "test_rmse_median": _require_finite_metric(
+                    row.get("test_rmse_median"),
+                    label=f"{key!r} unbinned-CG test-RMSE median",
+                ),
+                "train_total_seconds_max": _optional_float(
+                    row.get("train_total_seconds_max")
+                ),
+                "successful_repeats": successful_repeats,
+                "summary_path": str(source),
+                "summary_row_index": 0,
+            }
+        )
+    if not references:
+        raise ValueError("unbinned-CG comparison plan is empty.")
+    return sorted(
+        references,
+        key=lambda row: (
+            _sortable_text(row.get("dataset_family")),
+            _sortable_int(row.get("n_train")),
+        ),
+    )
+
+
+def build_unbinned_cg_speedup_rows(
+    cg_suite_plan: Iterable[Mapping[str, Any] | Any],
+    selected_family_winners: Iterable[Mapping[str, Any]],
+    *,
+    current_run_root: str | Path,
+) -> dict[str, Any]:
+    """Align current-run CG medians with both selected B/q family medians."""
+
+    cg_rows = collect_unbinned_cg_reference_rows(
+        cg_suite_plan,
+        current_run_root=current_run_root,
+    )
+    cg_by_key = {
+        (str(row["dataset_family"]), int(row["n_train"])): row for row in cg_rows
+    }
+
+    winner_by_key: dict[tuple[str, int, str], dict[str, Any]] = {}
+    winner_sources: set[str] = set()
+    for winner_value in selected_family_winners:
+        winner = dict(winner_value)
+        dataset_family = str(winner.get("dataset_family", "")).strip()
+        n_train = _optional_int(winner.get("n_train"))
+        parameter_family = str(winner.get("parameter_family", "")).strip()
+        if not dataset_family or n_train is None or parameter_family not in {
+            "inverse",
+            "eigen",
+        }:
+            raise ValueError(
+                "selected family winner lacks a valid dataset/N/family key: "
+                f"{winner!r}"
+            )
+        if (
+            str(winner.get("status", "")).strip().lower() != "ok"
+            or _optional_int(winner.get("successful_repeats"))
+            != EXPECTED_SUCCESSFUL_REPEATS
+            or not _truthy(winner.get("selection_eligible"))
+            or _optional_int(winner.get("selection_rank")) != 1
+        ):
+            raise ValueError(
+                "selected family winner is not a complete rank-1 three-repeat "
+                f"measurement: {(dataset_family, n_train, parameter_family)!r}."
+            )
+        source = _require_path_within(
+            str(winner.get("summary_path", "")),
+            current_run_root,
+            label="family-winner pipeline summary",
+        )
+        if not source.is_file():
+            raise FileNotFoundError(f"family-winner pipeline summary is missing: {source}")
+        winner_sources.add(str(source))
+        key = (dataset_family, n_train, parameter_family)
+        if key in winner_by_key:
+            raise ValueError(f"duplicate selected family winner: {key!r}.")
+        cooked = dict(winner)
+        cooked["train_total_seconds_median"] = _require_finite_metric(
+            winner.get("train_total_seconds_median"),
+            label=f"{key!r} family training-time median",
+            strictly_positive=True,
+        )
+        cooked["test_rmse_median"] = _require_finite_metric(
+            winner.get("test_rmse_median"),
+            label=f"{key!r} family test-RMSE median",
+        )
+        winner_by_key[key] = cooked
+
+    expected_winner_keys = {
+        (dataset_family, n_train, parameter_family)
+        for dataset_family, n_train in cg_by_key
+        for parameter_family in ("inverse", "eigen")
+    }
+    observed_winner_keys = set(winner_by_key)
+    if observed_winner_keys != expected_winner_keys:
+        raise ValueError(
+            "current-run CG/family coverage mismatch; "
+            f"missing={sorted(expected_winner_keys - observed_winner_keys)!r}, "
+            f"extra={sorted(observed_winner_keys - expected_winner_keys)!r}."
+        )
+
+    comparisons: list[dict[str, Any]] = []
+    for dataset_family, n_train, parameter_family in sorted(
+        expected_winner_keys,
+        key=lambda key: (
+            _sortable_text(key[0]),
+            _sortable_int(key[1]),
+            _sortable_text(key[2]),
+        ),
+    ):
+        cg_row = cg_by_key[(dataset_family, n_train)]
+        winner = winner_by_key[(dataset_family, n_train, parameter_family)]
+        family_time = float(winner["train_total_seconds_median"])
+        comparisons.append(
+            {
+                "dataset_family": dataset_family,
+                "n_train": n_train,
+                "parameter_family": parameter_family,
+                "family_method": winner.get("method"),
+                "B": _optional_int(winner.get("B")),
+                "q": _optional_int(winner.get("q")),
+                "active_topk": _optional_int(winner.get("active_topk")),
+                "unbinned_cg_method": UNBINNED_CG_METHOD,
+                "unbinned_cg_train_total_seconds_median": float(
+                    cg_row["train_total_seconds_median"]
+                ),
+                "unbinned_cg_test_rmse_median": float(cg_row["test_rmse_median"]),
+                "family_train_total_seconds_median": family_time,
+                "family_test_rmse_median": float(winner["test_rmse_median"]),
+                "speedup_unbinned_cg_over_family": float(
+                    cg_row["train_total_seconds_median"]
+                )
+                / family_time,
+            }
+        )
+
+    return {
+        "comparisons": comparisons,
+        "speedup_definition": UNBINNED_CG_SPEEDUP_DEFINITION,
+        "comparison_scope": "current_run_unpaired_three_repeat_median_ratio",
+        "expected_successful_repeats": EXPECTED_SUCCESSFUL_REPEATS,
+        "cg_source_pipeline_summaries": sorted(
+            str(row["summary_path"]) for row in cg_rows
+        ),
+        "family_source_pipeline_summaries": sorted(winner_sources),
+    }
+
+
+def write_unbinned_cg_comparison_reports(
+    cg_suite_plan: Iterable[Mapping[str, Any] | Any],
+    selected_family_winners: Iterable[Mapping[str, Any]],
+    output_dir: str | Path,
+    *,
+    current_run_root: str | Path,
+) -> dict[str, Any]:
+    """Write the final current-run Time/RMSE and CG-over-family speedup table."""
+
+    report = build_unbinned_cg_speedup_rows(
+        cg_suite_plan,
+        selected_family_winners,
+        current_run_root=current_run_root,
+    )
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    comparison_json = output / "unbinned_cg_vs_family_winners.json"
+    comparison_csv = output / "unbinned_cg_vs_family_winners.csv"
+    manifest_json = output / "unbinned_cg_comparison_manifest.json"
+    _write_json(comparison_json, report["comparisons"])
+    _write_csv(
+        comparison_csv,
+        report["comparisons"],
+        UNBINNED_CG_COMPARISON_FIELDS,
+    )
+    manifest = {
+        "schema_version": 1,
+        "comparison_scope": report["comparison_scope"],
+        "speedup_definition": report["speedup_definition"],
+        "expected_successful_repeats": report["expected_successful_repeats"],
+        "paired_repeats": False,
+        "comparison_row_count": len(report["comparisons"]),
+        "current_run_root": str(Path(current_run_root).resolve()),
+        "cg_source_pipeline_summaries": report["cg_source_pipeline_summaries"],
+        "family_source_pipeline_summaries": report[
+            "family_source_pipeline_summaries"
+        ],
+        "artifacts": {
+            "comparison_json": str(comparison_json),
+            "comparison_csv": str(comparison_csv),
+        },
+    }
+    _write_json(manifest_json, manifest)
+    return {
+        **report,
+        "manifest": manifest,
+        "paths": {
+            "comparison_json": comparison_json,
+            "comparison_csv": comparison_csv,
+            "manifest_json": manifest_json,
+        },
+    }
+
+
 def load_serialized_suite_plan(path: str | Path) -> list[dict[str, Any]]:
     """Load a JSON-serialized suite plan for the command-line entry point."""
 
@@ -639,10 +980,16 @@ __all__ = [
     "SELECTION_RULE",
     "METHOD_FAMILY",
     "GROUP_FIELDS",
+    "UNBINNED_CG_METHOD",
+    "UNBINNED_CG_SPEEDUP_DEFINITION",
+    "UNBINNED_CG_COMPARISON_FIELDS",
     "collect_family_parameter_sweep_candidates",
     "select_fastest_successful_medians",
     "build_family_parameter_sweep_reports",
     "write_family_parameter_sweep_reports",
+    "collect_unbinned_cg_reference_rows",
+    "build_unbinned_cg_speedup_rows",
+    "write_unbinned_cg_comparison_reports",
     "load_pipeline_summary",
     "load_serialized_suite_plan",
     "main",

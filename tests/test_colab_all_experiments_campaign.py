@@ -84,6 +84,8 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
     assert "RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT = False" in source
     assert "RUN_LITERATURE_BASELINE_PILOT = RUN_ALL_FORMAL_EXPERIMENTS" in source
     assert "RUN_LITERATURE_BASELINES_300M = RUN_ALL_FORMAL_EXPERIMENTS" in source
+    assert "RUN_MATERN_UNBINNED_CG = False" in source
+    assert "RUN_LITERATURE_BASELINES_100M = False" in source
     assert "RUN_STAGE2_FIXED_AB_SOLVERS = RUN_ALL_FORMAL_EXPERIMENTS" in source
     assert 'STAGE1_SCALE_PROFILE = "scale_10m_300m"' in source
     assert (
@@ -92,6 +94,8 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
     ) in source
     assert 'LITERATURE_BASELINE_PILOT_PROFILE = "literature_baseline_pilot_10m"' in source
     assert 'LITERATURE_BASELINES_300M_PROFILE = "literature_baselines_300m"' in source
+    assert 'MATERN_UNBINNED_CG_PROFILE = "matern_unbinned_cg_10m_300m"' in source
+    assert 'LITERATURE_BASELINES_100M_PROFILE = "literature_baselines_100m"' in source
     assert 'ORIGINAL_KRR_PROXY_PROFILE = "original_krr_proxy_feasibility"' in source
     assert (
         'ORIGINAL_KRR_RESOURCE_AUDIT_PROFILE = '
@@ -105,11 +109,29 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
     assert "stage1_suite.dataset_execution_identity(" in stage1_source
     assert "batch_groups.setdefault(batch_identity, []).append(item)" in stage1_source
     assert '"cases": runtime_cases' in stage1_source
-    assert '"dataset_batch_reuse_enabled": True' in stage1_source
+    assert '"isolated_100m_literature_case"' in stage1_source
+    assert "profile_label != LITERATURE_BASELINES_100M_PROFILE" in stage1_source
+    assert "batch_hard_timeout_seconds" in stage1_source
+    assert "timeout=batch_hard_timeout_seconds" in stage1_source
+    assert '"single_100m_dataset_method_case_total_wall"' in stage1_source
+    assert "expected one case" in stage1_source
     assert '"--no-resume"' not in stage1_source
     assert "or RUN_STAGE1_FAMILY_PARAMETER_SWEEP" in source
     assert "family_parameter_sweep_reporting.write_family_parameter_sweep_reports(" in source
     assert 'final_manifest["stage1_family_parameter_sweep"]' in source
+    assert "write_unbinned_cg_comparison_reports(" in source
+    assert "write_public_100m_rmse_time_table(" in source
+    assert 'FOCUSED_EXTENSION_REPORT_ERRORS = []' in source
+    assert "B/q sweep must finish all 72 current-run cases" in source
+    assert 'if MATERN_UNBINNED_CG_REPORT_RESULT is None:' in source
+    assert "Skipping the 100M literature matrix" in source
+    assert source.index("write_unbinned_cg_comparison_reports(") < source.index(
+        "profile_label=LITERATURE_BASELINES_100M_PROFILE,"
+    )
+    assert '"focused_extension_report_errors": list(' in source
+    assert 'final_manifest["matern_unbinned_cg"]' in source
+    assert "MATERN_UNBINNED_CG_PROFILE," in source
+    assert "LITERATURE_BASELINES_100M_PROFILE," in source
     assert '"resource_excluded_case_count"' in source
     assert '"all_candidates_executed_three_repeats"' in source
     assert '"completion_semantics"' in source
@@ -188,6 +210,8 @@ def test_one_click_plan_is_strictly_two_stage() -> None:
     assert "RUN_ORIGINAL_KRR_FULL_SCALE_RESOURCE_AUDIT" in configuration_source
     assert "RUN_LITERATURE_BASELINE_PILOT" in configuration_source
     assert "RUN_LITERATURE_BASELINES_300M" in configuration_source
+    assert "RUN_MATERN_UNBINNED_CG" in configuration_source
+    assert "RUN_LITERATURE_BASELINES_100M" in configuration_source
     assert 'synthetic_generation_args.append("--reuse-largest-prefix")' in source
     assert "int(n_train) % 5_000_000 == 0" in source
     assert "if RUN_LITERATURE_BASELINES_300M:" in configuration_source
@@ -412,6 +436,54 @@ def test_literature_baseline_profiles_have_frozen_pilot_and_300m_protocols(
     }
 
 
+def test_focused_extension_profiles_have_eight_three_repeat_cases(
+    tmp_path: Path,
+) -> None:
+    suite = json.loads(STAGE1_SUITE_PATH.read_text(encoding="utf-8"))
+    cg_plan = stage1_suite.build_profile_plan(
+        suite,
+        "matern_unbinned_cg_10m_300m",
+        dataset_dir=str(tmp_path / "data"),
+        output_root=tmp_path / "outputs",
+    )
+    baseline_plan = stage1_suite.build_profile_plan(
+        suite,
+        "literature_baselines_100m",
+        dataset_dir=str(tmp_path / "data"),
+        output_root=tmp_path / "outputs",
+    )
+
+    assert len(cg_plan) == 8
+    assert {
+        (item["dataset_family"], int(item["config"].n_train))
+        for item in cg_plan
+    } == {
+        (dataset_family, n_train)
+        for dataset_family in ("Synthetic", "Winnebago")
+        for n_train in (10_000_000, 30_000_000, 100_000_000, 300_000_000)
+    }
+    assert all(item["config"].methods == ("efgp-standard-cg",) for item in cg_plan)
+    assert all(int(item["config"].warmup_repeats) == 1 for item in cg_plan)
+    assert all(int(item["config"].measured_repeats) == 3 for item in cg_plan)
+
+    assert len(baseline_plan) == 8
+    assert all(int(item["config"].n_train) == 100_000_000 for item in baseline_plan)
+    assert all(int(item["config"].measured_repeats) == 3 for item in baseline_plan)
+    assert all(
+        float(item["config"].literature_baseline_case_time_budget_seconds)
+        == 300.0
+        for item in baseline_plan
+    )
+    assert {
+        (item["dataset_family"], item["config"].methods[0])
+        for item in baseline_plan
+    } == {
+        (dataset_family, method)
+        for dataset_family in ("Synthetic", "Winnebago")
+        for method in SCALABLE_LITERATURE_END_TO_END_METHODS
+    }
+
+
 def test_original_krr_proxy_and_resource_audit_profiles_are_isolated(
     tmp_path: Path,
 ) -> None:
@@ -587,6 +659,8 @@ def test_original_profiles_and_pilot_completion_truth_table() -> None:
         "ORIGINAL_KRR_RESOURCE_AUDIT_PROFILE": "original-resource",
         "LITERATURE_BASELINE_PILOT_PROFILE": "literature-pilot",
         "LITERATURE_BASELINES_300M_PROFILE": "literature-final",
+        "MATERN_UNBINNED_CG_PROFILE": "matern-unbinned-cg",
+        "LITERATURE_BASELINES_100M_PROFILE": "literature-100m",
         "STAGE1_FAMILY_KERNEL_PROFILE": "family-kernel",
     }
     exec(
@@ -618,6 +692,13 @@ def test_original_profiles_and_pilot_completion_truth_table() -> None:
         "scientific_eligible": False,
         "status": "complete_with_resource_limits",
     })
+    for profile in ("matern-unbinned-cg", "literature-100m"):
+        assert passed({
+            "profile": profile,
+            "artifact_complete": True,
+            "scientific_eligible": True,
+            "status": "claim_eligible_complete",
+        })
 
     completion = source.split(
         "literature_baseline_pilot_complete = bool(", 1

@@ -132,6 +132,7 @@ class ControlledConfig:
     l2_scaled: bool = True
     tol: float = 1e-7
     maxiter: int = 6000
+    method_time_budget_seconds: float | None = None
     zero_initial_vector: bool = True
     precision: str = "fp64"
     allow_near_epsilon_tol: bool = False
@@ -1136,6 +1137,11 @@ def _validate_config(
         raise ValueError("warmup_repeats must be nonnegative.")
     if float(cfg.tol) <= 0.0 or int(cfg.maxiter) <= 0:
         raise ValueError("tol and maxiter must be positive.")
+    if cfg.method_time_budget_seconds is not None and (
+        not math.isfinite(float(cfg.method_time_budget_seconds))
+        or float(cfg.method_time_budget_seconds) <= 0.0
+    ):
+        raise ValueError("method_time_budget_seconds must be positive or None.")
     if cfg.zero_initial_vector is not True:
         raise ValueError(
             "controlled comparisons require zero_initial_vector=true for every method."
@@ -2155,6 +2161,11 @@ def run_one_method(
         "status": "running",
     }
     method_stage = "preconditioner_build"
+    method_deadline = (
+        None
+        if cfg.method_time_budget_seconds is None
+        else time.perf_counter() + float(cfg.method_time_budget_seconds)
+    )
     try:
         if spec.kind == "cg":
             precond, precond_data, build_diag = None, None, {}
@@ -2172,7 +2183,12 @@ def run_one_method(
         row["build_seconds"] = float(build_seconds)
         matvec = _matvec_closure(system, op_ctx)
 
+        def _budget_trace(_snapshot: dict[str, Any]) -> None:
+            if method_deadline is not None and time.perf_counter() >= method_deadline:
+                raise TimeoutError("controlled method exhausted its time budget")
+
         def _solve() -> tuple[Any, int, float, dict[str, Any]]:
+            _budget_trace({})
             if precond is None:
                 return cg_solve_gpu(
                     backend,
@@ -2184,6 +2200,7 @@ def run_one_method(
                     return_stats=True,
                     work_prefix=f"controlled_{spec.label.replace('-', '_')}",
                     profile_components=False,
+                    trace_callback=_budget_trace,
                 )
             return pcg_solve_gpu(
                 backend,
@@ -2196,6 +2213,7 @@ def run_one_method(
                 return_stats=True,
                 work_prefix=f"controlled_{spec.label.replace('-', '_')}",
                 profile_components=False,
+                trace_callback=_budget_trace,
             )
 
         method_stage = "solve"

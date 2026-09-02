@@ -37,6 +37,7 @@ from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end import
     validate_dataset_generation_provenance,
 )
 from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end_suite import (
+    PUBLIC_100M_METHODS,
     _load_completed_case,
     build_profile_plan,
     load_suite_config,
@@ -44,6 +45,7 @@ from efgp_eigenpro_py.gpu.box_toeplitz_active_block.controlled.end_to_end_suite 
     materialize_family_robustness_plan,
     require_complete_plan,
     select_target_regime,
+    write_public_100m_rmse_time_table,
 )
 
 
@@ -110,6 +112,13 @@ def test_literature_baseline_config_is_validated() -> None:
         ski_grid_spacing=1.0 / 128.0,
     )
     _validate_config(cfg)
+    _validate_config(
+        replace(cfg, literature_baseline_case_time_budget_seconds=300.0)
+    )
+    with pytest.raises(ValueError, match="time_budget"):
+        _validate_config(
+            replace(cfg, literature_baseline_case_time_budget_seconds=0.0)
+        )
     with pytest.raises(ValueError, match="rff_num_features"):
         _validate_config(EndToEndConfig(rff_num_features=0))
     with pytest.raises(ValueError, match="matern-rff-ridge requires"):
@@ -125,6 +134,100 @@ def test_literature_baseline_config_is_validated() -> None:
         _validate_config(EndToEndConfig(fourier_nystrom_rank=0))
     with pytest.raises(ValueError, match="original_krr_nystrom_rank"):
         _validate_config(EndToEndConfig(original_krr_nystrom_rank=0))
+
+
+def test_literature_case_budget_is_shared_across_measured_repeats(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = EndToEndConfig(
+        dataset_stem="tiny_shared_budget",
+        n_train=2,
+        max_test_rows=1,
+        kernel_family="matern",
+        methods=("matern-rff-ridge",),
+        accuracy_reference_method="matern-rff-ridge",
+        warmup_repeats=0,
+        measured_repeats=3,
+        literature_baseline_case_time_budget_seconds=300.0,
+        output_dir=str(tmp_path / "shared-budget"),
+    )
+    dataset = {
+        "x": np.zeros((2, 2)),
+        "y": np.zeros(2),
+        "x_test": np.zeros((1, 2)),
+        "y_test": np.zeros(1),
+        "n_test": 1,
+        "source_n_train": 2,
+        "metadata": {},
+        "content_index_sha256": "content",
+        "metadata_sha256": "metadata",
+    }
+    preflight = {
+        "methods": {"matern-rff-ridge": {"status": "eligible"}},
+        "excluded_methods": [],
+        "all_methods_excluded": False,
+        "gpu_work_required": True,
+        "cuda_runtime_memory_queried": True,
+        "cuda_runtime_memory_query_attempted": True,
+        "cuda_runtime_memory_query_succeeded": True,
+    }
+    monkeypatch.setattr(
+        end_to_end_module,
+        "preflight_end_to_end_resources",
+        lambda *args, **kwargs: preflight,
+    )
+    monkeypatch.setattr(
+        end_to_end_module,
+        "_probe_available_device_bytes_without_allocation",
+        lambda: 10**12,
+    )
+    monkeypatch.setattr(
+        end_to_end_module, "load_end_to_end_dataset", lambda ignored: dataset
+    )
+    monkeypatch.setattr(
+        end_to_end_module, "_release_gpu_allocator_cache", lambda: None
+    )
+
+    observed_budgets: list[float | None] = []
+
+    def fake_pipeline_once(
+        method,
+        run_cfg,
+        run_dataset,
+        *,
+        repeat_idx,
+        is_warmup,
+        time_budget_seconds,
+    ):
+        observed_budgets.append(time_budget_seconds)
+        return {
+            **end_to_end_module._base_row(run_cfg, run_dataset, method),
+            "repeat_idx": repeat_idx,
+            "is_warmup": is_warmup,
+            "status": "ok",
+            "setup_seconds": 1.0,
+            "solving_phase_seconds": 1.0,
+            "train_total_seconds": 2.0,
+            "prediction_seconds": 0.1,
+            "test_rmse": 0.1,
+            "test_mae": 0.1,
+            "test_r2": 0.9,
+            "iterations": 1,
+        }
+
+    monkeypatch.setattr(end_to_end_module, "run_pipeline_once", fake_pipeline_once)
+    clock_values = iter((0.0, 0.0, 100.0, 100.0, 200.0, 200.0, 290.0))
+    monkeypatch.setattr(
+        end_to_end_module.time,
+        "perf_counter",
+        lambda: next(clock_values),
+    )
+
+    result = run_end_to_end_experiment(cfg)
+
+    assert observed_budgets == pytest.approx([300.0, 200.0, 100.0])
+    assert result["completion"]["observed_row_count"] == 3
 
 
 @pytest.mark.parametrize(
@@ -1434,6 +1537,46 @@ def test_shipped_family_profiles_separate_inverse_and_eigenpair_branches(
     assert all(item["config"].methods == FAMILY_END_TO_END_METHODS for item in kernel)
 
 
+def test_matern_unbinned_cg_profile_covers_full_scale_grid_with_three_repeats(
+    tmp_path: Path,
+) -> None:
+    suite = load_suite_config()
+    plan = build_profile_plan(
+        suite,
+        "matern_unbinned_cg_10m_300m",
+        dataset_dir=str(tmp_path / "data"),
+        output_root=tmp_path / "runs",
+    )
+
+    assert len(plan) == 8
+    assert {
+        (str(item["dataset_family"]), int(item["config"].n_train))
+        for item in plan
+    } == {
+        (dataset_family, n_train)
+        for dataset_family in ("Synthetic", "Winnebago")
+        for n_train in (10_000_000, 30_000_000, 100_000_000, 300_000_000)
+    }
+    assert all(item["config"].methods == ("efgp-standard-cg",) for item in plan)
+    assert all(item["config"].kernel_family == "matern" for item in plan)
+    assert all(item["config"].warmup_repeats == 1 for item in plan)
+    assert all(item["config"].measured_repeats == 3 for item in plan)
+    assert all(
+        item["config"].accuracy_reference_method == "efgp-standard-cg"
+        for item in plan
+    )
+    assert all(
+        item["config"].parameter_selection_policy
+        == "current_run_unbinned_fourier_cg_reference"
+        for item in plan
+    )
+    assert all(
+        item["config"].parameter_source.startswith("No B/q preconditioner")
+        for item in plan
+    )
+    assert len({item["config"].output_dir for item in plan}) == 8
+
+
 def test_matern_family_parameter_sweep_plan_size_coverage_and_repeats(
     tmp_path: Path,
 ) -> None:
@@ -1549,6 +1692,123 @@ def test_literature_baseline_profiles_are_executable_and_three_repeat(
     assert all(item["config"].ski_grid_spacing == 1.0 / 128.0 for item in final)
     assert all(item["config"].native_falkon_train_chunk_size == 250_000 for item in final)
     assert all(item["config"].rff_train_chunk_size == 250_000 for item in final)
+
+
+def test_literature_baselines_100m_are_fixed_budgeted_three_repeat(
+    tmp_path: Path,
+) -> None:
+    plan = build_profile_plan(
+        load_suite_config(),
+        "literature_baselines_100m",
+        dataset_dir=str(tmp_path / "data"),
+        output_root=tmp_path / "out",
+    )
+
+    assert len(plan) == 8
+    assert {
+        (item["dataset_family"], item["config"].methods[0]) for item in plan
+    } == {
+        (family, method)
+        for family in ("Synthetic", "Winnebago")
+        for method in SCALABLE_LITERATURE_END_TO_END_METHODS
+    }
+    assert all(item["config"].n_train == 100_000_000 for item in plan)
+    assert all(item["config"].warmup_repeats == 0 for item in plan)
+    assert all(item["config"].measured_repeats == 3 for item in plan)
+    assert all(
+        item["config"].literature_baseline_case_time_budget_seconds == 300.0
+        for item in plan
+    )
+    assert all(item["config"].native_falkon_nystrom_centers == 64 for item in plan)
+    assert all(item["config"].native_falkon_maxiter == 12 for item in plan)
+    assert all(item["config"].native_falkon_tolerance == 0.1 for item in plan)
+    assert all(item["config"].rff_num_features == 128 for item in plan)
+    assert all(item["config"].ski_grid_spacing == 1.0 / 64.0 for item in plan)
+    assert all(item["config"].ski_cg_tolerance == 1e-3 for item in plan)
+    nystrom_rank = {
+        item["dataset_family"]: item["config"].fourier_nystrom_rank
+        for item in plan
+        if item["config"].methods == ("randomized-nystrom-fourier-pcg",)
+    }
+    assert nystrom_rank == {"Synthetic": 512, "Winnebago": 256}
+
+
+def test_public_100m_rmse_time_writer_has_strict_five_field_schema(
+    tmp_path: Path,
+) -> None:
+    one_row_summary = tmp_path / "one_row_summary.json"
+    one_row_summary.write_text(
+        json.dumps([{"train_total_seconds_max": 2.5}]), encoding="utf-8"
+    )
+    one_row_csv_summary = tmp_path / "one_row_summary.csv"
+    one_row_csv_summary.write_text(
+        "train_total_seconds_max\n600.0\n", encoding="utf-8"
+    )
+    rows = [
+        {
+            "dataset_family": family,
+            "n_train": 100_000_000,
+            "method": method,
+            "status": "ok",
+            "successful_repeats": 3,
+            "train_total_seconds_median": 2.0,
+            "train_total_seconds_max": 2.5,
+            "test_rmse_median": 0.1,
+            "configured_rank": 64,
+            "configured_literature_baseline_case_time_budget_seconds": 300.0,
+        }
+        for family in ("Synthetic", "Winnebago")
+        for method in PUBLIC_100M_METHODS
+    ]
+    # The writer accepts an omitted index as a row-zero fallback and also
+    # handles the explicit index carried by selected-family winners.
+    rows[0].pop("train_total_seconds_max")
+    rows[0]["summary_path"] = str(one_row_summary)
+    rows[1].pop("train_total_seconds_max")
+    rows[1]["summary_path"] = str(one_row_csv_summary)
+    rows[1]["summary_row_index"] = 0
+    result = write_public_100m_rmse_time_table(
+        rows,
+        output_base=tmp_path / "public_rmse_time_100m",
+        internal_manifest_path=tmp_path / "internal_manifest.json",
+    )
+
+    payload = json.loads(Path(result["json_path"]).read_text(encoding="utf-8"))
+    assert len(payload) == 14
+    assert all(
+        list(row) == [
+            "dataset_family",
+            "n_train",
+            "method",
+            "median_time_seconds",
+            "rmse",
+        ]
+        for row in payload
+    )
+    header = Path(result["csv_path"]).read_text(encoding="utf-8").splitlines()[0]
+    assert header == "dataset_family,n_train,method,median_time_seconds,rmse"
+    manifest = json.loads(
+        Path(result["internal_manifest_path"]).read_text(encoding="utf-8")
+    )
+    assert manifest["complete"] is True
+    assert "configured_rank" in manifest["row_checks"][0]["parameters"]
+
+
+def test_public_100m_writer_fails_closed_without_partial_public_artifact(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "public_rmse_time_100m.csv").write_text("stale", encoding="utf-8")
+    (tmp_path / "public_rmse_time_100m.json").write_text("stale", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="incomplete"):
+        write_public_100m_rmse_time_table(
+            [],
+            output_base=tmp_path / "public_rmse_time_100m",
+            internal_manifest_path=tmp_path / "internal_manifest.json",
+        )
+    assert not (tmp_path / "public_rmse_time_100m.csv").exists()
+    assert not (tmp_path / "public_rmse_time_100m.json").exists()
+    manifest = json.loads((tmp_path / "internal_manifest.json").read_text())
+    assert manifest["complete"] is False
 
 
 def test_original_full_scale_profile_is_single_pre_dataset_exclusion(

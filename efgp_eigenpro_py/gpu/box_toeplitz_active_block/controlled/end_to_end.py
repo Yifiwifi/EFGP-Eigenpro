@@ -297,6 +297,12 @@ class EndToEndConfig:
     original_krr_max_prediction_pairs: int | None = 1_000_000_000
     original_krr_max_preconditioner_bytes: int | None = 4 * 1024**3
     literature_baseline_precision: str = "fp64"
+    # Shared method-work wall budget for every repeat in one dedicated
+    # literature case, excluding common dataset I/O.  The remaining allowance
+    # is passed to each successive repeat.  Expiry is recorded internally and
+    # suppresses the public RMSE--time artifact; it is never converted into a
+    # partial result.
+    literature_baseline_case_time_budget_seconds: float | None = None
     # Campaign-wide fail-closed resource gate.  The declared cap makes the
     # preflight deterministic off-device; when CUDA is available it is reduced
     # further to ``resource_preflight_available_memory_fraction`` of currently
@@ -692,6 +698,13 @@ def _validate_config(cfg: EndToEndConfig) -> None:
         "fp64",
     }:
         raise ValueError("literature_baseline_precision must be 'fp32' or 'fp64'.")
+    if cfg.literature_baseline_case_time_budget_seconds is not None and (
+        not math.isfinite(float(cfg.literature_baseline_case_time_budget_seconds))
+        or float(cfg.literature_baseline_case_time_budget_seconds) <= 0.0
+    ):
+        raise ValueError(
+            "literature_baseline_case_time_budget_seconds must be positive or None."
+        )
     if cfg.active_topk is not None and int(cfg.active_topk) <= 0:
         raise ValueError("active_topk must be positive or None.")
     for field_name in (
@@ -1880,7 +1893,9 @@ def _run_efgp_method(
     *,
     repeat_idx: int,
     is_warmup: bool,
+    time_budget_seconds: float | None = None,
 ) -> dict[str, Any]:
+    method_wall_start = time.perf_counter()
     effective_cfg = cfg
     if method == "randomized-nystrom-fourier-pcg":
         controlled_cfg = _fixed_config(
@@ -1975,6 +1990,15 @@ def _run_efgp_method(
     else:  # pragma: no cover - dispatch is validated before this helper
         raise ValueError(f"unsupported EFGP pipeline {method!r}")
 
+    if time_budget_seconds is not None:
+        remaining = float(time_budget_seconds) - (
+            time.perf_counter() - method_wall_start
+        )
+        if remaining <= 0.0:
+            raise TimeoutError("literature baseline case exhausted its time budget")
+        controlled_cfg = replace(
+            controlled_cfg, method_time_budget_seconds=float(remaining)
+        )
     method_row, beta = fixed_ab.run_one_method(
         system,
         controlled_cfg,
@@ -1998,6 +2022,10 @@ def _run_efgp_method(
     )
     _sync(xp)
     prediction_seconds = float(time.perf_counter() - t_pred)
+    if time_budget_seconds is not None and (
+        time.perf_counter() - method_wall_start > float(time_budget_seconds)
+    ):
+        raise TimeoutError("literature baseline case exhausted its time budget")
     selection = float(method_row.get("selection_seconds", 0.0))
     preconditioner_build = float(method_row["preconditioner_build_seconds"])
     solve = float(method_row["solve_seconds"])
@@ -2153,6 +2181,7 @@ def _run_literature_method(
     *,
     repeat_idx: int,
     is_warmup: bool,
+    time_budget_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Run an independently constructed, row-streamed literature baseline."""
 
@@ -2188,6 +2217,7 @@ def _run_literature_method(
             precision=str(cfg.literature_baseline_precision),
             backend="cupy",
             preconditioner_jitter=cfg.native_falkon_preconditioner_jitter,
+            time_budget_seconds=time_budget_seconds,
         )
         result = run_native_falkon_krr(
             dataset["x"],
@@ -2223,6 +2253,7 @@ def _run_literature_method(
             prediction_chunk_size=int(cfg.rff_prediction_chunk_size),
             precision=str(cfg.literature_baseline_precision),
             backend="cupy",
+            time_budget_seconds=time_budget_seconds,
         )
         result = run_matern_rff_ridge(
             dataset["x"],
@@ -2268,6 +2299,7 @@ def _run_literature_method(
             ),
             require_convergence=bool(cfg.ski_require_convergence),
             backend="cupy",
+            time_budget_seconds=time_budget_seconds,
         )
         result = run_structured_kernel_interpolation(
             dataset["x"],
@@ -2286,6 +2318,13 @@ def _run_literature_method(
             "effective_ski_grid_spacing": float(diagnostics["grid_spacing"]),
             "effective_ski_grid_shape": list(diagnostics["grid_shape"]),
             "effective_ski_grid_size": int(diagnostics["grid_size"]),
+            "effective_ski_cg_iterations": int(diagnostics["cg_iterations"]),
+            "effective_ski_original_residual_checks": int(
+                diagnostics.get("cg_original_residual_checks", 0)
+            ),
+            "effective_ski_stopped_by_original_residual": bool(
+                diagnostics.get("cg_stopped_by_original_residual", False)
+            ),
             "ski_original_inducing_relative_residual": float(
                 diagnostics["original_inducing_relative_residual"]
             ),
@@ -2565,6 +2604,11 @@ def _base_row(
         "configured_literature_baseline_precision": str(
             cfg.literature_baseline_precision
         ),
+        "configured_literature_baseline_case_time_budget_seconds": (
+            None
+            if cfg.literature_baseline_case_time_budget_seconds is None
+            else float(cfg.literature_baseline_case_time_budget_seconds)
+        ),
         "accuracy_max_rmse": cfg.accuracy_max_rmse,
         "accuracy_min_r2": cfg.accuracy_min_r2,
         "gpu_allocator_cache_reset_between_pipelines": True,
@@ -2654,6 +2698,7 @@ def run_pipeline_once(
     *,
     repeat_idx: int,
     is_warmup: bool,
+    time_budget_seconds: float | None = None,
 ) -> dict[str, Any]:
     base = _base_row(cfg, dataset, method)
     try:
@@ -2663,11 +2708,21 @@ def run_pipeline_once(
             )
         elif method in LITERATURE_ADAPTER_END_TO_END_METHODS:
             row = _run_literature_method(
-                method, cfg, dataset, repeat_idx=repeat_idx, is_warmup=is_warmup
+                method,
+                cfg,
+                dataset,
+                repeat_idx=repeat_idx,
+                is_warmup=is_warmup,
+                time_budget_seconds=time_budget_seconds,
             )
         else:
             row = _run_efgp_method(
-                method, cfg, dataset, repeat_idx=repeat_idx, is_warmup=is_warmup
+                method,
+                cfg,
+                dataset,
+                repeat_idx=repeat_idx,
+                is_warmup=is_warmup,
+                time_budget_seconds=time_budget_seconds,
             )
         return {**base, **row}
     except MemoryError as exc:
@@ -2872,6 +2927,7 @@ def summarize_pipeline_rows(
                     "configured_resource_preflight_max_dense_inverse_work",
                     "configured_strict_gpu_eig",
                     "configured_literature_baseline_precision",
+                    "configured_literature_baseline_case_time_budget_seconds",
                     "effective_nystrom_centers",
                     "native_falkon_penalty",
                     "native_falkon_relative_residual",
@@ -2882,6 +2938,9 @@ def summarize_pipeline_rows(
                     "effective_ski_interpolation",
                     "effective_ski_grid_spacing",
                     "effective_ski_grid_shape",
+                    "effective_ski_cg_iterations",
+                    "effective_ski_original_residual_checks",
+                    "effective_ski_stopped_by_original_residual",
                     "effective_original_krr_nystrom_rank",
                     "original_krr_true_relative_residual",
                     "original_krr_exact_matvec_count",
@@ -3304,6 +3363,8 @@ def run_end_to_end_experiment(
     else:
         dataset, dataset_reused_from_batch_cache = batch_cache.acquire_dataset(cfg)
     rows: list[dict[str, Any]] = []
+    case_budget_seconds = cfg.literature_baseline_case_time_budget_seconds
+    case_method_work_started = time.perf_counter()
     total_repeats = int(cfg.warmup_repeats) + int(cfg.measured_repeats)
     for repeat in range(total_repeats):
         is_warmup = repeat < int(cfg.warmup_repeats)
@@ -3327,13 +3388,57 @@ def run_end_to_end_experiment(
                         "Resource preflight marked a method runnable without a dataset."
                     )
                 _release_gpu_allocator_cache()
-                row = run_pipeline_once(
-                    method,
-                    cfg,
-                    dataset,
-                    repeat_idx=repeat_idx,
-                    is_warmup=is_warmup,
+                remaining_case_budget = (
+                    None
+                    if case_budget_seconds is None
+                    else float(case_budget_seconds)
+                    - (time.perf_counter() - case_method_work_started)
                 )
+                if (
+                    remaining_case_budget is not None
+                    and remaining_case_budget <= 0.0
+                ):
+                    row = {
+                        **_base_row(cfg, dataset, method),
+                        "repeat_idx": int(repeat_idx),
+                        "is_warmup": bool(is_warmup),
+                        "status": "error",
+                        "error_type": "TimeoutError",
+                        "error_message": (
+                            "literature baseline case exhausted its shared "
+                            "method-work time budget"
+                        ),
+                        "setup_seconds": math.nan,
+                        "solving_phase_seconds": math.nan,
+                        "train_total_seconds": math.nan,
+                        "test_rmse": math.nan,
+                    }
+                else:
+                    row = run_pipeline_once(
+                        method,
+                        cfg,
+                        dataset,
+                        repeat_idx=repeat_idx,
+                        is_warmup=is_warmup,
+                        time_budget_seconds=remaining_case_budget,
+                    )
+                    if case_budget_seconds is not None and (
+                        time.perf_counter() - case_method_work_started
+                        > float(case_budget_seconds)
+                    ):
+                        row = {
+                            **row,
+                            "status": "error",
+                            "error_type": "TimeoutError",
+                            "error_message": (
+                                "literature baseline case exceeded its shared "
+                                "method-work time budget"
+                            ),
+                            "setup_seconds": math.nan,
+                            "solving_phase_seconds": math.nan,
+                            "train_total_seconds": math.nan,
+                            "test_rmse": math.nan,
+                        }
             rows.append(row)
             _write_rows(output / "pipeline_runs.json", rows)
             _write_rows(output / "pipeline_runs.csv", rows)
